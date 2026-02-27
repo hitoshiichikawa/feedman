@@ -5,9 +5,10 @@
 # - worker: Goワーカー（workerサブコマンド）
 # - db:     PostgreSQL 16
 #
-# ネットワーク設計（egress制限）:
+# ネットワーク設計:
 # - internal: API <-> DB, Worker <-> DB の内部通信専用（外部通信不可）
-# - external: Worker のみ接続し、外部RSS/Atomフィードのフェッチを許可
+# - external: API（ポート公開用）とWorker（外部フィードフェッチ用）が接続
+#   ※API自身はSSRFをアプリケーション層（safeurl）で防止
 
 services:
   api:
@@ -36,6 +37,7 @@ services:
         condition: service_healthy
     networks:
       - internal
+      - external
     restart: unless-stopped
 
   worker:

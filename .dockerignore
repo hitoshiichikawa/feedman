@@ -20,5 +20,8 @@ docker-compose.yml
 *_test.go
 *.md
 
+# フロントエンド（Go ビルドに不要）
+web/
+
 # バイナリ・ビルド成果物
 /feedman
