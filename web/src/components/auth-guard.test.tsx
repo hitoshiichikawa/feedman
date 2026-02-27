@@ -1,7 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { CSRFProvider } from "@/lib/csrf";
 import { AuthGuard } from "./auth-guard";
 import type { ReactNode } from "react";
 
@@ -26,7 +25,7 @@ function createWrapper() {
   return function Wrapper({ children }: { children: ReactNode }) {
     return (
       <QueryClientProvider client={queryClient}>
-        <CSRFProvider>{children}</CSRFProvider>
+        {children}
       </QueryClientProvider>
     );
   };
@@ -39,12 +38,6 @@ describe("AuthGuard コンポーネント", () => {
 
   it("認証済みの場合は子コンポーネントを表示すること", async () => {
     mockFetch.mockImplementation((url: string) => {
-      if (url === "/api/csrf-token") {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({ token: "test-csrf-token" }),
-        });
-      }
       if (url === "/auth/me") {
         return Promise.resolve({
           ok: true,
@@ -73,12 +66,6 @@ describe("AuthGuard コンポーネント", () => {
 
   it("未認証の場合はログインページにリダイレクトすること", async () => {
     mockFetch.mockImplementation((url: string) => {
-      if (url === "/api/csrf-token") {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({ token: "test-csrf-token" }),
-        });
-      }
       if (url === "/auth/me") {
         return Promise.resolve({
           ok: false,
@@ -107,16 +94,8 @@ describe("AuthGuard コンポーネント", () => {
   });
 
   it("認証確認中はローディング表示すること", () => {
-    mockFetch.mockImplementation((url: string) => {
-      if (url === "/api/csrf-token") {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({ token: "test-csrf-token" }),
-        });
-      }
-      // auth/me は解決しない
-      return new Promise(() => {});
-    });
+    // auth/me は解決しない
+    mockFetch.mockImplementation(() => new Promise(() => {}));
 
     render(
       <AuthGuard>

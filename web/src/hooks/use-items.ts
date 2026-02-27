@@ -2,7 +2,6 @@
 
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { createApiClient } from "@/lib/api";
-import { useCSRFToken } from "@/lib/csrf";
 import type { ItemFilter, ItemListResponse } from "@/types/item";
 
 /**
@@ -15,8 +14,7 @@ import type { ItemFilter, ItemListResponse } from "@/types/item";
  * @param filter - フィルタ種別（all / unread / starred）
  */
 export function useItems(feedId: string | null, filter: ItemFilter) {
-  const token = useCSRFToken();
-  const api = createApiClient(() => token);
+  const api = createApiClient();
 
   return useInfiniteQuery<ItemListResponse>({
     queryKey: ["items", feedId, filter],

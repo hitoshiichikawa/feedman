@@ -5,21 +5,31 @@ Web ベースの RSS/Atom フィードリーダー。Google OAuth 認証、2ペ�
 ## アーキテクチャ
 
 ```
-┌─────────────┐    ┌──────────────────┐    ┌────────────┐
-│  Next.js    │───>│  Go API Server   │───>│ PostgreSQL │
-│  Frontend   │    │  (chi router)    │    │    16      │
-│  :3000      │    │  :8080           │    │   :5432    │
-└─────────────┘    └──────────────────┘    └────────────┘
-                   ┌──────────────────┐         │
-                   │  Go Worker       │─────────┘
-                   │  (fetch/hatebu/  │───> 外部 RSS/Atom フィード
-                   │   cleanup)       │───> はてなブックマーク API
-                   └──────────────────┘
+ブラウザ
+  │
+  ├──── :3000 ────> ┌──────────────────┐
+  │                 │  web (Next.js)   │  ← Docker コンテナ (standalone)
+  │                 │  :3000           │
+  │                 └──────────────────┘
+  │                         external ネットワーク
+  └──── :8080 ────> ┌──────────────────┐    ┌────────────┐
+                    │  api (Go)        │───>│ PostgreSQL │
+                    │  (chi router)    │    │    16      │
+                    │  :8080           │    │   :5432    │
+                    └──────────────────┘    └────────────┘
+                    ┌──────────────────┐         │
+                    │  worker (Go)     │─────────┘
+                    │  (fetch/hatebu/  │───> 外部 RSS/Atom フィード
+                    │   cleanup)       │───> はてなブックマーク API
+                    └──────────────────┘
 ```
 
-- **API サーバー**: HTTP ハンドラー、認証、ミドルウェア、CRUD API
-- **ワーカー**: フィード定期フェッチ、はてブ数取得、古い記事の自動削除
-- **フロントエンド**: Next.js 15 (App Router) + shadcn/ui の 2 ペイン SPA
+- **web**: Next.js 15 (App Router) + shadcn/ui の 2 ペイン SPA（Docker standalone ビルド）
+- **api**: HTTP ハンドラー、認証、ミドルウェア、CRUD API
+- **worker**: フィード定期フェッチ、はてブ数取得、古い記事の自動削除
+- **db**: PostgreSQL 16
+
+ブラウザからは `web` (`:3000`) と `api` (`:8080`) の両方に直接アクセスします。`NEXT_PUBLIC_API_URL` で API サーバーの FQDN を指定し、Next.js ビルド時に静的にバンドルされます。
 
 ## 技術スタック
 
@@ -89,6 +99,8 @@ vi .env.production
 | `GOOGLE_CLIENT_ID` | Google Cloud Console で取得した OAuth クライアント ID |
 | `GOOGLE_CLIENT_SECRET` | Google Cloud Console で取得した OAuth クライアントシークレット |
 | `SESSION_SECRET` | ランダムな文字列（下記コマンドで生成） |
+| `NEXT_PUBLIC_API_URL` | ブラウザから見た API サーバーの URL（例: `https://api.example.com`） |
+| `CORS_ALLOWED_ORIGIN` | フロントエンドのオリジン（例: `https://example.com`） |
 
 ```bash
 # SESSION_SECRET の生成
@@ -104,10 +116,11 @@ openssl rand -base64 32
 docker compose --env-file .env.production up -d
 ```
 
-3 つのコンテナが起動します:
+4 つのコンテナが起動します:
 
 | コンテナ | 役割 | ポート |
 |---------|------|-------|
+| `web` | Next.js フロントエンド | 3000 |
 | `api` | API サーバー (`serve`) | 8080 |
 | `worker` | バックグラウンドワーカー (`worker`) | - |
 | `db` | PostgreSQL 16 | 5432 |
@@ -118,17 +131,7 @@ docker compose --env-file .env.production up -d
 docker compose --env-file .env.production exec api /feedman migrate
 ```
 
-### 5. フロントエンドの起動（開発環境）
-
-```bash
-cd web
-npm install
-npm run dev
-```
-
-`http://localhost:3000` でアクセスできます。
-
-### 6. 動作確認
+### 5. 動作確認
 
 - `http://localhost:3000` にアクセスし、Google ログインを実施
 - フィード登録ダイアログで RSS/Atom フィードの URL を入力
@@ -139,6 +142,7 @@ npm run dev
 - `.env.sample` を `.env.production` にコピーし、本番用の値を設定する
 - **`.env.production` は絶対に Git にコミットしない**（`.gitignore` で除外済み）
 - `SESSION_SECRET` には `openssl rand -base64 32` で生成した十分に長いランダム文字列を設定する
+- `NEXT_PUBLIC_API_URL` を実際の API サーバーの FQDN（HTTPS）に変更する（ビルド時に静的バンドルされるため、変更後は `web` コンテナの再ビルドが必要）
 - `BASE_URL` と `GOOGLE_REDIRECT_URL` を実際のドメイン（HTTPS）に変更する
 - PostgreSQL のパスワードをデフォルト（`feedman`）から変更する
 - HTTPS を有効にし、リバースプロキシ（nginx 等）を前段に配置する
@@ -149,9 +153,9 @@ npm run dev
 Docker Compose は 2 つのネットワークを定義:
 
 - **internal**: API ↔ DB、Worker ↔ DB 間の内部通信専用（外部通信不可）
-- **external**: Worker のみ接続し、外部フィードのフェッチを許可
+- **external**: Web、API（ポート公開用）、Worker（外部フィードフェッチ用）が接続
 
-API サーバーは `internal` ネットワークのみに接続し、外部への直接通信は行わない。
+API サーバーは両ネットワークに接続し、DB へのアクセスは `internal` 経由、ポート公開は `external` 経由で行う。API 自身の SSRF 防止はアプリケーション層（safeurl）で実施。
 
 ## API エンドポイント
 
@@ -163,8 +167,6 @@ API サーバーは `internal` ネットワークのみに接続し、外部へ�
 | GET | `/auth/google/callback` | OAuth コールバック |
 | POST | `/auth/logout` | ログアウト |
 | GET | `/auth/me` | 現在のユーザー情報 |
-| GET | `/api/csrf-token` | CSRF トークン取得 |
-
 ### フィード管理（認証必須）
 
 | メソッド | パス | 説明 |
@@ -208,11 +210,11 @@ API サーバーは `internal` ネットワークのみに接続し、外部へ�
 認証が必要なルートには以下の順序でミドルウェアが適用される:
 
 ```
-SessionMiddleware → CSRFMiddleware → RateLimitMiddleware(General)
+CORSMiddleware → SessionMiddleware → RateLimitMiddleware(General)
 ```
 
+- **CORSMiddleware**: `CORS_ALLOWED_ORIGIN` で指定されたオリジンからのクロスオリジンリクエストを許可（`credentials: true`）
 - **SessionMiddleware**: HTTP Only Cookie からセッションを検証し、user_id をコンテキストに注入
-- **CSRFMiddleware**: SameSite=Lax + X-CSRF-Token ヘッダーによるダブルサブミット検証
 - **RateLimitMiddleware**: トークンバケット方式（120 req/分/ユーザー、フィード登録は 10 req/分）
 
 ## データベーススキーマ
@@ -252,11 +254,11 @@ SessionMiddleware → CSRFMiddleware → RateLimitMiddleware(General)
 ## セキュリティ
 
 - **認証**: Google OAuth 2.0 + HTTP Only Cookie セッション
-- **CSRF**: SameSite=Lax Cookie + X-CSRF-Token ダブルサブミット
+- **CSRF対策**: SameSite=Lax Cookie + CORS ポリシーによる防御
 - **XSS**: bluemonday によるサニタイズ（許可タグのみ通過、script/iframe/style 除去）
 - **SSRF**: safeurl によるプライベート IP・メタデータ IP・ループバック拒否
 - **レート制限**: ユーザーごとのトークンバケット方式
-- **ネットワーク分離**: Docker ネットワークで API の外部通信を遮断
+- **ネットワーク分離**: Docker internal ネットワークで DB への外部通信を遮断、API の SSRF 防止はアプリケーション層で実施
 - **データ分離**: 全クエリで user_id 条件を強制
 
 ## 開発
@@ -316,7 +318,7 @@ feedman/
 │   ├── item/             # 記事 UPSERT・状態管理サービス
 │   ├── logger/           # 構造化ログ (slog)
 │   ├── metrics/          # Prometheus メトリクス
-│   ├── middleware/        # セッション・CSRF・レート制限・ログ
+│   ├── middleware/        # CORS・セッション・レート制限・ログ
 │   ├── model/            # ドメインモデル
 │   ├── repository/       # データアクセス層 (PostgreSQL)
 │   ├── security/         # SSRF 防止・コンテンツサニタイズ
@@ -326,16 +328,17 @@ feedman/
 │       ├── cleanup/      # 記事自動削除
 │       └── fetch/        # フェッチスケジューラ・フェッチャー・リトライ
 ├── web/                  # Next.js フロントエンド
+│   ├── Dockerfile        # Next.js マルチステージビルド (standalone)
 │   └── src/
 │       ├── app/          # App Router ページ
 │       ├── components/   # React コンポーネント
 │       │   └── ui/       # shadcn/ui コンポーネント
 │       ├── contexts/     # React Context (AppState)
 │       ├── hooks/        # カスタムフック
-│       ├── lib/          # ユーティリティ (API クライアント, CSRF)
+│       ├── lib/          # ユーティリティ (API クライアント)
 │       └── types/        # TypeScript 型定義
-├── Dockerfile            # マルチステージビルド (distroless)
-├── docker-compose.yml    # 3 コンテナ構成
+├── Dockerfile            # Go バックエンド マルチステージビルド (distroless)
+├── docker-compose.yml    # 4 コンテナ構成 (web, api, worker, db)
 └── go.mod
 ```
 

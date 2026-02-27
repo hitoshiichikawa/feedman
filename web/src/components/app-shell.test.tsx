@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { CSRFProvider } from "@/lib/csrf";
+
 import { ThemeProvider } from "@/components/theme-provider";
 import { AppStateProvider } from "@/contexts/app-state";
 import { AppShell } from "./app-shell";
@@ -62,9 +62,7 @@ function createWrapper() {
     return (
       <QueryClientProvider client={queryClient}>
         <ThemeProvider>
-          <CSRFProvider>
-            <AppStateProvider>{children}</AppStateProvider>
-          </CSRFProvider>
+          <AppStateProvider>{children}</AppStateProvider>
         </ThemeProvider>
       </QueryClientProvider>
     );
@@ -74,12 +72,6 @@ function createWrapper() {
 /** mockFetchの設定ヘルパー */
 function setupMockFetch() {
   mockFetch.mockImplementation((url: string) => {
-    if (url === "/api/csrf-token") {
-      return Promise.resolve({
-        ok: true,
-        json: async () => ({ token: "test-csrf-token" }),
-      });
-    }
     if (url === "/api/subscriptions") {
       return Promise.resolve({
         ok: true,

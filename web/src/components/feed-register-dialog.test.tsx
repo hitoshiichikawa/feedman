@@ -2,33 +2,13 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { CSRFProvider } from "@/lib/csrf";
+
 import { FeedRegisterDialog } from "./feed-register-dialog";
 import type { ReactNode } from "react";
 
 // グローバルfetchのモック
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
-
-/**
- * mockFetchの呼び出しを設定するヘルパー。
- * CSRFProviderが /api/csrf-token を最初にfetchする。
- */
-function setupMockFetch() {
-  mockFetch.mockImplementation((url: string) => {
-    if (url === "/api/csrf-token") {
-      return Promise.resolve({
-        ok: true,
-        json: async () => ({ token: "test-csrf-token" }),
-      });
-    }
-    // デフォルトのレスポンス
-    return Promise.resolve({
-      ok: true,
-      json: async () => ({}),
-    });
-  });
-}
 
 /** テスト用ラッパー */
 function createWrapper() {
@@ -40,9 +20,7 @@ function createWrapper() {
   });
   return function Wrapper({ children }: { children: ReactNode }) {
     return (
-      <QueryClientProvider client={queryClient}>
-        <CSRFProvider>{children}</CSRFProvider>
-      </QueryClientProvider>
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
     );
   };
 }
@@ -50,7 +28,10 @@ function createWrapper() {
 describe("FeedRegisterDialog コンポーネント", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    setupMockFetch();
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({}),
+    });
   });
 
   it("トリガーボタンをクリックするとダイアログが開くこと", async () => {
@@ -84,12 +65,6 @@ describe("FeedRegisterDialog コンポーネント", () => {
     const onRegistered = vi.fn();
 
     mockFetch.mockImplementation((url: string, options?: RequestInit) => {
-      if (url === "/api/csrf-token") {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({ token: "test-csrf-token" }),
-        });
-      }
       if (url === "/api/feeds" && options?.method === "POST") {
         return Promise.resolve({
           ok: true,
@@ -137,12 +112,6 @@ describe("FeedRegisterDialog コンポーネント", () => {
     const user = userEvent.setup();
 
     mockFetch.mockImplementation((url: string, options?: RequestInit) => {
-      if (url === "/api/csrf-token") {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({ token: "test-csrf-token" }),
-        });
-      }
       if (url === "/api/feeds" && options?.method === "POST") {
         return Promise.resolve({
           ok: true,
@@ -188,12 +157,6 @@ describe("FeedRegisterDialog コンポーネント", () => {
     const user = userEvent.setup();
 
     mockFetch.mockImplementation((url: string, options?: RequestInit) => {
-      if (url === "/api/csrf-token") {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({ token: "test-csrf-token" }),
-        });
-      }
       if (url === "/api/feeds" && options?.method === "POST") {
         return Promise.resolve({
           ok: false,
@@ -239,12 +202,6 @@ describe("FeedRegisterDialog コンポーネント", () => {
     const user = userEvent.setup();
 
     mockFetch.mockImplementation((url: string, options?: RequestInit) => {
-      if (url === "/api/csrf-token") {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({ token: "test-csrf-token" }),
-        });
-      }
       if (url === "/api/feeds" && options?.method === "POST") {
         return Promise.resolve({
           ok: false,

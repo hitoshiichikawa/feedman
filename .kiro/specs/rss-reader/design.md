@@ -36,7 +36,7 @@ graph TB
     subgraph GoAPI[Go API Server]
         Router[Chi Router]
         AuthMW[Auth Middleware]
-        CSRFMW[CSRF Middleware]
+        CORSMW[CORS Middleware]
         RateMW[Rate Limit Middleware]
         AuthHandler[Auth Handler]
         FeedHandler[Feed Handler]
@@ -74,8 +74,8 @@ graph TB
 
     NextJS -->|HTTP Cookie Session| Router
     Router --> AuthMW
-    AuthMW --> CSRFMW
-    CSRFMW --> RateMW
+    CORSMW --> AuthMW
+    AuthMW --> RateMW
     RateMW --> AuthHandler
     RateMW --> FeedHandler
     RateMW --> ItemHandler
@@ -112,7 +112,8 @@ end
 - 選択パターン: レイヤードアーキテクチャ（Handler → Service → Repository）。プロジェクト規模に適切で、Goコミュニティで広く採用されているパターン
 - ドメイン境界: 認証、フィード管理、記事管理、購読管理、はてなブックマーク連携の5ドメインに分離
 - 新規コンポーネント: すべて新規構築。Go APIサーバー、Goワーカー、Next.jsフロントエンド
-- BFF構成: Go APIサーバーがBFFとして機能し、HTTP Only Cookieセッションでフロントエンドと通信
+- デプロイ構成: 4コンテナ構成（web、api、worker、db）。Next.jsはstandaloneモードでDockerコンテナ化し、APIサーバーとは別オリジンで動作
+- BFF構成: Go APIサーバーがBFFとして機能し、HTTP Only Cookieセッション（credentials: 'include'）でフロントエンドと通信。フロントエンドからAPIへの通信先は`NEXT_PUBLIC_API_URL`環境変数（ビルド時バンドル）で指定
 
 ### Technology Stack
 
@@ -121,8 +122,8 @@ end
 | Frontend | Next.js 15 + React 19 | SPA、2ペインUI | App Router使用、Client Components中心 |
 | UI Components | shadcn/ui + Tailwind CSS 4 | UIコンポーネント、テーマ | ライト/ダーク切替対応 |
 | Data Fetching | TanStack Query (React Query) v5 | サーバーデータ管理、キャッシュ | 無限スクロール、楽観的更新 |
-| Backend API | Go 1.23 + chi v5 | BFF APIサーバー | net/http標準互換 |
-| Worker | Go 1.23 | バックグラウンドフェッチ処理 | APIと同一バイナリ、サブコマンドで起動 |
+| Backend API | Go 1.25 + chi v5 | BFF APIサーバー | net/http標準互換 |
+| Worker | Go 1.25 | バックグラウンドフェッチ処理 | APIと同一バイナリ、サブコマンドで起動 |
 | Database | PostgreSQL 16 | データ永続化 | SKIP LOCKEDによる排他制御 |
 | Migration | golang-migrate v4 | スキーマ管理 | タイムスタンプベースのバージョニング |
 | Feed Parser | gofeed latest | RSS/Atom/JSONフィード解析 | 統一モデルへの変換 |
@@ -132,7 +133,7 @@ end
 | Logging | log/slog (stdlib) | JSON構造化ログ | Go標準ライブラリ |
 | Metrics | prometheus/client_golang | メトリクス収集・公開 | /metricsエンドポイント |
 | Rate Limiting | golang.org/x/time/rate | ユーザーごとのレート制限 | インメモリ、トークンバケット |
-| Infrastructure | Docker + docker-compose | コンテナ実行環境 | API、Worker、PostgreSQL |
+| Infrastructure | Docker + docker-compose | コンテナ実行環境 | Web（Next.js standalone）、API、Worker、PostgreSQL の4コンテナ構成 |
 
 > 各ライブラリの選定経緯と比較の詳細は`research.md`を参照。
 
@@ -249,10 +250,10 @@ flowchart TD
 | 1.2 | 未登録ユーザーの自動作成 | AuthService, UserRepo | - | OAuth認証フロー |
 | 1.3 | 登録済みユーザーのログイン | AuthService, UserRepo | - | OAuth認証フロー |
 | 1.4 | HTTP Only Cookieセッション発行 | AuthService, SessionMiddleware | Set-Cookie | OAuth認証フロー |
-| 1.5 | CSRF対策 | CSRFMiddleware | X-CSRF-Token header | - |
+| 1.5 | CSRF対策 | CORSMiddleware | SameSite=Lax + CORS | - |
 | 1.6 | ユーザーデータ分離 | 全Repository | WHERE user_id = ? | - |
 | 1.7 | 複数IdP対応テーブル設計 | identitiesテーブル | - | - |
-| 1.8 | 同一オリジン動作 | Chi Router設定 | - | - |
+| 1.8 | クロスオリジン通信（NEXT_PUBLIC_API_URL） | API通信設定、credentials: include | - | - |
 | 2.1 | RSS/AtomフィードURL直接登録 | FeedService, FeedDetector | POST /api/feeds | フィード登録フロー |
 | 2.2 | HTMLからフィード検出 | FeedDetector | POST /api/feeds | フィード登録フロー |
 | 2.3 | 複数候補の優先順位自動選択 | FeedDetector | - | フィード登録フロー |
@@ -322,7 +323,7 @@ flowchart TD
 | AuthHandler | 認証/Handler | OAuth認証エンドポイント | 1.1, 1.3, 1.4 | AuthService (P0) | API |
 | AuthService | 認証/Service | OAuth認証ロジック、セッション管理 | 1.1-1.8 | UserRepo (P0), Google OAuth (P0) | Service |
 | SessionMiddleware | 認証/Middleware | セッション検証 | 1.4, 1.6 | gorilla/sessions (P0) | Service |
-| CSRFMiddleware | セキュリティ/Middleware | CSRF対策 | 1.5 | SessionMiddleware (P0) | Service |
+| CORSMiddleware | セキュリティ/Middleware | CORS制御・CSRF防御 | 1.5 | 環境変数 CORS_ALLOWED_ORIGIN (P0) | Service |
 | RateLimitMiddleware | セキュリティ/Middleware | レート制限 | 13.1, 13.2 | x/time/rate (P0) | Service |
 | FeedHandler | フィード/Handler | フィード登録・管理エンドポイント | 2.1-2.8 | FeedService (P0) | API |
 | FeedService | フィード/Service | フィード登録ロジック、検出 | 2.1-2.8 | FeedRepo (P0), SSRFGuard (P0) | Service |
@@ -420,26 +421,24 @@ type SessionMiddleware func(next http.Handler) http.Handler
 func UserIDFromContext(ctx context.Context) (string, error)
 ```
 
-#### CSRFMiddleware
+#### CORSMiddleware
 
 | Field | Detail |
 |-------|--------|
-| Intent | CSRF攻撃の防止 |
-| Requirements | 1.5 |
+| Intent | クロスオリジンリクエストの制御、CSRF攻撃の防止 |
+| Requirements | 1.5, 1.8 |
 
 **Responsibilities & Constraints**
-- SameSite=Lax属性のCookie設定
-- CSRFトークンの生成・検証
-- 状態変更リクエスト（POST/PUT/PATCH/DELETE）でトークン検証を必須化
+- `CORS_ALLOWED_ORIGIN` 環境変数で指定されたオリジンからのリクエストを許可
+- `Access-Control-Allow-Credentials: true` でCookie送信を許可
+- OPTIONSプリフライトリクエストに204で応答
+- SameSite=Lax Cookie + CORSポリシーによりCSRF攻撃を防御
 
 **Contracts**: Service [x] / API [ ] / Event [ ] / Batch [ ] / State [ ]
 
 ##### Service Interface
 ```go
-type CSRFMiddleware func(next http.Handler) http.Handler
-
-// CSRFトークンを取得するエンドポイント
-// GET /api/csrf-token → { "token": "xxx" }
+func NewCORSMiddleware(allowedOrigin string) func(next http.Handler) http.Handler
 ```
 
 #### RateLimitMiddleware
@@ -1127,27 +1126,33 @@ Next.js 15 (App Router)を使用するが、**Client Components中心のSPA構�
 **方針の理由**:
 - 2ペインUIの状態（選択フィード、展開記事、フィルタ、スクロール位置）をクライアント側で一元管理する必要がある
 - リアルタイムな操作応答性（記事展開、既読化、スター切替）が重要
-- Go APIサーバー（BFF）が認証・CSRF・データ取得を担当するため、Next.js側にサーバーロジックは不要
+- Go APIサーバー（BFF）が認証・CORS・データ取得を担当するため、Next.js側にサーバーロジックは不要
 
 **Next.jsの役割**:
+- Dockerコンテナ化（standalone出力モード）により独立コンテナとしてデプロイ
 - 静的シェルのホスティング（`layout.tsx` のみServer Component）
 - 各ページは `"use client"` 指定のClient Componentとして実装
 - API Routeは使用しない（Go APIサーバーに直接リクエスト）
+
+**デプロイ構成**:
+- `web/Dockerfile` によるマルチステージビルド（deps → builder → runner）
+- `NEXT_PUBLIC_API_URL` をビルド引数として受け取り、静的にバンドル
+- `output: "standalone"` で自己完結型Node.jsサーバーとして動作
 
 #### API通信方式
 
 - **データフェッチ**: TanStack Query (React Query) を使用
   - キャッシュ管理、バックグラウンド再フェッチ、楽観的更新に対応
   - 無限スクロールは `useInfiniteQuery` で実装
-- **通信先**: Go APIサーバーのエンドポイント（同一オリジン）
-- **認証**: HTTP Only Cookieが自動送信される（同一オリジンのため）
+- **通信先**: `NEXT_PUBLIC_API_URL` 環境変数で指定されたGo APIサーバー（クロスオリジン）。ビルド時にNext.jsに静的バンドルされる
+- **認証**: HTTP Only Cookieを `credentials: 'include'` で明示的に送信（クロスオリジンのため）
 
-#### CSRFトークンフロー
+#### CSRF対策
 
-1. ページ初回読み込み時に `GET /api/csrf-token` でCSRFトークンを取得
-2. トークンをReact Contextで保持
-3. 以降のmutationリクエスト（POST/PUT/DELETE）で `X-CSRF-Token` ヘッダーに付与
-4. トークンは一定期間でリフレッシュ（セッション有効期間に合わせる）
+SameSite=Lax Cookie + CORSポリシーにより、CSRFトークンなしでCSRF攻撃を防御する。
+- SameSite=Lax: クロスサイトのPOST/PUT/DELETEリクエストにはCookieが送信されない
+- CORS: `CORS_ALLOWED_ORIGIN`で指定されたオリジン以外からのリクエストはブラウザがブロック
+- `Access-Control-Allow-Credentials: true` により、許可されたオリジンからのみCookie送信を許可
 
 #### 状態管理
 
@@ -1156,7 +1161,6 @@ Next.js 15 (App Router)を使用するが、**Client Components中心のSPA構�
 | サーバーデータ（フィード一覧、記事一覧、記事状態） | TanStack Query | キャッシュ・再フェッチ・楽観的更新の恩恵 |
 | 選択中フィード、展開記事ID、フィルタ状態 | React Context + useReducer | 複数コンポーネント間で共有するUIステート |
 | テーマ（ライト/ダーク） | React Context + localStorage | ページリロード時の復元が必要 |
-| CSRFトークン | React Context | API通信レイヤーでグローバルに参照 |
 
 #### UIコンポーネント
 
@@ -1422,7 +1426,7 @@ type APIError struct {
 **User Errors (4xx)**:
 - 400 Bad Request: 入力バリデーション失敗 → フィールドごとのエラー詳細を返す
 - 401 Unauthorized: 未認証 → ログイン画面への誘導
-- 403 Forbidden: CSRF検証失敗 → ページリロードの案内
+- 403 Forbidden: アクセス権限なし → ログイン画面への誘導
 - 404 Not Found: リソース不在 → 一覧画面への誘導
 - 409 Conflict: 購読上限到達 → 上限数と解除手順の案内
 - 422 Unprocessable Entity: フィード未検出 → 正しいURL形式の案内
@@ -1475,12 +1479,12 @@ type APIError struct {
 ## Security Considerations
 
 - **認証**: Google OAuth 2.0 + HTTP Only Cookie セッション
-- **CSRF**: SameSite=Lax + CSRFトークンの二重防御
+- **CSRF対策**: SameSite=Lax Cookie + CORSポリシーによる防御
 - **XSS**: bluemondayによる許可リストベースのHTMLサニタイズ
 - **SSRF**: safeurlによるプライベートIP・メタデータIP拒否、DNS再バインディング対策
 - **データ分離**: 全クエリにuser_id条件を付与。Repository層で強制
 - **セッションセキュリティ**: Secure属性（本番）、HttpOnly、SameSite=Lax、署名付き暗号化
-- **egress制限**: Docker networkによるコンテナ間通信の制御。ワーカーコンテナのみ外部通信を許可
+- **egress制限**: Docker networkによるコンテナ間通信の制御。internalネットワーク（DB専用、外部通信不可）とexternalネットワーク（web、api、workerが接続）の2系統。APIのSSRF防止はアプリケーション層（safeurl）で実施
 
 ## Performance & Scalability
 

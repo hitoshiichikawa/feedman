@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,9 +37,9 @@ func createTestRouter() (http.Handler, *mockSessionFinderForRouter) {
 	}
 
 	deps := &RouterDeps{
-		SessionFinder: sessionFinder,
-		CSRFConfig:    middleware.CSRFConfig{CookieSecure: false},
-		RateLimiter:   middleware.NewRateLimiter(middleware.DefaultRateLimiterConfig()),
+		SessionFinder:     sessionFinder,
+		CORSAllowedOrigin: "http://localhost:3000",
+		RateLimiter:       middleware.NewRateLimiter(middleware.DefaultRateLimiterConfig()),
 		AuthService:   &mockAuthService{
 			getLoginURLFn: func(state string) string {
 				return "https://accounts.google.com?state=" + state
@@ -116,27 +115,6 @@ func createTestRouter() (http.Handler, *mockSessionFinderForRouter) {
 	return router, sessionFinder
 }
 
-// TestNewRouter_CSRFTokenEndpoint_NoAuthRequired は
-// CSRFトークン取得エンドポイントが認証不要であることを検証する。
-func TestNewRouter_CSRFTokenEndpoint_NoAuthRequired(t *testing.T) {
-	router, _ := createTestRouter()
-
-	req := httptest.NewRequest(http.MethodGet, "/api/csrf-token", nil)
-	w := httptest.NewRecorder()
-
-	router.ServeHTTP(w, req)
-
-	if w.Result().StatusCode != http.StatusOK {
-		t.Errorf("GET /api/csrf-token status = %d, want %d", w.Result().StatusCode, http.StatusOK)
-	}
-
-	var body map[string]string
-	json.NewDecoder(w.Result().Body).Decode(&body)
-	if body["token"] == "" {
-		t.Error("expected non-empty CSRF token")
-	}
-}
-
 // TestNewRouter_AuthRoutes_LoginEndpoint は認証ルートが正しく設定されていることを検証する。
 func TestNewRouter_AuthRoutes_LoginEndpoint(t *testing.T) {
 	router, _ := createTestRouter()
@@ -201,9 +179,9 @@ func TestNewRouter_ProtectedRoute_WithSession_GET_Succeeds(t *testing.T) {
 	}
 }
 
-// TestNewRouter_ProtectedRoute_POST_RequiresCSRF は
-// POSTリクエストにCSRFトークンが必須であることを検証する。
-func TestNewRouter_ProtectedRoute_POST_RequiresCSRF(t *testing.T) {
+// TestNewRouter_ProtectedRoute_POST_WithSession_Succeeds は
+// POSTリクエストにセッション付きでアクセスが成功することを検証する。
+func TestNewRouter_ProtectedRoute_POST_WithSession_Succeeds(t *testing.T) {
 	router, _ := createTestRouter()
 
 	body := `{"url": "https://example.com/feed.xml"}`
@@ -214,37 +192,16 @@ func TestNewRouter_ProtectedRoute_POST_RequiresCSRF(t *testing.T) {
 
 	router.ServeHTTP(w, req)
 
-	if w.Result().StatusCode != http.StatusForbidden {
-		t.Errorf("POST /api/feeds (no CSRF) status = %d, want %d",
-			w.Result().StatusCode, http.StatusForbidden)
-	}
-}
-
-// TestNewRouter_ProtectedRoute_POST_WithCSRF_Succeeds は
-// POSTリクエストにCSRFトークン付きでアクセスが成功することを検証する。
-func TestNewRouter_ProtectedRoute_POST_WithCSRF_Succeeds(t *testing.T) {
-	router, _ := createTestRouter()
-
-	body := `{"url": "https://example.com/feed.xml"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/feeds", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.AddCookie(&http.Cookie{Name: "session_id", Value: "valid-session"})
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "test-token"})
-	req.Header.Set("X-CSRF-Token", "test-token")
-	w := httptest.NewRecorder()
-
-	router.ServeHTTP(w, req)
-
-	// サービスモックが空なのでnilが返るが、CSRF検証は通過していること
+	// サービスモックが空なのでnilが返るが、認証は通過していること
 	status := w.Result().StatusCode
 	if status == http.StatusForbidden || status == http.StatusUnauthorized {
-		t.Errorf("POST /api/feeds (with CSRF) status = %d, should not be 403 or 401", status)
+		t.Errorf("POST /api/feeds (with session) status = %d, should not be 403 or 401", status)
 	}
 }
 
-// TestNewRouter_MiddlewareOrder_SessionBeforeCSRF は
-// セッション検証がCSRF検証より先に実行されることを検証する。
-func TestNewRouter_MiddlewareOrder_SessionBeforeCSRF(t *testing.T) {
+// TestNewRouter_MiddlewareOrder_SessionFirst は
+// セッション検証が最初に実行されることを検証する。
+func TestNewRouter_MiddlewareOrder_SessionFirst(t *testing.T) {
 	router, _ := createTestRouter()
 
 	body := `{"url": "https://example.com"}`
@@ -255,7 +212,7 @@ func TestNewRouter_MiddlewareOrder_SessionBeforeCSRF(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	if w.Result().StatusCode != http.StatusUnauthorized {
-		t.Errorf("POST (no session, no CSRF) status = %d, want %d (session check before CSRF)",
+		t.Errorf("POST (no session) status = %d, want %d",
 			w.Result().StatusCode, http.StatusUnauthorized)
 	}
 }
@@ -284,9 +241,7 @@ func TestNewRouter_FeedRoutes_AllEndpoints(t *testing.T) {
 			req := httptest.NewRequest(tt.method, tt.path, body)
 			req.Header.Set("Content-Type", "application/json")
 			req.AddCookie(&http.Cookie{Name: "session_id", Value: "valid-session"})
-			req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "test-token"})
-			req.Header.Set("X-CSRF-Token", "test-token")
-			w := httptest.NewRecorder()
+				w := httptest.NewRecorder()
 
 			router.ServeHTTP(w, req)
 
@@ -344,9 +299,7 @@ func TestNewRouter_SubscriptionRoutes_AllEndpoints(t *testing.T) {
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
 			req.Header.Set("Content-Type", "application/json")
 			req.AddCookie(&http.Cookie{Name: "session_id", Value: "valid-session"})
-			req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "test-token"})
-			req.Header.Set("X-CSRF-Token", "test-token")
-			w := httptest.NewRecorder()
+				w := httptest.NewRecorder()
 
 			router.ServeHTTP(w, req)
 

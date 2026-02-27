@@ -31,8 +31,8 @@ RSSリーダー Webサービス 要件定義（最終版）
 
 2.3 セッション方式
     •    BFFはHTTP Only Cookieセッションを採用
-    •    CSRF対策を実装（SameSite + CSRFトークン）
-    •    原則同一オリジン、CORSは必要時のみ最小許可
+    •    CSRF対策を実装（SameSite=Lax Cookie + CORSポリシー）
+    •    Next.jsフロントエンドとGo APIサーバーはクロスオリジン構成。API通信先は`NEXT_PUBLIC_API_URL`環境変数（ビルド時バンドル）で指定し、`credentials: 'include'`でCookie送信
 
 ⸻
 
@@ -307,7 +307,7 @@ UI表示
     •    PostgreSQL
 
 12.4 実行環境
-    •    Dockerコンテナ
+    •    Docker Compose 4コンテナ構成（web: Next.js standalone、api: Go APIサーバー、worker: Goワーカー、db: PostgreSQL）
 
 12.5 設定
 
@@ -350,7 +350,7 @@ UI表示
     •    スケール可能なDBロック方式
     •    冪等API設計
     •    XSS/SSRF対策実装
-    •    Cookieセッション + CSRF対策
+    •    Cookieセッション + SameSite=Lax + CORS対策
     •    ログ/メトリクスによる運用可視化
 
 ## Requirements
@@ -363,10 +363,10 @@ UI表示
 2. When OAuth認証が成功し、該当ユーザーがDBに未登録の場合, the RSSリーダー shall ユーザーレコードと外部アカウント紐付け（identities）レコードを自動作成する
 3. When OAuth認証が成功し、該当ユーザーがDBに登録済みの場合, the RSSリーダー shall 既存ユーザーとしてログインする
 4. When OAuth認証が成功した時, the RSSリーダー shall HTTP Only Cookieベースのセッションを発行する
-5. When セッションが発行される時, the RSSリーダー shall SameSite属性とCSRFトークンによるCSRF対策を適用する
+5. When セッションが発行される時, the RSSリーダー shall SameSite=Lax CookieとCORSポリシーによるCSRF対策を適用する
 6. The RSSリーダー shall ユーザーデータをユーザー単位で分離し、他ユーザーのデータにアクセスできないようにする
 7. The RSSリーダー shall 外部アカウント紐付け用テーブル（identities）を持ち、将来的に他IdP（Microsoft/GitHub等）を追加可能な構造とする
-8. The RSSリーダー shall 原則同一オリジンで動作し、CORSは必要時のみ最小許可とする
+8. The RSSリーダー shall クロスオリジン構成（Next.js :3000 + API :8080）で動作し、`NEXT_PUBLIC_API_URL`でAPI通信先を指定、`credentials: 'include'`でCookieセッションを送信する
 
 ### Requirement 2: フィード登録
 **Objective:** ユーザーとして、URLを入力するだけで簡単にRSS/Atomフィードを登録したい。手動でフィードURLを探す手間を省くため。
@@ -501,5 +501,5 @@ UI表示
 
 #### Acceptance Criteria
 1. The RSSリーダー shall DB接続、OAuth設定、フェッチ制限、並列数、レート制限、はてブTTLを環境変数で制御可能とする
-2. The RSSリーダー shall Dockerコンテナで動作する
+2. The RSSリーダー shall Docker Compose 4コンテナ構成（web、api、worker、db）で動作する
 3. The RSSリーダー shall DBマイグレーション管理ツールを使用し、pg_dump等でバックアップ可能な構成とする

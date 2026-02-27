@@ -1,7 +1,6 @@
 import { renderHook, waitFor, act } from "@testing-library/react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { CSRFProvider } from "@/lib/csrf";
 import { useItems } from "./use-items";
 import type { ItemListResponse } from "@/types/item";
 import type { ReactNode } from "react";
@@ -10,7 +9,7 @@ import type { ReactNode } from "react";
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
 
-/** テスト用のQueryClient + CSRFProvider ラッパー */
+/** テスト用のQueryClientラッパー */
 function createWrapper() {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -21,9 +20,7 @@ function createWrapper() {
   });
   return function Wrapper({ children }: { children: ReactNode }) {
     return (
-      <QueryClientProvider client={queryClient}>
-        <CSRFProvider>{children}</CSRFProvider>
-      </QueryClientProvider>
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
     );
   };
 }
@@ -80,22 +77,11 @@ const mockPage2: ItemListResponse = {
   has_more: false,
 };
 
-/**
- * mockFetchのルーティング設定ヘルパー。
- * CSRFProviderが/api/csrf-tokenをfetchする。
- */
+/** mockFetchのルーティング設定ヘルパー */
 function setupMockFetch(
   apiHandler: (url: string, options?: RequestInit) => Promise<unknown>
 ) {
-  mockFetch.mockImplementation((url: string, options?: RequestInit) => {
-    if (url === "/api/csrf-token") {
-      return Promise.resolve({
-        ok: true,
-        json: async () => ({ token: "test-csrf-token" }),
-      });
-    }
-    return apiHandler(url, options);
-  });
+  mockFetch.mockImplementation(apiHandler);
 }
 
 describe("useItems", () => {

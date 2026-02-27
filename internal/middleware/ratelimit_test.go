@@ -468,7 +468,7 @@ func TestRateLimiter_CleanupRemovesExpiredEntries(t *testing.T) {
 
 // --- ミドルウェアチェーンとの統合テスト ---
 
-func TestRateLimitMiddleware_InChainWithSessionAndCSRF(t *testing.T) {
+func TestRateLimitMiddleware_InChainWithSessionAndCORS(t *testing.T) {
 	repo := &mockSessionRepository{
 		findByIDFn: func(ctx context.Context, id string) (*model.Session, error) {
 			if id == "rate-limit-session" {
@@ -494,17 +494,17 @@ func TestRateLimitMiddleware_InChainWithSessionAndCSRF(t *testing.T) {
 	defer rl.Stop()
 
 	sessionMW := NewSessionMiddleware(repo)
-	csrfMW := NewCSRFMiddleware(CSRFConfig{CookieSecure: false})
+	corsMW := NewCORSMiddleware("http://localhost:3000")
 	rateMW := rl.GeneralMiddleware()
 
-	// Session -> CSRF -> RateLimit -> Handler
-	handler := sessionMW(csrfMW(rateMW(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// CORS -> Session -> RateLimit -> Handler
+	handler := corsMW(sessionMW(rateMW(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		userID, _ := UserIDFromContext(r.Context())
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"user_id": userID})
 	}))))
 
-	// GETリクエスト（CSRFトークン不要）：2回通る
+	// GETリクエスト：2回通る
 	for i := 0; i < 2; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
 		req.AddCookie(&http.Cookie{Name: "session_id", Value: "rate-limit-session"})

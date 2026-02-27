@@ -15,8 +15,8 @@ describe("apiClient", () => {
   });
 
   describe("GETリクエスト", () => {
-    it("GETリクエストにはX-CSRF-Tokenヘッダーを付与しないこと", async () => {
-      const api = createApiClient(() => "csrf-token-123");
+    it("GETリクエストを正しく送信すること", async () => {
+      const api = createApiClient();
 
       await api.get("/api/feeds");
 
@@ -35,7 +35,7 @@ describe("apiClient", () => {
         json: async () => ({ feeds: [] }),
       });
 
-      const api = createApiClient(() => "token");
+      const api = createApiClient();
       const response = await api.get("/api/feeds");
 
       expect(response).toEqual({ feeds: [] });
@@ -43,8 +43,8 @@ describe("apiClient", () => {
   });
 
   describe("POSTリクエスト", () => {
-    it("POSTリクエストにX-CSRF-Tokenヘッダーを自動付与すること", async () => {
-      const api = createApiClient(() => "csrf-token-456");
+    it("POSTリクエストを正しく送信すること", async () => {
+      const api = createApiClient();
 
       await api.post("/api/feeds", { url: "https://example.com/feed.xml" });
 
@@ -52,15 +52,14 @@ describe("apiClient", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-CSRF-Token": "csrf-token-456",
         },
         credentials: "include",
         body: JSON.stringify({ url: "https://example.com/feed.xml" }),
       });
     });
 
-    it("ボディなしのPOSTリクエストでもCSRFトークンを付与すること", async () => {
-      const api = createApiClient(() => "csrf-token-789");
+    it("ボディなしのPOSTリクエストを送信できること", async () => {
+      const api = createApiClient();
 
       await api.post("/api/some-action");
 
@@ -68,7 +67,6 @@ describe("apiClient", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-CSRF-Token": "csrf-token-789",
         },
         credentials: "include",
       });
@@ -76,8 +74,8 @@ describe("apiClient", () => {
   });
 
   describe("PUTリクエスト", () => {
-    it("PUTリクエストにX-CSRF-Tokenヘッダーを自動付与すること", async () => {
-      const api = createApiClient(() => "csrf-put-token");
+    it("PUTリクエストを正しく送信すること", async () => {
+      const api = createApiClient();
 
       await api.put("/api/items/1/state", { is_read: true });
 
@@ -85,7 +83,6 @@ describe("apiClient", () => {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
-          "X-CSRF-Token": "csrf-put-token",
         },
         credentials: "include",
         body: JSON.stringify({ is_read: true }),
@@ -94,8 +91,8 @@ describe("apiClient", () => {
   });
 
   describe("PATCHリクエスト", () => {
-    it("PATCHリクエストにX-CSRF-Tokenヘッダーを自動付与すること", async () => {
-      const api = createApiClient(() => "csrf-patch-token");
+    it("PATCHリクエストを正しく送信すること", async () => {
+      const api = createApiClient();
 
       await api.patch("/api/feeds/1", { feed_url: "https://new-url.com" });
 
@@ -103,7 +100,6 @@ describe("apiClient", () => {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          "X-CSRF-Token": "csrf-patch-token",
         },
         credentials: "include",
         body: JSON.stringify({ feed_url: "https://new-url.com" }),
@@ -112,8 +108,8 @@ describe("apiClient", () => {
   });
 
   describe("DELETEリクエスト", () => {
-    it("DELETEリクエストにX-CSRF-Tokenヘッダーを自動付与すること", async () => {
-      const api = createApiClient(() => "csrf-delete-token");
+    it("DELETEリクエストを正しく送信すること", async () => {
+      const api = createApiClient();
 
       await api.delete("/api/feeds/1");
 
@@ -121,26 +117,8 @@ describe("apiClient", () => {
         method: "DELETE",
         headers: {
           "Content-Type": "application/json",
-          "X-CSRF-Token": "csrf-delete-token",
         },
         credentials: "include",
-      });
-    });
-  });
-
-  describe("CSRFトークンがnullの場合", () => {
-    it("mutation系リクエストでもX-CSRF-Tokenヘッダーを付与しないこと", async () => {
-      const api = createApiClient(() => null);
-
-      await api.post("/api/feeds", { url: "https://example.com" });
-
-      expect(mockFetch).toHaveBeenCalledWith("/api/feeds", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        credentials: "include",
-        body: JSON.stringify({ url: "https://example.com" }),
       });
     });
   });
@@ -154,7 +132,7 @@ describe("apiClient", () => {
         json: async () => ({ message: "リソースが見つかりません" }),
       });
 
-      const api = createApiClient(() => "token");
+      const api = createApiClient();
 
       await expect(api.get("/api/feeds/999")).rejects.toThrow();
     });
@@ -171,7 +149,7 @@ describe("apiClient", () => {
         json: async () => errorBody,
       });
 
-      const api = createApiClient(() => "token");
+      const api = createApiClient();
 
       try {
         await api.get("/api/feeds/999");

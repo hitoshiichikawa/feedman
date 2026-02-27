@@ -1,7 +1,7 @@
 import { renderHook, waitFor } from "@testing-library/react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { CSRFProvider } from "@/lib/csrf";
+
 import { useCurrentUser, useLogout } from "./use-auth";
 import type { ReactNode } from "react";
 
@@ -19,9 +19,7 @@ function createWrapper() {
   });
   return function Wrapper({ children }: { children: ReactNode }) {
     return (
-      <QueryClientProvider client={queryClient}>
-        <CSRFProvider>{children}</CSRFProvider>
-      </QueryClientProvider>
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
     );
   };
 }
@@ -33,12 +31,6 @@ describe("useCurrentUser", () => {
 
   it("認証済みユーザー情報を取得できること", async () => {
     mockFetch.mockImplementation((url: string) => {
-      if (url === "/api/csrf-token") {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({ token: "test-csrf-token" }),
-        });
-      }
       if (url === "/auth/me") {
         return Promise.resolve({
           ok: true,
@@ -71,12 +63,6 @@ describe("useCurrentUser", () => {
 
   it("未認証時（401）はエラー状態になること", async () => {
     mockFetch.mockImplementation((url: string) => {
-      if (url === "/api/csrf-token") {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({ token: "test-csrf-token" }),
-        });
-      }
       if (url === "/auth/me") {
         return Promise.resolve({
           ok: false,
@@ -104,12 +90,6 @@ describe("useLogout", () => {
 
   it("ログアウトAPIを呼び出せること", async () => {
     mockFetch.mockImplementation((url: string, options?: RequestInit) => {
-      if (url === "/api/csrf-token") {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({ token: "test-csrf-token" }),
-        });
-      }
       if (url === "/auth/logout" && options?.method === "POST") {
         return Promise.resolve({
           ok: true,

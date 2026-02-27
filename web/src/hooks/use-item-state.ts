@@ -2,7 +2,6 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { createApiClient } from "@/lib/api";
-import { useCSRFToken } from "@/lib/csrf";
 import type { ItemListResponse } from "@/types/item";
 import type { InfiniteData } from "@tanstack/react-query";
 
@@ -13,8 +12,7 @@ import type { InfiniteData } from "@tanstack/react-query";
  * 成功時にitemsクエリキャッシュを無効化する。
  */
 export function useMarkAsRead() {
-  const token = useCSRFToken();
-  const api = createApiClient(() => token);
+  const api = createApiClient();
   const queryClient = useQueryClient();
 
   return useMutation({
@@ -41,8 +39,7 @@ interface ToggleStarParams {
  * 楽観的更新でUIを即時反映し、エラー時にロールバックする。
  */
 export function useToggleStar() {
-  const token = useCSRFToken();
-  const api = createApiClient(() => token);
+  const api = createApiClient();
   const queryClient = useQueryClient();
 
   return useMutation({

@@ -1,9 +1,8 @@
 /**
  * API通信レイヤー
  *
- * mutation系リクエスト（POST/PUT/PATCH/DELETE）に
- * X-CSRF-Tokenヘッダーを自動付与するAPIクライアント。
  * credentials: "include" により Cookie を自動送信する。
+ * CSRF保護はSameSite=Lax Cookie + CORSポリシーで実現する。
  *
  * NEXT_PUBLIC_API_URL 環境変数でAPIサーバーのベースURLを指定する。
  * 未設定の場合は同一オリジン（相対パス）にフォールバックする。
@@ -30,17 +29,10 @@ export class ApiError extends Error {
   }
 }
 
-/** CSRFトークンを返すゲッター関数の型 */
-type TokenGetter = () => string | null;
-
-/** mutation系メソッド（CSRFトークンが必要） */
-const MUTATION_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
-
 /**
  * APIリクエストを実行する共通関数
  */
 async function request<T>(
-  getToken: TokenGetter,
   method: string,
   url: string,
   body?: unknown
@@ -48,14 +40,6 @@ async function request<T>(
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
-
-  // mutation系リクエストにはCSRFトークンを付与
-  if (MUTATION_METHODS.has(method)) {
-    const token = getToken();
-    if (token) {
-      headers["X-CSRF-Token"] = token;
-    }
-  }
 
   const options: RequestInit = {
     method,
@@ -95,18 +79,17 @@ export interface ApiClient {
 }
 
 /**
- * CSRFトークンゲッターを注入してAPIクライアントを生成する。
- * CSRFProvider の useCSRFToken と組み合わせて使用する。
+ * APIクライアントを生成する。
  */
-export function createApiClient(getToken: TokenGetter): ApiClient {
+export function createApiClient(): ApiClient {
   return {
-    get: <T = unknown>(url: string) => request<T>(getToken, "GET", url),
+    get: <T = unknown>(url: string) => request<T>("GET", url),
     post: <T = unknown>(url: string, body?: unknown) =>
-      request<T>(getToken, "POST", url, body),
+      request<T>("POST", url, body),
     put: <T = unknown>(url: string, body?: unknown) =>
-      request<T>(getToken, "PUT", url, body),
+      request<T>("PUT", url, body),
     patch: <T = unknown>(url: string, body?: unknown) =>
-      request<T>(getToken, "PATCH", url, body),
-    delete: <T = unknown>(url: string) => request<T>(getToken, "DELETE", url),
+      request<T>("PATCH", url, body),
+    delete: <T = unknown>(url: string) => request<T>("DELETE", url),
   };
 }

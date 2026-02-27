@@ -44,6 +44,9 @@ type Config struct {
 	// Server
 	ServerPort string
 	BaseURL    string
+
+	// CORS
+	CORSAllowedOrigin string
 }
 
 // Load は環境変数からConfigを読み込む。
@@ -102,6 +105,7 @@ func Load() (*Config, error) {
 	cfg.HatebuMaxCallsPerCycle = getEnvInt("HATEBU_MAX_CALLS_PER_CYCLE", 100)
 	cfg.LogRetentionDays = getEnvInt("LOG_RETENTION_DAYS", 14)
 	cfg.ServerPort = getEnvString("SERVER_PORT", "8080")
+	cfg.CORSAllowedOrigin = getEnvString("CORS_ALLOWED_ORIGIN", "http://localhost:3000")
 
 	return cfg, nil
 }

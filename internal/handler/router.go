@@ -28,9 +28,9 @@ func SetupAuthRoutes(service AuthServiceInterface, config AuthHandlerConfig) htt
 // RouterDeps はNewRouterに必要な依存関係をまとめた構造体。
 type RouterDeps struct {
 	// ミドルウェア依存
-	SessionFinder middleware.SessionFinder
-	CSRFConfig    middleware.CSRFConfig
-	RateLimiter   *middleware.RateLimiter
+	SessionFinder     middleware.SessionFinder
+	CORSAllowedOrigin string
+	RateLimiter       *middleware.RateLimiter
 
 	// 認証
 	AuthService AuthServiceInterface
@@ -55,12 +55,14 @@ type RouterDeps struct {
 //
 // ミドルウェアスタックの実行順序:
 //
-//	SessionMiddleware → CSRFMiddleware → RateLimitMiddleware(GeneralMiddleware)
+//	CORSMiddleware → SessionMiddleware → RateLimitMiddleware(GeneralMiddleware)
 //
-// 認証ルート（/auth/*）とCSRFトークンエンドポイント（/api/csrf-token）は
-// ミドルウェアチェーンの外に配置する。
+// 認証ルート（/auth/*）はミドルウェアチェーンの外に配置する。
 func NewRouter(deps *RouterDeps) http.Handler {
 	r := chi.NewRouter()
+
+	// CORS ミドルウェアを最上位に適用（全ルートに効く）
+	r.Use(middleware.NewCORSMiddleware(deps.CORSAllowedOrigin))
 
 	authHandler := NewAuthHandler(deps.AuthService, deps.AuthConfig)
 	feedHandler := NewFeedHandler(deps.FeedService, deps.SubscriptionDeleter)
@@ -78,14 +80,10 @@ func NewRouter(deps *RouterDeps) http.Handler {
 		r.Get("/me", authHandler.Me)
 	})
 
-	// CSRFトークン取得エンドポイント（認証不要）
-	r.Get("/api/csrf-token", middleware.NewCSRFTokenHandler(deps.CSRFConfig).ServeHTTP)
-
 	// --- 認証が必要なルート ---
-	// ミドルウェアスタック: Session → CSRF → RateLimit(General)
+	// ミドルウェアスタック: Session → RateLimit(General)
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.NewSessionMiddleware(deps.SessionFinder))
-		r.Use(middleware.NewCSRFMiddleware(deps.CSRFConfig))
 		r.Use(deps.RateLimiter.GeneralMiddleware())
 
 		// フィード管理

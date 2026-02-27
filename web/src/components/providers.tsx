@@ -3,13 +3,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState } from "react";
 import { ThemeProvider } from "@/components/theme-provider";
-import { CSRFProvider } from "@/lib/csrf";
 import { AppStateProvider } from "@/contexts/app-state";
 
 /**
  * アプリケーション全体のプロバイダーコンポーネント
  *
- * QueryClientProvider、ThemeProvider、CSRFProvider を含む各種プロバイダーで
+ * QueryClientProvider、ThemeProvider を含む各種プロバイダーで
  * アプリケーションをラップする。
  * Client Component として実装し、layout.tsx (Server Component) から使用する。
  */
@@ -31,9 +30,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
   return (
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>
-        <CSRFProvider>
-          <AppStateProvider>{children}</AppStateProvider>
-        </CSRFProvider>
+        <AppStateProvider>{children}</AppStateProvider>
       </ThemeProvider>
     </QueryClientProvider>
   );

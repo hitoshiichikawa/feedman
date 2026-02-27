@@ -2,7 +2,6 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { createApiClient } from "@/lib/api";
-import { useCSRFToken } from "@/lib/csrf";
 import type { Subscription } from "@/types/feed";
 
 /**
@@ -12,8 +11,7 @@ import type { Subscription } from "@/types/feed";
  * ユーザーの購読一覧（フィードタイトル、favicon、fetch_status、未読数を含む）を返す。
  */
 export function useFeeds() {
-  const token = useCSRFToken();
-  const api = createApiClient(() => token);
+  const api = createApiClient();
 
   return useQuery<Subscription[]>({
     queryKey: ["feeds"],

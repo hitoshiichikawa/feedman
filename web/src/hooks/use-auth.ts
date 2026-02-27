@@ -2,7 +2,6 @@
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { createApiClient } from "@/lib/api";
-import { useCSRFToken } from "@/lib/csrf";
 import type { User } from "@/types/auth";
 
 /**
@@ -13,8 +12,7 @@ import type { User } from "@/types/auth";
  * 未認証の場合は401エラーとなりisErrorがtrueになる。
  */
 export function useCurrentUser() {
-  const token = useCSRFToken();
-  const api = createApiClient(() => token);
+  const api = createApiClient();
 
   return useQuery<User>({
     queryKey: ["auth", "me"],
@@ -31,8 +29,7 @@ export function useCurrentUser() {
  * 成功時にQueryClientのキャッシュをクリアする。
  */
 export function useLogout() {
-  const token = useCSRFToken();
-  const api = createApiClient(() => token);
+  const api = createApiClient();
   const queryClient = useQueryClient();
 
   return useMutation({

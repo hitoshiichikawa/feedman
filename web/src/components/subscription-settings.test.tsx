@@ -2,7 +2,6 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { CSRFProvider } from "@/lib/csrf";
 import { SubscriptionSettings } from "./subscription-settings";
 import type { Subscription } from "@/types/feed";
 import type { ReactNode } from "react";
@@ -22,7 +21,7 @@ function createWrapper() {
   return function Wrapper({ children }: { children: ReactNode }) {
     return (
       <QueryClientProvider client={queryClient}>
-        <CSRFProvider>{children}</CSRFProvider>
+        {children}
       </QueryClientProvider>
     );
   };
@@ -55,17 +54,9 @@ const mockStoppedSubscription: Subscription = {
  * mockFetchの設定ヘルパー
  */
 function setupMockFetch() {
-  mockFetch.mockImplementation((url: string) => {
-    if (url === "/api/csrf-token") {
-      return Promise.resolve({
-        ok: true,
-        json: async () => ({ token: "test-csrf-token" }),
-      });
-    }
-    return Promise.resolve({
-      ok: true,
-      json: async () => ({}),
-    });
+  mockFetch.mockResolvedValue({
+    ok: true,
+    json: async () => ({}),
   });
 }
 
@@ -202,12 +193,6 @@ describe("SubscriptionSettings コンポーネント", () => {
     const user = userEvent.setup();
 
     mockFetch.mockImplementation((url: string, options?: RequestInit) => {
-      if (url === "/api/csrf-token") {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({ token: "test-csrf-token" }),
-        });
-      }
       if (url === "/api/feeds/feed-2/resume" && options?.method === "POST") {
         return Promise.resolve({
           ok: true,

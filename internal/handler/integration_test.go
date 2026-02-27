@@ -47,9 +47,9 @@ func createIntegrationRouter(state *integrationState) http.Handler {
 	}
 
 	deps := &RouterDeps{
-		SessionFinder: sessionFinder,
-		CSRFConfig:    middleware.CSRFConfig{CookieSecure: false},
-		RateLimiter:   middleware.NewRateLimiter(middleware.DefaultRateLimiterConfig()),
+		SessionFinder:     sessionFinder,
+		CORSAllowedOrigin: "http://localhost:3000",
+		RateLimiter:       middleware.NewRateLimiter(middleware.DefaultRateLimiterConfig()),
 		AuthService: &mockAuthService{
 			getLoginURLFn: func(s string) string {
 				return "https://accounts.google.com/o/oauth2/auth?state=" + s
@@ -226,42 +226,6 @@ func createIntegrationRouter(state *integrationState) http.Handler {
 	return NewRouter(deps)
 }
 
-// --- ヘルパー ---
-
-// getCSRFToken はCSRFトークンを取得するヘルパー。
-func getCSRFToken(t *testing.T, router http.Handler) (string, *http.Cookie) {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/api/csrf-token", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	resp := w.Result()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /api/csrf-token status = %d, want %d", resp.StatusCode, http.StatusOK)
-	}
-
-	var body map[string]string
-	json.NewDecoder(resp.Body).Decode(&body)
-	token := body["token"]
-	if token == "" {
-		t.Fatal("expected non-empty CSRF token")
-	}
-
-	// CSRFクッキーを取得
-	var csrfCookie *http.Cookie
-	for _, c := range resp.Cookies() {
-		if c.Name == "csrf_token" {
-			csrfCookie = c
-			break
-		}
-	}
-	if csrfCookie == nil {
-		t.Fatal("expected csrf_token cookie")
-	}
-
-	return token, csrfCookie
-}
-
 // --- エンドツーエンド統合テスト ---
 
 // TestIntegration_AuthFlow_LoginCallbackMeLogout はOAuth認証フロー全体を検証する。
@@ -382,29 +346,24 @@ func TestIntegration_FeedRegistrationFlow(t *testing.T) {
 
 	router := createIntegrationRouter(state)
 
-	// 1. CSRFトークンを取得
-	csrfToken, csrfCookie := getCSRFToken(t, router)
-
-	// 2. フィード登録（POST /api/feeds）
+	// 1. フィード登録（POST /api/feeds）
 	body := `{"url": "https://example.com/feed.xml"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/feeds", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-CSRF-Token", csrfToken)
 	req.AddCookie(&http.Cookie{Name: "session_id", Value: "session-test"})
-	req.AddCookie(csrfCookie)
 	w := httptest.NewRecorder()
 
 	router.ServeHTTP(w, req)
 
 	resp := w.Result()
 	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("step2: POST /api/feeds status = %d, want %d", resp.StatusCode, http.StatusCreated)
+		t.Fatalf("step1: POST /api/feeds status = %d, want %d", resp.StatusCode, http.StatusCreated)
 	}
 
 	var feedResp map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&feedResp)
 	if feedResp["id"] == nil || feedResp["id"] == "" {
-		t.Fatal("step2: expected non-empty feed id")
+		t.Fatal("step1: expected non-empty feed id")
 	}
 	feedID := feedResp["id"].(string)
 
@@ -479,8 +438,6 @@ func TestIntegration_ItemStateManagement(t *testing.T) {
 
 	router := createIntegrationRouter(state)
 
-	csrfToken, csrfCookie := getCSRFToken(t, router)
-
 	// 1. 記事詳細を取得（GET /api/items/{id}）
 	req := httptest.NewRequest(http.MethodGet, "/api/items/item-1", nil)
 	req.AddCookie(&http.Cookie{Name: "session_id", Value: "session-test"})
@@ -506,9 +463,7 @@ func TestIntegration_ItemStateManagement(t *testing.T) {
 	body := `{"is_read": true}`
 	req = httptest.NewRequest(http.MethodPut, "/api/items/item-1/state", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-CSRF-Token", csrfToken)
 	req.AddCookie(&http.Cookie{Name: "session_id", Value: "session-test"})
-	req.AddCookie(csrfCookie)
 	w = httptest.NewRecorder()
 
 	router.ServeHTTP(w, req)
@@ -528,9 +483,7 @@ func TestIntegration_ItemStateManagement(t *testing.T) {
 	body = `{"is_starred": true}`
 	req = httptest.NewRequest(http.MethodPut, "/api/items/item-1/state", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-CSRF-Token", csrfToken)
 	req.AddCookie(&http.Cookie{Name: "session_id", Value: "session-test"})
-	req.AddCookie(csrfCookie)
 	w = httptest.NewRecorder()
 
 	router.ServeHTTP(w, req)
@@ -558,15 +511,11 @@ func TestIntegration_UnsubscribeAndWithdrawFlow(t *testing.T) {
 
 	router := createIntegrationRouter(state)
 
-	csrfToken, csrfCookie := getCSRFToken(t, router)
-
 	// 1. フィード登録
 	body := `{"url": "https://example.com/feed.xml"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/feeds", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-CSRF-Token", csrfToken)
 	req.AddCookie(&http.Cookie{Name: "session_id", Value: "session-test"})
-	req.AddCookie(csrfCookie)
 	w := httptest.NewRecorder()
 
 	router.ServeHTTP(w, req)
@@ -587,9 +536,7 @@ func TestIntegration_UnsubscribeAndWithdrawFlow(t *testing.T) {
 
 	// 2. フィード削除（購読解除）（DELETE /api/feeds/{id}）
 	req = httptest.NewRequest(http.MethodDelete, "/api/feeds/"+feedID, nil)
-	req.Header.Set("X-CSRF-Token", csrfToken)
 	req.AddCookie(&http.Cookie{Name: "session_id", Value: "session-test"})
-	req.AddCookie(csrfCookie)
 	w = httptest.NewRecorder()
 
 	router.ServeHTTP(w, req)
@@ -606,9 +553,7 @@ func TestIntegration_UnsubscribeAndWithdrawFlow(t *testing.T) {
 
 	// 3. 退会（DELETE /api/users/me）
 	req = httptest.NewRequest(http.MethodDelete, "/api/users/me", nil)
-	req.Header.Set("X-CSRF-Token", csrfToken)
 	req.AddCookie(&http.Cookie{Name: "session_id", Value: "session-test"})
-	req.AddCookie(csrfCookie)
 	w = httptest.NewRecorder()
 
 	router.ServeHTTP(w, req)
@@ -669,46 +614,3 @@ func TestIntegration_ProtectedEndpoints_RequireAuth(t *testing.T) {
 	}
 }
 
-// TestIntegration_CSRFProtection_MutationEndpoints は状態変更エンドポイントがCSRF保護されていることを検証する。
-func TestIntegration_CSRFProtection_MutationEndpoints(t *testing.T) {
-	state := newIntegrationState()
-	state.sessions["session-test"] = &model.Session{
-		ID:        "session-test",
-		UserID:    "user-test",
-		ExpiresAt: time.Now().Add(1 * time.Hour),
-	}
-
-	router := createIntegrationRouter(state)
-
-	mutationEndpoints := []struct {
-		method string
-		path   string
-		body   string
-	}{
-		{http.MethodPost, "/api/feeds", `{"url": "https://example.com"}`},
-		{http.MethodPatch, "/api/feeds/feed-1", `{"feed_url": "https://new.com"}`},
-		{http.MethodDelete, "/api/feeds/feed-1", ""},
-		{http.MethodPut, "/api/items/item-1/state", `{"is_read": true}`},
-		{http.MethodDelete, "/api/subscriptions/sub-1", ""},
-		{http.MethodPut, "/api/subscriptions/sub-1/settings", `{"fetch_interval_minutes": 60}`},
-		{http.MethodPost, "/api/subscriptions/sub-1/resume", ""},
-		{http.MethodDelete, "/api/users/me", ""},
-	}
-
-	for _, ep := range mutationEndpoints {
-		t.Run(ep.method+" "+ep.path+" without CSRF", func(t *testing.T) {
-			req := httptest.NewRequest(ep.method, ep.path, strings.NewReader(ep.body))
-			req.Header.Set("Content-Type", "application/json")
-			req.AddCookie(&http.Cookie{Name: "session_id", Value: "session-test"})
-			// CSRFトークンなし
-			w := httptest.NewRecorder()
-
-			router.ServeHTTP(w, req)
-
-			if w.Result().StatusCode != http.StatusForbidden {
-				t.Errorf("%s %s (no CSRF) status = %d, want %d",
-					ep.method, ep.path, w.Result().StatusCode, http.StatusForbidden)
-			}
-		})
-	}
-}

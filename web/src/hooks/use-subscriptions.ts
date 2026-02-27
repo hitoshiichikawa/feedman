@@ -2,7 +2,6 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { createApiClient } from "@/lib/api";
-import { useCSRFToken } from "@/lib/csrf";
 
 /** フェッチ間隔更新のパラメータ */
 interface UpdateFetchIntervalParams {
@@ -16,8 +15,7 @@ interface UpdateFetchIntervalParams {
  * PATCH /api/subscriptions/:id に { fetch_interval_minutes: number } を送信する。
  */
 export function useUpdateFetchInterval() {
-  const token = useCSRFToken();
-  const api = createApiClient(() => token);
+  const api = createApiClient();
   const queryClient = useQueryClient();
 
   return useMutation({
@@ -41,8 +39,7 @@ export function useUpdateFetchInterval() {
  * 成功時にfeedsキャッシュを無効化する。
  */
 export function useUnsubscribe() {
-  const token = useCSRFToken();
-  const api = createApiClient(() => token);
+  const api = createApiClient();
   const queryClient = useQueryClient();
 
   return useMutation({
@@ -61,8 +58,7 @@ export function useUnsubscribe() {
  * 成功時にfeedsキャッシュを無効化する。
  */
 export function useResumeFeed() {
-  const token = useCSRFToken();
-  const api = createApiClient(() => token);
+  const api = createApiClient();
   const queryClient = useQueryClient();
 
   return useMutation({

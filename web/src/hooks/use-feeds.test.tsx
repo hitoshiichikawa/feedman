@@ -2,7 +2,6 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useFeeds } from "./use-feeds";
-import { CSRFProvider } from "@/lib/csrf";
 import type { Subscription } from "@/types/feed";
 import type { ReactNode } from "react";
 
@@ -10,7 +9,7 @@ import type { ReactNode } from "react";
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
 
-/** テスト用のQueryClient + CSRFProvider ラッパー */
+/** テスト用のQueryClientラッパー */
 function createWrapper() {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -21,9 +20,7 @@ function createWrapper() {
   });
   return function Wrapper({ children }: { children: ReactNode }) {
     return (
-      <QueryClientProvider client={queryClient}>
-        <CSRFProvider>{children}</CSRFProvider>
-      </QueryClientProvider>
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
     );
   };
 }
@@ -57,39 +54,16 @@ const mockSubscriptions: Subscription[] = [
   },
 ];
 
-/**
- * mockFetchの呼び出しを設定するヘルパー。
- * CSRFProvider が /api/csrf-token を最初にfetchするため、
- * それに対するレスポンスも設定する必要がある。
- */
-function setupMockFetch(apiResponse: Parameters<typeof mockFetch.mockImplementation>[0]) {
-  mockFetch.mockImplementation((url: string) => {
-    if (url === "/api/csrf-token") {
-      return Promise.resolve({
-        ok: true,
-        json: async () => ({ token: "test-csrf-token" }),
-      });
-    }
-    // API呼び出し
-    if (typeof apiResponse === "function") {
-      return apiResponse(url);
-    }
-    return apiResponse;
-  });
-}
-
 describe("useFeeds", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
   it("購読一覧を取得できること", async () => {
-    setupMockFetch(() =>
-      Promise.resolve({
-        ok: true,
-        json: async () => mockSubscriptions,
-      })
-    );
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => mockSubscriptions,
+    });
 
     const { result } = renderHook(() => useFeeds(), {
       wrapper: createWrapper(),
@@ -109,15 +83,7 @@ describe("useFeeds", () => {
   });
 
   it("取得中はローディング状態であること", () => {
-    setupMockFetch((url: string) => {
-      if (url === "/api/subscriptions") {
-        return new Promise(() => {}); // 解決しない
-      }
-      return Promise.resolve({
-        ok: true,
-        json: async () => ({ token: "test-csrf-token" }),
-      });
-    });
+    mockFetch.mockReturnValue(new Promise(() => {})); // 解決しない
 
     const { result } = renderHook(() => useFeeds(), {
       wrapper: createWrapper(),
@@ -128,18 +94,10 @@ describe("useFeeds", () => {
   });
 
   it("APIエラー時はエラー状態になること", async () => {
-    setupMockFetch((url: string) => {
-      if (url === "/api/subscriptions") {
-        return Promise.resolve({
-          ok: false,
-          status: 500,
-          json: async () => ({ message: "Internal Server Error" }),
-        });
-      }
-      return Promise.resolve({
-        ok: true,
-        json: async () => ({ token: "test-csrf-token" }),
-      });
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ message: "Internal Server Error" }),
     });
 
     const { result } = renderHook(() => useFeeds(), {

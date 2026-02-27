@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -136,9 +135,9 @@ func runServe(cfg *config.Config) error {
 	// configのRateLimitGeneralはreq/min単位なのでreq/secに変換する
 
 	deps := &handler.RouterDeps{
-		SessionFinder: sessionRepo,
-		CSRFConfig:    middleware.CSRFConfig{CookieSecure: strings.HasPrefix(cfg.BaseURL, "https")},
-		RateLimiter:   middleware.NewRateLimiter(rateLimiterCfg),
+		SessionFinder:     sessionRepo,
+		CORSAllowedOrigin: cfg.CORSAllowedOrigin,
+		RateLimiter:       middleware.NewRateLimiter(rateLimiterCfg),
 
 		AuthService: authService,
 		AuthConfig: handler.AuthHandlerConfig{

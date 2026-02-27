@@ -2,7 +2,6 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { CSRFProvider } from "@/lib/csrf";
 import { ItemList } from "./item-list";
 import type { ItemListResponse } from "@/types/item";
 import type { ReactNode } from "react";
@@ -31,7 +30,7 @@ function createWrapper() {
   return function Wrapper({ children }: { children: ReactNode }) {
     return (
       <QueryClientProvider client={queryClient}>
-        <CSRFProvider>{children}</CSRFProvider>
+        {children}
       </QueryClientProvider>
     );
   };
@@ -74,12 +73,6 @@ const mockItemsResponse: ItemListResponse = {
  */
 function setupMockFetch(response: ItemListResponse = mockItemsResponse) {
   mockFetch.mockImplementation((url: string) => {
-    if (url === "/api/csrf-token") {
-      return Promise.resolve({
-        ok: true,
-        json: async () => ({ token: "test-csrf-token" }),
-      });
-    }
     if (typeof url === "string" && url.includes("/api/feeds/feed-1/items")) {
       return Promise.resolve({
         ok: true,
