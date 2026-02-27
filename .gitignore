@@ -10,8 +10,10 @@ feedman
 
 # Environment
 .env
+.env.production
+.env.local
 .env.*
-!.env.example
+!.env.sample
 
 # IDE
 .idea/

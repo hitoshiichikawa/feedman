@@ -68,51 +68,40 @@ Web ベースの RSS/Atom フィードリーダー。Google OAuth 認証、2ペ�
 ### 1. リポジトリのクローン
 
 ```bash
-git clone https://github.com/hitoshi/feedman.git
+git clone https://github.com/hitoshiichikawa/feedman.git
 cd feedman
 ```
 
 ### 2. 環境変数の設定
 
-`.env` ファイルをプロジェクトルートに作成:
+`.env.sample` をコピーし、値を環境に合わせて編集します:
 
 ```bash
-cat <<'EOF' > .env
-# === 必須 ===
-DATABASE_URL=postgres://feedman:feedman@db:5432/feedman?sslmode=disable
-GOOGLE_CLIENT_ID=your-google-client-id
-GOOGLE_CLIENT_SECRET=your-google-client-secret
-GOOGLE_REDIRECT_URL=http://localhost:8080/auth/google/callback
-SESSION_SECRET=your-random-secret-at-least-32-chars
-BASE_URL=http://localhost:8080
-
-# === オプション（デフォルト値あり） ===
-# SERVER_PORT=8080
-# SESSION_MAX_AGE=86400              # セッション有効期間（秒）
-# FETCH_TIMEOUT=10s                  # フィードフェッチタイムアウト
-# FETCH_MAX_SIZE=5242880             # フェッチ最大サイズ（5MB）
-# FETCH_MAX_CONCURRENT=10            # 並列フェッチ数
-# FETCH_INTERVAL=5m                  # フェッチスケジューラ間隔
-# RATE_LIMIT_GENERAL=120             # API レート制限（リクエスト/分/ユーザー）
-# RATE_LIMIT_FEED_REG=10             # フィード登録レート制限（リクエスト/分/ユーザー）
-# HATEBU_TTL=24h                     # はてブ数キャッシュ TTL
-# HATEBU_BATCH_INTERVAL=10m          # はてブバッチ実行間隔
-# HATEBU_API_INTERVAL=5s             # はてブ API 呼び出し間隔
-# HATEBU_MAX_CALLS_PER_CYCLE=100     # はてブ 1 サイクルあたり最大 API 呼び出し数
-# LOG_RETENTION_DAYS=14              # ログ保持日数
-EOF
+# ローカル開発の場合
+cp .env.sample .env.production
+vi .env.production
 ```
 
-`SESSION_SECRET` は以下で生成できます:
+最低限、以下の値を設定してください:
+
+| 変数 | 設定内容 |
+|------|---------|
+| `GOOGLE_CLIENT_ID` | Google Cloud Console で取得した OAuth クライアント ID |
+| `GOOGLE_CLIENT_SECRET` | Google Cloud Console で取得した OAuth クライアントシークレット |
+| `SESSION_SECRET` | ランダムな文字列（下記コマンドで生成） |
 
 ```bash
+# SESSION_SECRET の生成
 openssl rand -base64 32
 ```
+
+> `.env.production` は `.gitignore` に含まれており、リポジトリにコミットされません。
+> シークレットの流出を防ぐため、**環境変数ファイルは絶対にコミットしないでください。**
 
 ### 3. Docker Compose で起動
 
 ```bash
-docker compose up -d
+docker compose --env-file .env.production up -d
 ```
 
 3 つのコンテナが起動します:
@@ -126,7 +115,7 @@ docker compose up -d
 ### 4. DB マイグレーション
 
 ```bash
-docker compose exec api /feedman migrate
+docker compose --env-file .env.production exec api /feedman migrate
 ```
 
 ### 5. フロントエンドの起動（開発環境）
@@ -147,8 +136,10 @@ npm run dev
 
 ## 本番デプロイ時の注意事項
 
-- `SESSION_SECRET` には十分に長いランダム文字列を設定する
-- `BASE_URL` と `GOOGLE_REDIRECT_URL` を実際のドメインに変更する
+- `.env.sample` を `.env.production` にコピーし、本番用の値を設定する
+- **`.env.production` は絶対に Git にコミットしない**（`.gitignore` で除外済み）
+- `SESSION_SECRET` には `openssl rand -base64 32` で生成した十分に長いランダム文字列を設定する
+- `BASE_URL` と `GOOGLE_REDIRECT_URL` を実際のドメイン（HTTPS）に変更する
 - PostgreSQL のパスワードをデフォルト（`feedman`）から変更する
 - HTTPS を有効にし、リバースプロキシ（nginx 等）を前段に配置する
 - `docker-compose.yml` の `db` ポートマッピングを削除し、外部からの直接接続を遮断する
