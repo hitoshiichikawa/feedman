@@ -6,6 +6,7 @@ import {
   useEffect,
   useState,
 } from "react";
+import { API_BASE_URL } from "@/lib/api";
 
 /** CSRFトークンコンテキスト */
 const CSRFContext = createContext<string | null | undefined>(undefined);
@@ -22,7 +23,7 @@ export function CSRFProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const fetchToken = async () => {
       try {
-        const response = await fetch("/api/csrf-token", {
+        const response = await fetch(`${API_BASE_URL}/api/csrf-token`, {
           credentials: "include",
         });
         if (!response.ok) {

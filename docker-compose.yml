@@ -1,16 +1,31 @@
 # feedman Docker Compose 構成
 #
-# 3コンテナ構成:
-# - api:    Go APIサーバー（serveサブコマンド）
+# 4コンテナ構成:
+# - web:    Next.js フロントエンド（ポート3000を外部公開）
+# - api:    Go APIサーバー（serveサブコマンド、ポート8080を外部公開）
 # - worker: Goワーカー（workerサブコマンド）
 # - db:     PostgreSQL 16
 #
 # ネットワーク設計:
 # - internal: API <-> DB, Worker <-> DB の内部通信専用（外部通信不可）
-# - external: API（ポート公開用）とWorker（外部フィードフェッチ用）が接続
+# - external: Web, API（ポート公開用）とWorker（外部フィードフェッチ用）が接続
 #   ※API自身はSSRFをアプリケーション層（safeurl）で防止
 
 services:
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=production
+    networks:
+      - external
+    restart: unless-stopped
+
   api:
     build:
       context: .

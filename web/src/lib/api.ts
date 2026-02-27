@@ -4,7 +4,18 @@
  * mutation系リクエスト（POST/PUT/PATCH/DELETE）に
  * X-CSRF-Tokenヘッダーを自動付与するAPIクライアント。
  * credentials: "include" により Cookie を自動送信する。
+ *
+ * NEXT_PUBLIC_API_URL 環境変数でAPIサーバーのベースURLを指定する。
+ * 未設定の場合は同一オリジン（相対パス）にフォールバックする。
  */
+
+/**
+ * APIサーバーのベースURL。
+ * 末尾スラッシュは除去して保持する。
+ */
+export const API_BASE_URL = (
+  process.env.NEXT_PUBLIC_API_URL || ""
+).replace(/\/+$/, "");
 
 /** APIエラークラス */
 export class ApiError extends Error {
@@ -56,7 +67,8 @@ async function request<T>(
     options.body = JSON.stringify(body);
   }
 
-  const response = await fetch(url, options);
+  const fullUrl = `${API_BASE_URL}${url}`;
+  const response = await fetch(fullUrl, options);
 
   if (!response.ok) {
     let errorBody: unknown;

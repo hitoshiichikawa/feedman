@@ -1,6 +1,7 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
+import { API_BASE_URL } from "@/lib/api";
 
 /**
  * ログインページ
@@ -22,7 +23,7 @@ export function LoginPage() {
         {/* ログインボタン */}
         <div className="space-y-4">
           <Button asChild className="w-full" size="lg">
-            <a href="/auth/google/login">Googleアカウントでログイン</a>
+            <a href={`${API_BASE_URL}/auth/google/login`}>Googleアカウントでログイン</a>
           </Button>
           <p className="text-xs text-muted-foreground">
             初回ログイン時にアカウントが自動作成されます
