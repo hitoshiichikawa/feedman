@@ -1,0 +1,24 @@
+# バージョン管理
+.git
+.gitignore
+
+# Kiro仕様・AI設定
+.kiro/
+.claude/
+CLAUDE.md
+
+# IDE設定
+.vscode/
+.idea/
+
+# Docker自体
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# テスト・ドキュメント
+*_test.go
+*.md
+
+# バイナリ・ビルド成果物
+/feedman

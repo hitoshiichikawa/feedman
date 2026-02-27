@@ -1,0 +1,102 @@
+# feedman Docker Compose 構成
+#
+# 3コンテナ構成:
+# - api:    Go APIサーバー（serveサブコマンド）
+# - worker: Goワーカー（workerサブコマンド）
+# - db:     PostgreSQL 16
+#
+# ネットワーク設計（egress制限）:
+# - internal: API <-> DB, Worker <-> DB の内部通信専用（外部通信不可）
+# - external: Worker のみ接続し、外部RSS/Atomフィードのフェッチを許可
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["serve"]
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    environment:
+      - DATABASE_URL=postgres://feedman:feedman@db:5432/feedman?sslmode=disable
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - GOOGLE_REDIRECT_URL=${GOOGLE_REDIRECT_URL:-http://localhost:8080/auth/google/callback}
+      - SESSION_SECRET=${SESSION_SECRET}
+      - BASE_URL=${BASE_URL:-http://localhost:8080}
+      - SERVER_PORT=8080
+      - LOG_RETENTION_DAYS=14
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "14"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - internal
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["worker"]
+    environment:
+      - DATABASE_URL=postgres://feedman:feedman@db:5432/feedman?sslmode=disable
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-dummy}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-dummy}
+      - GOOGLE_REDIRECT_URL=${GOOGLE_REDIRECT_URL:-http://localhost:8080/auth/google/callback}
+      - SESSION_SECRET=${SESSION_SECRET:-dummy}
+      - BASE_URL=${BASE_URL:-http://localhost:8080}
+      - FETCH_TIMEOUT=${FETCH_TIMEOUT:-10s}
+      - FETCH_MAX_SIZE=${FETCH_MAX_SIZE:-5242880}
+      - FETCH_MAX_CONCURRENT=${FETCH_MAX_CONCURRENT:-10}
+      - FETCH_INTERVAL=${FETCH_INTERVAL:-5m}
+      - HATEBU_TTL=${HATEBU_TTL:-24h}
+      - HATEBU_BATCH_INTERVAL=${HATEBU_BATCH_INTERVAL:-10m}
+      - HATEBU_API_INTERVAL=${HATEBU_API_INTERVAL:-5s}
+      - HATEBU_MAX_CALLS_PER_CYCLE=${HATEBU_MAX_CALLS_PER_CYCLE:-100}
+      - LOG_RETENTION_DAYS=14
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "14"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - internal
+      - external
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=feedman
+      - POSTGRES_PASSWORD=feedman
+      - POSTGRES_DB=feedman
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U feedman"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+networks:
+  internal:
+    driver: bridge
+    internal: true
+  external:
+    driver: bridge
+
+volumes:
+  pgdata:

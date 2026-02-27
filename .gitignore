@@ -1,0 +1,45 @@
+# Binaries
+feedman
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+/vendor/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node / Frontend
+web/node_modules/
+web/.next/
+web/out/
+
+# Test
+*.test
+coverage/
+web/coverage/
+
+# Docker volumes
+pgdata/
+
+# Temporary
+*.tmp
+*.log
+
+# Claude Code local settings
+.claude/settings.local.json
