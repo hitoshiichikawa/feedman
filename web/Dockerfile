@@ -31,10 +31,12 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
-# Next.js のスタンドアロン出力を利用
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/public ./public
+# Next.js のスタンドアロン出力を利用（node ユーザーで所有）
+COPY --from=builder --chown=node:node /app/.next/standalone ./
+COPY --from=builder --chown=node:node /app/.next/static ./.next/static
+COPY --from=builder --chown=node:node /app/public ./public
+
+USER node
 
 EXPOSE 3000
 
