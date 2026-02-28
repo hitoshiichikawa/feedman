@@ -10,6 +10,9 @@ const (
 	CommandWorker Command = "worker"
 	// CommandMigrate はデータベースマイグレーションを実行することを示す。
 	CommandMigrate Command = "migrate"
+	// CommandHealthcheck はヘルスチェックを実行することを示す。
+	// distroless環境でのDockerヘルスチェック用。
+	CommandHealthcheck Command = "healthcheck"
 )
 
 // ParseCommand はコマンドライン引数からサブコマンドを解析する。
@@ -26,6 +29,8 @@ func ParseCommand(args []string) Command {
 		return CommandServe
 	case "migrate":
 		return CommandMigrate
+	case "healthcheck":
+		return CommandHealthcheck
 	default:
 		return CommandServe
 	}

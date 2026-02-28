@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -25,8 +27,16 @@ func SetupAuthRoutes(service AuthServiceInterface, config AuthHandlerConfig) htt
 	return r
 }
 
+// HealthChecker はヘルスチェック用のDB疎通確認インターフェース。
+type HealthChecker interface {
+	PingContext(ctx context.Context) error
+}
+
 // RouterDeps はNewRouterに必要な依存関係をまとめた構造体。
 type RouterDeps struct {
+	// ヘルスチェック
+	HealthChecker HealthChecker
+
 	// ミドルウェア依存
 	SessionFinder     middleware.SessionFinder
 	CORSAllowedOrigin string
@@ -61,7 +71,13 @@ type RouterDeps struct {
 func NewRouter(deps *RouterDeps) http.Handler {
 	r := chi.NewRouter()
 
-	// CORS ミドルウェアを最上位に適用（全ルートに効く）
+	// panic recovery を最上位に適用
+	r.Use(middleware.NewRecoveryMiddleware())
+
+	// セキュリティヘッダーを適用（全ルートに効く）
+	r.Use(middleware.NewSecurityHeadersMiddleware())
+
+	// CORS ミドルウェアを適用（全ルートに効く）
 	r.Use(middleware.NewCORSMiddleware(deps.CORSAllowedOrigin))
 
 	authHandler := NewAuthHandler(deps.AuthService, deps.AuthConfig)
@@ -71,6 +87,23 @@ func NewRouter(deps *RouterDeps) http.Handler {
 	userHandler := NewUserHandler(deps.UserService)
 
 	// --- 認証不要のルート ---
+
+	// ヘルスチェック
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		status := "ok"
+		httpStatus := http.StatusOK
+
+		if deps.HealthChecker != nil {
+			if err := deps.HealthChecker.PingContext(r.Context()); err != nil {
+				status = "unhealthy"
+				httpStatus = http.StatusServiceUnavailable
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(httpStatus)
+		json.NewEncoder(w).Encode(map[string]string{"status": status})
+	})
 
 	// 認証ルート（OAuthフロー）
 	r.Route("/auth", func(r chi.Router) {

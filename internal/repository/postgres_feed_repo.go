@@ -162,14 +162,78 @@ func nullStringValue(ns sql.NullString) string {
 // next_fetch_at <= now() かつ fetch_status = 'active' かつ購読者が存在するフィードを
 // FOR UPDATE SKIP LOCKEDで排他的に取得する。
 func (r *PostgresFeedRepo) ListDueForFetch(ctx context.Context) ([]*model.Feed, error) {
-	// TODO: ワーカータスク（6.1）で実装する
-	return nil, fmt.Errorf("ListDueForFetch は未実装です")
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT DISTINCT f.id, f.feed_url, f.site_url, f.title, f.favicon_data, f.favicon_mime,
+		        f.etag, f.last_modified, f.fetch_status, f.consecutive_errors,
+		        f.error_message, f.next_fetch_at, f.created_at, f.updated_at
+		 FROM feeds f
+		 INNER JOIN subscriptions s ON f.id = s.feed_id
+		 WHERE f.next_fetch_at <= now()
+		   AND f.fetch_status = 'active'
+		 ORDER BY f.next_fetch_at ASC
+		 FOR UPDATE OF f SKIP LOCKED`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("フェッチ対象フィードの取得に失敗しました: %w", err)
+	}
+	defer rows.Close()
+
+	var feeds []*model.Feed
+	for rows.Next() {
+		feed := &model.Feed{}
+		var faviconData []byte
+		var faviconMime, siteURL, etag, lastModified, errorMessage sql.NullString
+
+		if err := rows.Scan(
+			&feed.ID, &feed.FeedURL, &siteURL, &feed.Title,
+			&faviconData, &faviconMime,
+			&etag, &lastModified, &feed.FetchStatus, &feed.ConsecutiveErrors,
+			&errorMessage, &feed.NextFetchAt, &feed.CreatedAt, &feed.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("フェッチ対象フィードの読み取りに失敗しました: %w", err)
+		}
+
+		feed.FaviconData = faviconData
+		feed.FaviconMime = nullStringValue(faviconMime)
+		feed.SiteURL = nullStringValue(siteURL)
+		feed.ETag = nullStringValue(etag)
+		feed.LastModified = nullStringValue(lastModified)
+		feed.ErrorMessage = nullStringValue(errorMessage)
+
+		feeds = append(feeds, feed)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("フェッチ対象フィードの走査に失敗しました: %w", err)
+	}
+
+	return feeds, nil
 }
 
 // UpdateFetchState はフィードのフェッチ状態を更新する。
 func (r *PostgresFeedRepo) UpdateFetchState(ctx context.Context, feed *model.Feed) error {
-	// TODO: ワーカータスク（6.1）で実装する
-	return fmt.Errorf("UpdateFetchState は未実装です")
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE feeds SET
+		    fetch_status = $2,
+		    consecutive_errors = $3,
+		    error_message = $4,
+		    next_fetch_at = $5,
+		    etag = $6,
+		    last_modified = $7,
+		    updated_at = now()
+		 WHERE id = $1`,
+		feed.ID,
+		feed.FetchStatus,
+		feed.ConsecutiveErrors,
+		nullString(feed.ErrorMessage),
+		feed.NextFetchAt,
+		nullString(feed.ETag),
+		nullString(feed.LastModified),
+	)
+	if err != nil {
+		return fmt.Errorf("フェッチ状態の更新に失敗しました: %w", err)
+	}
+	return nil
 }
 
 // compile-time interface check

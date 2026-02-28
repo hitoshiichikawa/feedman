@@ -16,6 +16,7 @@ import (
 	"github.com/hitoshi/feedman/internal/database"
 	"github.com/hitoshi/feedman/internal/feed"
 	"github.com/hitoshi/feedman/internal/handler"
+	"github.com/hitoshi/feedman/internal/hatebu"
 	"github.com/hitoshi/feedman/internal/item"
 	"github.com/hitoshi/feedman/internal/logger"
 	"github.com/hitoshi/feedman/internal/middleware"
@@ -23,6 +24,7 @@ import (
 	"github.com/hitoshi/feedman/internal/security"
 	"github.com/hitoshi/feedman/internal/subscription"
 	"github.com/hitoshi/feedman/internal/user"
+	"github.com/hitoshi/feedman/internal/worker/cleanup"
 	fetchpkg "github.com/hitoshi/feedman/internal/worker/fetch"
 )
 
@@ -46,12 +48,21 @@ func Init(w io.Writer) (*config.Config, error) {
 // コマンドライン引数からサブコマンドを解析し、対応するモードで起動する。
 // argsにはos.Args[1:]を渡す。
 func Run(w io.Writer, args []string) error {
+	cmd := ParseCommand(args)
+
+	// healthcheck は軽量サブコマンドのため、フル初期化をスキップする
+	if cmd == CommandHealthcheck {
+		port := os.Getenv("SERVER_PORT")
+		if port == "" {
+			port = "8080"
+		}
+		return runHealthcheck(port)
+	}
+
 	cfg, err := Init(w)
 	if err != nil {
 		return fmt.Errorf("initialization failed: %w", err)
 	}
-
-	cmd := ParseCommand(args)
 
 	slog.Info("starting application",
 		slog.String("command", string(cmd)),
@@ -135,6 +146,7 @@ func runServe(cfg *config.Config) error {
 	// configのRateLimitGeneralはreq/min単位なのでreq/secに変換する
 
 	deps := &handler.RouterDeps{
+		HealthChecker:     db,
 		SessionFinder:     sessionRepo,
 		CORSAllowedOrigin: cfg.CORSAllowedOrigin,
 		RateLimiter:       middleware.NewRateLimiter(rateLimiterCfg),
@@ -233,6 +245,21 @@ func runWorker(cfg *config.Config) error {
 		feedRepo, fetcher, slog.Default(), cfg.FetchMaxConcurrent,
 	)
 
+	// 6. クリーンアップジョブの初期化
+	cleanupJob := cleanup.NewCleanupJob(db, slog.Default())
+
+	// 7. はてなブックマークバッチジョブの初期化
+	hatebuClient := hatebu.NewClient(
+		&http.Client{Timeout: 10 * time.Second},
+		slog.Default(),
+	)
+	hatebuBatch := hatebu.NewBatchJob(itemRepo, hatebuClient, slog.Default(), hatebu.BatchConfig{
+		BatchInterval:    cfg.HatebuBatchInterval,
+		APIInterval:      cfg.HatebuAPIInterval,
+		MaxCallsPerCycle: cfg.HatebuMaxCallsPerCycle,
+		HatebuTTL:        cfg.HatebuTTL,
+	})
+
 	// グレースフルシャットダウンのためのシグナルハンドリング
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -251,6 +278,31 @@ func runWorker(cfg *config.Config) error {
 		slog.Int("max_concurrent", cfg.FetchMaxConcurrent),
 	)
 
+	// はてなブックマークバッチジョブをバックグラウンドで起動
+	go hatebuBatch.Start(ctx)
+
+	// クリーンアップジョブを日次でバックグラウンド実行
+	go func() {
+		// 起動直後に1回実行
+		if err := cleanupJob.Run(ctx); err != nil {
+			slog.Error("cleanup job failed", slog.String("error", err.Error()))
+		}
+
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := cleanupJob.Run(ctx); err != nil {
+					slog.Error("cleanup job failed", slog.String("error", err.Error()))
+				}
+			}
+		}
+	}()
+
+	// フェッチスケジューラをメインgoroutineで実行（ブロッキング）
 	scheduler.Start(ctx, cfg.FetchInterval)
 
 	slog.Info("worker stopped gracefully")
@@ -269,6 +321,26 @@ func runMigrate(cfg *config.Config) error {
 	}
 
 	slog.Info("database migrations completed successfully")
+	return nil
+}
+
+// runHealthcheck はヘルスチェックを実行する。
+// distroless環境でのDockerヘルスチェック用サブコマンド。
+// /health エンドポイントにHTTPリクエストを送り、結果を返す。
+func runHealthcheck(port string) error {
+	url := fmt.Sprintf("http://localhost:%s/health", port)
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	resp, err := client.Get(url)
+	if err != nil {
+		return fmt.Errorf("health check failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("health check returned status %d", resp.StatusCode)
+	}
+
 	return nil
 }
 
