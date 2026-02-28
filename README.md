@@ -99,6 +99,7 @@ vi .env.production
 | `GOOGLE_CLIENT_ID` | Google Cloud Console で取得した OAuth クライアント ID |
 | `GOOGLE_CLIENT_SECRET` | Google Cloud Console で取得した OAuth クライアントシークレット |
 | `SESSION_SECRET` | ランダムな文字列（下記コマンドで生成） |
+| `POSTGRES_PASSWORD` | PostgreSQL パスワード（本番では必ずデフォルトから変更） |
 | `NEXT_PUBLIC_API_URL` | ブラウザから見た API サーバーの URL（例: `https://api.example.com`） |
 | `CORS_ALLOWED_ORIGIN` | フロントエンドのオリジン（例: `https://example.com`） |
 
@@ -254,6 +255,7 @@ CORSMiddleware → SessionMiddleware → RateLimitMiddleware(General)
 ## セキュリティ
 
 - **認証**: Google OAuth 2.0 + HTTP Only Cookie セッション
+- **Cookie Secure 自動判定**: `BASE_URL` が `https://` の場合、Cookie の `Secure` フラグが自動的に有効化される
 - **CSRF対策**: SameSite=Lax Cookie + CORS ポリシーによる防御
 - **XSS**: bluemonday によるサニタイズ（許可タグのみ通過、script/iframe/style 除去）
 - **SSRF**: safeurl によるプライベート IP・メタデータ IP・ループバック拒否

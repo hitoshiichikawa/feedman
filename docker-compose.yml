@@ -34,13 +34,14 @@ services:
     ports:
       - "${SERVER_PORT:-8080}:8080"
     environment:
-      - DATABASE_URL=postgres://feedman:feedman@db:5432/feedman?sslmode=disable
+      - DATABASE_URL=postgres://${POSTGRES_USER:-feedman}:${POSTGRES_PASSWORD:-feedman}@db:5432/${POSTGRES_DB:-feedman}?sslmode=disable
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - GOOGLE_REDIRECT_URL=${GOOGLE_REDIRECT_URL:-http://localhost:8080/auth/google/callback}
       - SESSION_SECRET=${SESSION_SECRET}
       - BASE_URL=${BASE_URL:-http://localhost:8080}
       - CORS_ALLOWED_ORIGIN=${CORS_ALLOWED_ORIGIN:-http://localhost:3000}
+      - COOKIE_DOMAIN=${COOKIE_DOMAIN:-}
       - SERVER_PORT=8080
       - LOG_RETENTION_DAYS=14
     logging:
@@ -62,7 +63,7 @@ services:
       dockerfile: Dockerfile
     command: ["worker"]
     environment:
-      - DATABASE_URL=postgres://feedman:feedman@db:5432/feedman?sslmode=disable
+      - DATABASE_URL=postgres://${POSTGRES_USER:-feedman}:${POSTGRES_PASSWORD:-feedman}@db:5432/${POSTGRES_DB:-feedman}?sslmode=disable
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-dummy}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-dummy}
       - GOOGLE_REDIRECT_URL=${GOOGLE_REDIRECT_URL:-http://localhost:8080/auth/google/callback}
@@ -93,9 +94,9 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      - POSTGRES_USER=feedman
-      - POSTGRES_PASSWORD=feedman
-      - POSTGRES_DB=feedman
+      - POSTGRES_USER=${POSTGRES_USER:-feedman}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-feedman}
+      - POSTGRES_DB=${POSTGRES_DB:-feedman}
     ports:
       - "${DB_PORT:-5432}:5432"
     volumes:
@@ -103,7 +104,7 @@ services:
     networks:
       - internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U feedman"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-feedman}"]
       interval: 5s
       timeout: 5s
       retries: 5

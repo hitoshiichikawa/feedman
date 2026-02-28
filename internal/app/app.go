@@ -142,6 +142,8 @@ func runServe(cfg *config.Config) error {
 		AuthService: authService,
 		AuthConfig: handler.AuthHandlerConfig{
 			BaseURL:       cfg.BaseURL,
+			CookieDomain:  cfg.CookieDomain,
+			CookieSecure:  cfg.CookieSecure,
 			SessionMaxAge: cfg.SessionMaxAge,
 		},
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -44,6 +45,10 @@ type Config struct {
 	// Server
 	ServerPort string
 	BaseURL    string
+
+	// Cookie
+	CookieSecure bool
+	CookieDomain string
 
 	// CORS
 	CORSAllowedOrigin string
@@ -105,6 +110,8 @@ func Load() (*Config, error) {
 	cfg.HatebuMaxCallsPerCycle = getEnvInt("HATEBU_MAX_CALLS_PER_CYCLE", 100)
 	cfg.LogRetentionDays = getEnvInt("LOG_RETENTION_DAYS", 14)
 	cfg.ServerPort = getEnvString("SERVER_PORT", "8080")
+	cfg.CookieSecure = strings.HasPrefix(cfg.BaseURL, "https://")
+	cfg.CookieDomain = getEnvString("COOKIE_DOMAIN", "")
 	cfg.CORSAllowedOrigin = getEnvString("CORS_ALLOWED_ORIGIN", "http://localhost:3000")
 
 	return cfg, nil

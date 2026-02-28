@@ -88,10 +88,13 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	// stateクッキーを削除
 	http.SetCookie(w, &http.Cookie{
-		Name:   oauthStateCookie,
-		Value:  "",
-		Path:   "/",
-		MaxAge: -1,
+		Name:     oauthStateCookie,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   h.config.CookieSecure,
+		SameSite: http.SameSiteLaxMode,
 	})
 
 	// 2. 認可コードの取得
