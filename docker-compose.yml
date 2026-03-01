@@ -102,8 +102,6 @@ services:
       - POSTGRES_USER=${POSTGRES_USER:-feedman}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-feedman}
       - POSTGRES_DB=${POSTGRES_DB:-feedman}
-    ports:
-      - "${DB_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
