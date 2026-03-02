@@ -147,7 +147,7 @@ docker compose --env-file .env.production exec api /feedman migrate
 - `BASE_URL` と `GOOGLE_REDIRECT_URL` を実際のドメイン（HTTPS）に変更する
 - PostgreSQL のパスワードをデフォルト（`feedman`）から変更する
 - HTTPS を有効にし、リバースプロキシ（nginx 等）を前段に配置する
-- `docker-compose.yml` の `db` ポートマッピングを削除し、外部からの直接接続を遮断する
+- DB ポートはデフォルトで非公開。開発時に直接接続が必要な場合のみ `DB_PORT=5432` を設定する
 
 ## ネットワークセキュリティ
 
