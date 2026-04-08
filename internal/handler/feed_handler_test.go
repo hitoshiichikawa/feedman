@@ -19,8 +19,8 @@ import (
 // mockFeedService はFeedServiceInterfaceのモック実装。
 type mockFeedService struct {
 	registerFeedFn  func(ctx context.Context, userID, inputURL string) (*model.Feed, *model.Subscription, error)
-	getFeedFn       func(ctx context.Context, feedID string) (*model.Feed, error)
-	updateFeedURLFn func(ctx context.Context, feedID, newURL string) (*model.Feed, error)
+	getFeedFn       func(ctx context.Context, userID, feedID string) (*model.Feed, error)
+	updateFeedURLFn func(ctx context.Context, userID, feedID, newURL string) (*model.Feed, error)
 }
 
 func (m *mockFeedService) RegisterFeed(ctx context.Context, userID, inputURL string) (*model.Feed, *model.Subscription, error) {
@@ -30,16 +30,16 @@ func (m *mockFeedService) RegisterFeed(ctx context.Context, userID, inputURL str
 	return nil, nil, nil
 }
 
-func (m *mockFeedService) GetFeed(ctx context.Context, feedID string) (*model.Feed, error) {
+func (m *mockFeedService) GetFeed(ctx context.Context, userID, feedID string) (*model.Feed, error) {
 	if m.getFeedFn != nil {
-		return m.getFeedFn(ctx, feedID)
+		return m.getFeedFn(ctx, userID, feedID)
 	}
 	return nil, nil
 }
 
-func (m *mockFeedService) UpdateFeedURL(ctx context.Context, feedID, newURL string) (*model.Feed, error) {
+func (m *mockFeedService) UpdateFeedURL(ctx context.Context, userID, feedID, newURL string) (*model.Feed, error) {
 	if m.updateFeedURLFn != nil {
-		return m.updateFeedURLFn(ctx, feedID, newURL)
+		return m.updateFeedURLFn(ctx, userID, feedID, newURL)
 	}
 	return nil, nil
 }
@@ -307,7 +307,10 @@ func TestFeedHandler_RegisterFeed_NoUserID_ReturnsUnauthorized(t *testing.T) {
 
 func TestFeedHandler_GetFeed_Success(t *testing.T) {
 	svc := &mockFeedService{
-		getFeedFn: func(ctx context.Context, feedID string) (*model.Feed, error) {
+		getFeedFn: func(ctx context.Context, userID, feedID string) (*model.Feed, error) {
+			if userID != "user-123" {
+				t.Errorf("userID = %q, want %q", userID, "user-123")
+			}
 			if feedID != "feed-id-1" {
 				t.Errorf("feedID = %q, want %q", feedID, "feed-id-1")
 			}
@@ -351,7 +354,7 @@ func TestFeedHandler_GetFeed_Success(t *testing.T) {
 
 func TestFeedHandler_GetFeed_NotFound(t *testing.T) {
 	svc := &mockFeedService{
-		getFeedFn: func(ctx context.Context, feedID string) (*model.Feed, error) {
+		getFeedFn: func(ctx context.Context, userID, feedID string) (*model.Feed, error) {
 			return nil, nil
 		},
 	}
@@ -378,7 +381,7 @@ func TestFeedHandler_GetFeed_NotFound(t *testing.T) {
 
 func TestFeedHandler_GetFeed_ServiceError_ReturnsInternalServerError(t *testing.T) {
 	svc := &mockFeedService{
-		getFeedFn: func(ctx context.Context, feedID string) (*model.Feed, error) {
+		getFeedFn: func(ctx context.Context, userID, feedID string) (*model.Feed, error) {
 			return nil, errors.New("database error")
 		},
 	}
@@ -398,11 +401,63 @@ func TestFeedHandler_GetFeed_ServiceError_ReturnsInternalServerError(t *testing.
 	}
 }
 
+// TestFeedHandler_GetFeed_NoUserID_ReturnsUnauthorized は未認証アクセスが401を返すことを検証する。
+func TestFeedHandler_GetFeed_NoUserID_ReturnsUnauthorized(t *testing.T) {
+	h := NewFeedHandler(&mockFeedService{}, &mockSubscriptionDeleter{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/feeds/feed-id-1", nil)
+	// ユーザーIDを注入しない
+	req = withChiURLParam(req, "id", "feed-id-1")
+	w := httptest.NewRecorder()
+
+	h.GetFeed(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+// TestFeedHandler_GetFeed_OtherUsersFeed_ReturnsNotFound は他ユーザーのフィードに対する
+// GET が IDOR を避けるため 404 を返すことを検証する（リグレッションテスト for issue #34）。
+func TestFeedHandler_GetFeed_OtherUsersFeed_ReturnsNotFound(t *testing.T) {
+	svc := &mockFeedService{
+		// サービス層が認可チェックで購読なしと判定し nil, nil を返す想定。
+		getFeedFn: func(ctx context.Context, userID, feedID string) (*model.Feed, error) {
+			if userID != "user-attacker" {
+				t.Errorf("userID = %q, want %q", userID, "user-attacker")
+			}
+			return nil, nil
+		},
+	}
+
+	h := NewFeedHandler(svc, &mockSubscriptionDeleter{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/feeds/feed-of-other-user", nil)
+	req = withUserID(req, "user-attacker")
+	req = withChiURLParam(req, "id", "feed-of-other-user")
+	w := httptest.NewRecorder()
+
+	h.GetFeed(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+	errResp := parseAPIErrorResponse(t, w)
+	if errResp["code"] != "FEED_NOT_FOUND" {
+		t.Errorf("code = %q, want %q", errResp["code"], "FEED_NOT_FOUND")
+	}
+}
+
 // --- PATCH /api/feeds/:id テスト ---
 
 func TestFeedHandler_UpdateFeedURL_Success(t *testing.T) {
 	svc := &mockFeedService{
-		updateFeedURLFn: func(ctx context.Context, feedID, newURL string) (*model.Feed, error) {
+		updateFeedURLFn: func(ctx context.Context, userID, feedID, newURL string) (*model.Feed, error) {
+			if userID != "user-123" {
+				t.Errorf("userID = %q, want %q", userID, "user-123")
+			}
 			if feedID != "feed-id-1" {
 				t.Errorf("feedID = %q, want %q", feedID, "feed-id-1")
 			}
@@ -482,7 +537,7 @@ func TestFeedHandler_UpdateFeedURL_InvalidJSON_ReturnsBadRequest(t *testing.T) {
 
 func TestFeedHandler_UpdateFeedURL_FeedNotFound_ReturnsNotFound(t *testing.T) {
 	svc := &mockFeedService{
-		updateFeedURLFn: func(ctx context.Context, feedID, newURL string) (*model.Feed, error) {
+		updateFeedURLFn: func(ctx context.Context, userID, feedID, newURL string) (*model.Feed, error) {
 			return nil, &model.APIError{
 				Code:     "FEED_NOT_FOUND",
 				Message:  "Feed not found",
@@ -506,6 +561,64 @@ func TestFeedHandler_UpdateFeedURL_FeedNotFound_ReturnsNotFound(t *testing.T) {
 	resp := w.Result()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+}
+
+// TestFeedHandler_UpdateFeedURL_NoUserID_ReturnsUnauthorized は未認証アクセスが401を返すことを検証する。
+func TestFeedHandler_UpdateFeedURL_NoUserID_ReturnsUnauthorized(t *testing.T) {
+	h := NewFeedHandler(&mockFeedService{}, &mockSubscriptionDeleter{})
+
+	body := `{"feed_url": "https://example.com/new-feed.xml"}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/feeds/feed-id-1", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	// ユーザーIDを注入しない
+	req = withChiURLParam(req, "id", "feed-id-1")
+	w := httptest.NewRecorder()
+
+	h.UpdateFeedURL(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+// TestFeedHandler_UpdateFeedURL_OtherUsersFeed_ReturnsNotFound は他ユーザーのフィードに対する
+// PATCH が IDOR を避けるため 404 を返すことを検証する（リグレッションテスト for issue #34）。
+func TestFeedHandler_UpdateFeedURL_OtherUsersFeed_ReturnsNotFound(t *testing.T) {
+	svc := &mockFeedService{
+		// サービス層が認可チェックで購読なしと判定し FEED_NOT_FOUND を返す想定。
+		updateFeedURLFn: func(ctx context.Context, userID, feedID, newURL string) (*model.Feed, error) {
+			if userID != "user-attacker" {
+				t.Errorf("userID = %q, want %q", userID, "user-attacker")
+			}
+			return nil, &model.APIError{
+				Code:     "FEED_NOT_FOUND",
+				Message:  "指定されたフィードが見つかりません。",
+				Category: "feed",
+				Action:   "フィードIDを確認してください。",
+			}
+		},
+	}
+
+	h := NewFeedHandler(svc, &mockSubscriptionDeleter{})
+
+	body := `{"feed_url": "https://attacker.example.com/feed.xml"}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/feeds/feed-of-other-user", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withUserID(req, "user-attacker")
+	req = withChiURLParam(req, "id", "feed-of-other-user")
+	w := httptest.NewRecorder()
+
+	h.UpdateFeedURL(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+	errResp := parseAPIErrorResponse(t, w)
+	if errResp["code"] != "FEED_NOT_FOUND" {
+		t.Errorf("code = %q, want %q", errResp["code"], "FEED_NOT_FOUND")
 	}
 }
 
@@ -675,7 +788,7 @@ func TestSetupFeedRoutes_RegisterEndpoint(t *testing.T) {
 
 func TestSetupFeedRoutes_GetEndpoint(t *testing.T) {
 	svc := &mockFeedService{
-		getFeedFn: func(ctx context.Context, feedID string) (*model.Feed, error) {
+		getFeedFn: func(ctx context.Context, userID, feedID string) (*model.Feed, error) {
 			return &model.Feed{
 				ID:      feedID,
 				FeedURL: "https://example.com/feed.xml",
@@ -700,7 +813,7 @@ func TestSetupFeedRoutes_GetEndpoint(t *testing.T) {
 
 func TestSetupFeedRoutes_PatchEndpoint(t *testing.T) {
 	svc := &mockFeedService{
-		updateFeedURLFn: func(ctx context.Context, feedID, newURL string) (*model.Feed, error) {
+		updateFeedURLFn: func(ctx context.Context, userID, feedID, newURL string) (*model.Feed, error) {
 			return &model.Feed{
 				ID:      feedID,
 				FeedURL: newURL,
