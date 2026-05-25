@@ -24,3 +24,5 @@
 ## 確認事項
 
 - **ローカル実行環境の Node バージョン制約**: 本 worktree のローカル環境は Node `v22.11.0` だが、`web` の `vite@7.3.1`（vitest 経由）は `^20.19.0 || ^22.12.0 || >=24.0.0` を要求しており、`22.11.0` では `vitest run` の config ロード時に `ERR_REQUIRE_ESM` が発生する。`NODE_OPTIONS=--experimental-require-module` を付与して全テスト・lint を green 確認した。CI（`.github/workflows/ci.yml`）は Node 20 を使用するため、この環境固有の制約は CI には影響しない（本 task の実装内容とは無関係）。この点は spec の矛盾ではなく実行環境の事象として記録する。
+
+STATUS: complete
