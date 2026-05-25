@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -131,6 +132,11 @@ func getEnvInt(key string, defaultVal int) int {
 	}
 	i, err := strconv.Atoi(v)
 	if err != nil {
+		slog.Warn("環境変数のパースに失敗したためデフォルト値を採用します",
+			slog.String("key", key),
+			slog.String("value", v),
+			slog.Int("default", defaultVal),
+		)
 		return defaultVal
 	}
 	return i
@@ -143,6 +149,11 @@ func getEnvInt64(key string, defaultVal int64) int64 {
 	}
 	i, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
+		slog.Warn("環境変数のパースに失敗したためデフォルト値を採用します",
+			slog.String("key", key),
+			slog.String("value", v),
+			slog.Int64("default", defaultVal),
+		)
 		return defaultVal
 	}
 	return i
@@ -155,6 +166,11 @@ func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil {
+		slog.Warn("環境変数のパースに失敗したためデフォルト値を採用します",
+			slog.String("key", key),
+			slog.String("value", v),
+			slog.Duration("default", defaultVal),
+		)
 		return defaultVal
 	}
 	return d
