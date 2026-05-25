@@ -243,7 +243,14 @@ func TestSubscriptionHandler_UpdateSettings_Success(t *testing.T) {
 }
 
 func TestSubscriptionHandler_UpdateSettings_InvalidInterval_TooLow(t *testing.T) {
-	h := NewSubscriptionHandler(&mockSubscriptionService{})
+	// バリデーションはサービス層に集約済み。不正値はサービスが
+	// INVALID_FETCH_INTERVAL を返し、ハンドラーが HTTP 400 にマップする。
+	svc := &mockSubscriptionService{
+		updateSettingsFn: func(ctx context.Context, userID, subscriptionID string, minutes int) (*subscriptionResponse, error) {
+			return nil, model.NewInvalidFetchIntervalError(minutes)
+		},
+	}
+	h := NewSubscriptionHandler(svc)
 
 	body := `{"fetch_interval_minutes": 15}`
 	req := httptest.NewRequest(http.MethodPut, "/api/subscriptions/sub-1/settings", bytes.NewBufferString(body))
@@ -261,7 +268,12 @@ func TestSubscriptionHandler_UpdateSettings_InvalidInterval_TooLow(t *testing.T)
 }
 
 func TestSubscriptionHandler_UpdateSettings_InvalidInterval_TooHigh(t *testing.T) {
-	h := NewSubscriptionHandler(&mockSubscriptionService{})
+	svc := &mockSubscriptionService{
+		updateSettingsFn: func(ctx context.Context, userID, subscriptionID string, minutes int) (*subscriptionResponse, error) {
+			return nil, model.NewInvalidFetchIntervalError(minutes)
+		},
+	}
+	h := NewSubscriptionHandler(svc)
 
 	body := `{"fetch_interval_minutes": 750}`
 	req := httptest.NewRequest(http.MethodPut, "/api/subscriptions/sub-1/settings", bytes.NewBufferString(body))
@@ -279,7 +291,12 @@ func TestSubscriptionHandler_UpdateSettings_InvalidInterval_TooHigh(t *testing.T
 }
 
 func TestSubscriptionHandler_UpdateSettings_InvalidInterval_NotMultipleOf30(t *testing.T) {
-	h := NewSubscriptionHandler(&mockSubscriptionService{})
+	svc := &mockSubscriptionService{
+		updateSettingsFn: func(ctx context.Context, userID, subscriptionID string, minutes int) (*subscriptionResponse, error) {
+			return nil, model.NewInvalidFetchIntervalError(minutes)
+		},
+	}
+	h := NewSubscriptionHandler(svc)
 
 	body := `{"fetch_interval_minutes": 45}`
 	req := httptest.NewRequest(http.MethodPut, "/api/subscriptions/sub-1/settings", bytes.NewBufferString(body))
@@ -652,8 +669,13 @@ func TestSubscriptionHandler_UpdateSettings_BoundaryValues(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// バリデーションはサービス層に集約済み。モックは実サービスの挙動を模し、
+			// 不正値では INVALID_FETCH_INTERVAL を返す（要件 2.2/2.3）。
 			svc := &mockSubscriptionService{
 				updateSettingsFn: func(ctx context.Context, userID, subscriptionID string, minutes int) (*subscriptionResponse, error) {
+					if minutes < 30 || minutes > 720 || minutes%30 != 0 {
+						return nil, model.NewInvalidFetchIntervalError(minutes)
+					}
 					return &subscriptionResponse{FetchIntervalMinutes: minutes}, nil
 				},
 			}
@@ -672,6 +694,17 @@ func TestSubscriptionHandler_UpdateSettings_BoundaryValues(t *testing.T) {
 			resp := w.Result()
 			if resp.StatusCode != tt.wantCode {
 				t.Errorf("interval=%d: status = %d, want %d", tt.interval, resp.StatusCode, tt.wantCode)
+			}
+
+			// 拒否時はエラー本文に INVALID_FETCH_INTERVAL が含まれることを確認（要件 2.3）。
+			if tt.wantCode == http.StatusBadRequest {
+				var errBody map[string]interface{}
+				if err := json.NewDecoder(w.Body).Decode(&errBody); err != nil {
+					t.Fatalf("interval=%d: failed to decode error body: %v", tt.interval, err)
+				}
+				if errBody["code"] != model.ErrCodeInvalidFetchInterval {
+					t.Errorf("interval=%d: error code = %v, want %q", tt.interval, errBody["code"], model.ErrCodeInvalidFetchInterval)
+				}
 			}
 		})
 	}
