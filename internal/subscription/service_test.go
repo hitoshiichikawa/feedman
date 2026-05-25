@@ -141,6 +141,103 @@ func TestService_ListSubscriptions(t *testing.T) {
 	}
 }
 
+// TestService_UpdateSettings_BoundaryValues はフェッチ間隔の境界値バリデーションを検証する。
+// 要件 1.1-1.10 / 2.1 / 2.4 / 3.1 / NFR 1.1 / NFR 2.1 に対応する。
+func TestService_UpdateSettings_BoundaryValues(t *testing.T) {
+	tests := []struct {
+		name       string
+		minutes    int
+		wantReject bool
+	}{
+		{"下限未満(29)のとき拒否", 29, true},
+		{"下限(30)のとき受理", 30, false},
+		{"刻み違反(31)のとき拒否", 31, true},
+		{"刻み違反(45)のとき拒否", 45, true},
+		{"中間値(60)のとき受理", 60, false},
+		{"中間値(90)のとき受理", 90, false},
+		{"上限(720)のとき受理", 720, false},
+		{"上限超過(721)のとき拒否", 721, true},
+		{"ゼロ(0)のとき拒否", 0, true},
+		{"負値(-30)のとき拒否", -30, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Arrange
+			now := time.Now()
+			updateCalled := false
+			subRepo := &mockSubRepo{
+				findByIDFn: func(ctx context.Context, id string) (*model.Subscription, error) {
+					return &model.Subscription{ID: "sub-1", UserID: "user-1", FeedID: "feed-1"}, nil
+				},
+				updateFetchIntervalFn: func(ctx context.Context, id string, minutes int) error {
+					updateCalled = true
+					return nil
+				},
+				listByUserIDWithFeedFn: func(ctx context.Context, userID string) ([]repository.SubscriptionWithFeedInfo, error) {
+					return []repository.SubscriptionWithFeedInfo{
+						{
+							Subscription: model.Subscription{
+								ID:                   "sub-1",
+								UserID:               userID,
+								FeedID:               "feed-1",
+								FetchIntervalMinutes: tt.minutes,
+								CreatedAt:            now,
+							},
+							FeedTitle:   "Test Feed",
+							FeedURL:     "https://example.com/feed.xml",
+							FetchStatus: model.FetchStatusActive,
+							UnreadCount: 2,
+						},
+					}, nil
+				},
+			}
+
+			svc := NewService(subRepo, nil, nil)
+
+			// Act
+			result, err := svc.UpdateSettings(context.Background(), "user-1", "sub-1", tt.minutes)
+
+			// Assert
+			if tt.wantReject {
+				if err == nil {
+					t.Fatalf("minutes=%d: expected error, got nil", tt.minutes)
+				}
+				apiErr, ok := err.(*model.APIError)
+				if !ok {
+					t.Fatalf("minutes=%d: error type = %T, want *model.APIError", tt.minutes, err)
+				}
+				if apiErr.Code != model.ErrCodeInvalidFetchInterval {
+					t.Errorf("minutes=%d: error code = %q, want %q", tt.minutes, apiErr.Code, model.ErrCodeInvalidFetchInterval)
+				}
+				if updateCalled {
+					t.Errorf("minutes=%d: UpdateFetchInterval should not be called on rejection", tt.minutes)
+				}
+				if result != nil {
+					t.Errorf("minutes=%d: expected nil result on rejection, got %+v", tt.minutes, result)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("minutes=%d: unexpected error: %v", tt.minutes, err)
+			}
+			if !updateCalled {
+				t.Errorf("minutes=%d: expected UpdateFetchInterval to be called", tt.minutes)
+			}
+			if result == nil {
+				t.Fatalf("minutes=%d: expected non-nil result", tt.minutes)
+			}
+			if result.FetchIntervalMinutes != tt.minutes {
+				t.Errorf("minutes=%d: FetchIntervalMinutes = %d, want %d", tt.minutes, result.FetchIntervalMinutes, tt.minutes)
+			}
+			if result.FeedTitle != "Test Feed" {
+				t.Errorf("minutes=%d: FeedTitle = %q, want %q", tt.minutes, result.FeedTitle, "Test Feed")
+			}
+		})
+	}
+}
+
 // TestService_Unsubscribe は購読解除を検証する。
 func TestService_Unsubscribe(t *testing.T) {
 	deleteCalled := false

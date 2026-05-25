@@ -86,8 +86,27 @@ func (s *Service) ListSubscriptions(ctx context.Context, userID string) ([]Subsc
 	return results, nil
 }
 
+// fetchIntervalMin はフェッチ間隔の下限（分）。
+const fetchIntervalMin = 30
+
+// fetchIntervalMax はフェッチ間隔の上限（分、12時間）。
+const fetchIntervalMax = 720
+
+// fetchIntervalStep はフェッチ間隔の刻み幅（分）。
+const fetchIntervalStep = 30
+
+// isValidFetchInterval はフェッチ間隔が許容範囲（30〜720分・30分刻み）かを判定する。
+func isValidFetchInterval(minutes int) bool {
+	return minutes >= fetchIntervalMin && minutes <= fetchIntervalMax && minutes%fetchIntervalStep == 0
+}
+
 // UpdateSettings は購読のフェッチ間隔を更新する。
+// minutes が許容範囲（30〜720分・30分刻み）外の場合は更新を行わず INVALID_FETCH_INTERVAL を返す。
 func (s *Service) UpdateSettings(ctx context.Context, userID, subscriptionID string, minutes int) (*SubscriptionInfo, error) {
+	if !isValidFetchInterval(minutes) {
+		return nil, model.NewInvalidFetchIntervalError(minutes)
+	}
+
 	sub, err := s.subRepo.FindByID(ctx, subscriptionID)
 	if err != nil {
 		return nil, fmt.Errorf("購読の取得に失敗しました: %w", err)
