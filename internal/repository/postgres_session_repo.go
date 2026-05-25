@@ -65,7 +65,13 @@ func (r *PostgresSessionRepo) DeleteByID(ctx context.Context, id string) error {
 
 // DeleteByUserID は指定ユーザーの全セッションを削除する。
 func (r *PostgresSessionRepo) DeleteByUserID(ctx context.Context, userID string) error {
-	_, err := r.db.ExecContext(ctx,
+	return r.DeleteByUserIDExec(ctx, r.db, userID)
+}
+
+// DeleteByUserIDExec は指定の DBTX（*sql.DB または共有トランザクション）上で
+// 指定ユーザーの全セッションを削除する。
+func (r *PostgresSessionRepo) DeleteByUserIDExec(ctx context.Context, q DBTX, userID string) error {
+	_, err := q.ExecContext(ctx,
 		`DELETE FROM sessions WHERE user_id = $1`,
 		userID,
 	)

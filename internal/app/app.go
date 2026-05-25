@@ -23,7 +23,6 @@ import (
 	"github.com/hitoshi/feedman/internal/repository"
 	"github.com/hitoshi/feedman/internal/security"
 	"github.com/hitoshi/feedman/internal/subscription"
-	"github.com/hitoshi/feedman/internal/user"
 	"github.com/hitoshi/feedman/internal/worker/cleanup"
 	fetchpkg "github.com/hitoshi/feedman/internal/worker/fetch"
 )
@@ -129,7 +128,9 @@ func runServe(cfg *config.Config) error {
 	itemService := item.NewItemService(itemRepo, itemStateRepo)
 
 	subService := subscription.NewService(subRepo, itemStateRepo, feedRepo)
-	userService := user.NewService(userRepo, sessionRepo, subRepo, itemStateRepo)
+	// 退会処理は単一トランザクションで原子化する（途中失敗時は全ロールバック）。
+	txBeginner := repository.NewSQLTxBeginner(db)
+	userService := newTxUserService(txBeginner, userRepo, sessionRepo, subRepo, itemStateRepo)
 
 	// 5. ハンドラーアダプタの構築
 	subServiceAdapter := handler.NewSubscriptionServiceAdapter(subService)

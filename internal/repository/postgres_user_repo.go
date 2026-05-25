@@ -74,7 +74,14 @@ func (r *PostgresUserRepo) CreateWithIdentity(ctx context.Context, user *model.U
 // DeleteByID は指定IDのユーザーを削除する。
 // 関連するidentities、user_settingsはCASCADE削除される。
 func (r *PostgresUserRepo) DeleteByID(ctx context.Context, id string) error {
-	result, err := r.db.ExecContext(ctx,
+	return r.DeleteByIDExec(ctx, r.db, id)
+}
+
+// DeleteByIDExec は指定の DBTX（*sql.DB または共有トランザクション）上で
+// 指定IDのユーザーを削除する。関連する identities / user_settings は CASCADE 削除される。
+// 対象が存在しない場合はエラーを返す（既存の DeleteByID と同一挙動）。
+func (r *PostgresUserRepo) DeleteByIDExec(ctx context.Context, q DBTX, id string) error {
+	result, err := q.ExecContext(ctx,
 		`DELETE FROM users WHERE id = $1`,
 		id,
 	)
