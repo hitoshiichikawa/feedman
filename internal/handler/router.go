@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -42,6 +43,10 @@ type RouterDeps struct {
 	CORSAllowedOrigin string
 	RateLimiter       *middleware.RateLimiter
 
+	// アクセスログ出力に使用する構造化ロガー。
+	// nil の場合は slog.Default() にフォールバックする（後方互換）。
+	Logger *slog.Logger
+
 	// 認証
 	AuthService AuthServiceInterface
 	AuthConfig  AuthHandlerConfig
@@ -64,10 +69,15 @@ type RouterDeps struct {
 // NewRouter は全APIエンドポイントのルーティングとミドルウェアチェーンを構成したchi.Routerを返す。
 //
 // ミドルウェアスタックの実行順序:
+//   - 全ルート共通（最上位）: Recovery → SecurityHeaders → CORS
+//   - 認証不要ルート（/health, /auth/*）: 上記共通 → Logging
+//   - 認証必須ルート（/api/*）: 上記共通 → Session → RateLimit(General) → Logging
 //
-//	CORSMiddleware → SessionMiddleware → RateLimitMiddleware(GeneralMiddleware)
+// Logging を Session の内側（後ろ）に置くことで、認証済みリクエストの user_id を
+// アクセスログに含められる。/health・/auth/* は Session を通らないため user_id は付与されない。
+// いずれのリクエストもアクセスログは 1 件のみ出力される（二重ログにならない）。
 //
-// 認証ルート（/auth/*）はミドルウェアチェーンの外に配置する。
+// deps.Logger が nil の場合は slog.Default() を使用する（後方互換）。
 func NewRouter(deps *RouterDeps) http.Handler {
 	r := chi.NewRouter()
 
@@ -80,6 +90,13 @@ func NewRouter(deps *RouterDeps) http.Handler {
 	// CORS ミドルウェアを適用（全ルートに効く）
 	r.Use(middleware.NewCORSMiddleware(deps.CORSAllowedOrigin))
 
+	// アクセスログ用ロガー。未指定時はアプリ標準ロガー（slog.Default）にフォールバック。
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logging := middleware.NewLoggingMiddleware(logger)
+
 	authHandler := NewAuthHandler(deps.AuthService, deps.AuthConfig)
 	feedHandler := NewFeedHandler(deps.FeedService, deps.SubscriptionDeleter)
 	itemHandler := NewItemHandler(deps.ItemService, deps.ItemStateService)
@@ -87,37 +104,43 @@ func NewRouter(deps *RouterDeps) http.Handler {
 	userHandler := NewUserHandler(deps.UserService)
 
 	// --- 認証不要のルート ---
+	// アクセスログのみ適用（Session を通らないため user_id は付与されない）。
+	r.Group(func(r chi.Router) {
+		r.Use(logging)
 
-	// ヘルスチェック
-	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		status := "ok"
-		httpStatus := http.StatusOK
+		// ヘルスチェック
+		r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+			status := "ok"
+			httpStatus := http.StatusOK
 
-		if deps.HealthChecker != nil {
-			if err := deps.HealthChecker.PingContext(r.Context()); err != nil {
-				status = "unhealthy"
-				httpStatus = http.StatusServiceUnavailable
+			if deps.HealthChecker != nil {
+				if err := deps.HealthChecker.PingContext(r.Context()); err != nil {
+					status = "unhealthy"
+					httpStatus = http.StatusServiceUnavailable
+				}
 			}
-		}
 
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(httpStatus)
-		json.NewEncoder(w).Encode(map[string]string{"status": status})
-	})
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(httpStatus)
+			json.NewEncoder(w).Encode(map[string]string{"status": status})
+		})
 
-	// 認証ルート（OAuthフロー）
-	r.Route("/auth", func(r chi.Router) {
-		r.Get("/google/login", authHandler.Login)
-		r.Get("/google/callback", authHandler.Callback)
-		r.Post("/logout", authHandler.Logout)
-		r.Get("/me", authHandler.Me)
+		// 認証ルート（OAuthフロー）
+		r.Route("/auth", func(r chi.Router) {
+			r.Get("/google/login", authHandler.Login)
+			r.Get("/google/callback", authHandler.Callback)
+			r.Post("/logout", authHandler.Logout)
+			r.Get("/me", authHandler.Me)
+		})
 	})
 
 	// --- 認証が必要なルート ---
-	// ミドルウェアスタック: Session → RateLimit(General)
+	// ミドルウェアスタック: Session → RateLimit(General) → Logging
+	// Logging を Session の後ろに置くことで user_id をログに含める。
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.NewSessionMiddleware(deps.SessionFinder))
 		r.Use(deps.RateLimiter.GeneralMiddleware())
+		r.Use(logging)
 
 		// フィード管理
 		r.Route("/api/feeds", func(r chi.Router) {
