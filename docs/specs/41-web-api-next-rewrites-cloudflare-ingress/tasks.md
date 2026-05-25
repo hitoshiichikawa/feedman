@@ -43,7 +43,7 @@
   - _Requirements: 1.1, 4.1, 4.3, 5.3, NFR 1.2_
   - _Depends: 4.1_
 
-- [ ] 5. 構成・環境変数・ドキュメントの単一オリジン化
+- [x] 5. 構成・環境変数・ドキュメントの単一オリジン化
 - [x] 5.1 `docker-compose.yml` を更新する
   - `web.build.args.NEXT_PUBLIC_API_URL` を削除し、`web.environment` に
     `API_INTERNAL_URL=${API_INTERNAL_URL:-http://api:8080}` を追加する
