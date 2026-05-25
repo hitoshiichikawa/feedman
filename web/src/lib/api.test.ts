@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createApiClient } from "./api";
 
 // グローバルfetchのモック
@@ -120,6 +120,46 @@ describe("apiClient", () => {
         },
         credentials: "include",
       });
+    });
+  });
+
+  describe("NEXT_PUBLIC_API_URL 非依存", () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    });
+
+    it("NEXT_PUBLIC_API_URL が設定されていても相対パスで fetch されること", async () => {
+      // Arrange: 環境変数に絶対 URL を設定したうえでモジュールを読み込み直す
+      // （API_BASE_URL はモジュールロード時に評価される const のため）
+      vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
+      vi.resetModules();
+      const { createApiClient: createApiClientWithEnv } = await import("./api");
+      const api = createApiClientWithEnv();
+
+      // Act
+      await api.get("/api/feeds");
+
+      // Assert: 絶対 URL ではなく相対パスで呼ばれる
+      expect(mockFetch).toHaveBeenCalledWith("/api/feeds", {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "include",
+      });
+    });
+
+    it("NEXT_PUBLIC_API_URL が設定されていても API_BASE_URL が空文字のままであること", async () => {
+      // Arrange
+      vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com/");
+      vi.resetModules();
+
+      // Act
+      const { API_BASE_URL } = await import("./api");
+
+      // Assert
+      expect(API_BASE_URL).toBe("");
     });
   });
 
