@@ -112,7 +112,22 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. セッションCookieを設定（HTTP Only）
+	// 4. セッション固定攻撃対策: 旧 session_id を無効化して識別子を旋回する。
+	//    ログイン前から存在する session_id Cookie に対応する保存済みセッションを破棄し、
+	//    手順 5 で発行する新しい session_id のみが有効になるようにする。
+	//    旧セッションが存在しない（Cookie 不在・期限切れ・削除済み）場合や無効化に
+	//    失敗した場合でも、ログイン自体はエラーにせず継続する。
+	if oldCookie, cookieErr := r.Cookie(sessionCookieName); cookieErr == nil &&
+		oldCookie.Value != "" && oldCookie.Value != session.ID {
+		if revokeErr := h.service.Logout(r.Context(), oldCookie.Value); revokeErr != nil {
+			// 無効化失敗は運用者が追跡できるよう記録するが、ログインは継続する。
+			slog.Error("failed to revoke old session on login rotation",
+				slog.String("error", revokeErr.Error()),
+			)
+		}
+	}
+
+	// 5. セッションCookieを設定（HTTP Only）
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    session.ID,
@@ -124,7 +139,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 
-	// 5. フロントエンドにリダイレクト
+	// 6. フロントエンドにリダイレクト
 	http.Redirect(w, r, h.config.BaseURL, http.StatusTemporaryRedirect)
 }
 
