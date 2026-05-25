@@ -18,7 +18,7 @@
     `buildRewrites(base)`（`/api/:path*`・`/auth/:path*` をプレフィックス保持で転送する 2 ルール生成）を実装する
   - _Requirements: 2.1, 2.2, 4.1, 4.2, 4.3_
   - _Boundary: Rewrites Proxy, Startup Validation_
-- [ ] 2.2 `web/src/lib/rewrites.test.ts` を新規作成する (P)
+- [x] 2.2 `web/src/lib/rewrites.test.ts` を新規作成する (P)
   - `buildRewrites` の 2 ルール内容・末尾スラッシュ正規化を検証する
   - `resolveApiInternalUrl` の未設定/空 throw（メッセージに変数名を含む）・有効値の正規化を検証する
   - _Requirements: 2.1, 2.2, 4.1, 4.2, 4.3_
