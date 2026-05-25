@@ -1,8 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
   API_INTERNAL_URL_ENV,
+  API_INTERNAL_URL_FALLBACK,
   buildRewrites,
   resolveApiInternalUrl,
+  resolveApiInternalUrlForRewrites,
 } from "./rewrites";
 
 describe("buildRewrites", () => {
@@ -92,5 +94,40 @@ describe("resolveApiInternalUrl", () => {
 
     // Act & Assert
     expect(() => resolveApiInternalUrl(env)).toThrow(API_INTERNAL_URL_ENV);
+  });
+});
+
+describe("resolveApiInternalUrlForRewrites", () => {
+  it("有効な値が与えられたとき正規化された base を返すこと", () => {
+    // Arrange
+    const env = { [API_INTERNAL_URL_ENV]: "http://api:8080/" };
+
+    // Act
+    const result = resolveApiInternalUrlForRewrites(env);
+
+    // Assert
+    expect(result).toBe("http://api:8080");
+  });
+
+  it("未設定のとき throw せず暫定 base を返すこと（ビルドを失敗させない）", () => {
+    // Arrange
+    const env = {};
+
+    // Act
+    const result = resolveApiInternalUrlForRewrites(env);
+
+    // Assert
+    expect(result).toBe(API_INTERNAL_URL_FALLBACK);
+  });
+
+  it("空文字のとき throw せず暫定 base を返すこと", () => {
+    // Arrange
+    const env = { [API_INTERNAL_URL_ENV]: "" };
+
+    // Act
+    const result = resolveApiInternalUrlForRewrites(env);
+
+    // Assert
+    expect(result).toBe(API_INTERNAL_URL_FALLBACK);
   });
 });
