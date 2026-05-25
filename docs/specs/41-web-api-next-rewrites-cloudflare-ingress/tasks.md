@@ -49,7 +49,7 @@
     `API_INTERNAL_URL=${API_INTERNAL_URL:-http://api:8080}` を追加する
   - `api` の `GOOGLE_REDIRECT_URL` / `BASE_URL` を単一オリジン前提のコメントで補足する
   - _Requirements: 1.1, 1.3, 5.1, 5.3, NFR 1.2_
-- [ ] 5.2 `.env.sample` と `README.md` を更新する
+- [x] 5.2 `.env.sample` と `README.md` を更新する
   - `.env.sample`: `NEXT_PUBLIC_API_URL` 削除、`API_INTERNAL_URL` 追加、`GOOGLE_REDIRECT_URL` /
     `BASE_URL` を単一オリジン（`https://<host>` / `https://<host>/auth/google/callback`）の説明に更新
   - `README.md`: アーキテクチャ（2 オリジン→単一オリジン）、環境変数表、本番デプロイ注意事項、
