@@ -17,6 +17,9 @@ const (
 	defaultEndpoint = "https://bookmark.hatenaapis.com/count/entries"
 	// maxURLsPerRequest は1リクエストあたりの最大URL数。
 	maxURLsPerRequest = 50
+	// maxResponseBodySize はレスポンスボディの読み込み上限サイズ（1 MiB）。
+	// 巨大な異常レスポンスによるメモリの際限ない消費（OOM）を防ぐための上限。
+	maxResponseBodySize = 1 * 1024 * 1024
 )
 
 // Client ははてなブックマークAPIのクライアント。
@@ -90,12 +93,23 @@ func (c *Client) GetBookmarkCounts(ctx context.Context, urls []string) (map[stri
 	}
 
 	// レスポンスボディ読み取り
-	body, err := io.ReadAll(resp.Body)
+	// 上限ちょうどと上限超過を区別するため、上限+1バイトまで読み込み、
+	// 読み込み長が上限を超えていれば上限超過と判定する。
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize+1))
 	if err != nil {
 		c.logger.Error("レスポンスボディの読み取りに失敗しました",
 			slog.String("error", err.Error()),
 		)
 		return nil, fmt.Errorf("レスポンスボディの読み取りに失敗しました: %w", err)
+	}
+
+	// 読み込みサイズの上限チェック（上限超過はサイレント切り詰めせずエラーとする）
+	if len(body) > maxResponseBodySize {
+		c.logger.Error("レスポンスボディが読み込み上限サイズを超過しました",
+			slog.Int("max_response_body_size", maxResponseBodySize),
+			slog.Int("url_count", len(urls)),
+		)
+		return nil, fmt.Errorf("レスポンスボディが読み込み上限サイズ %d バイトを超過しました", maxResponseBodySize)
 	}
 
 	// JSONデコード
