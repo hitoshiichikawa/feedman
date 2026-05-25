@@ -31,7 +31,7 @@
   - _Requirements: 1.3, 2.1, 2.2, 2.4, 2.5, 3.1, 3.2, 5.1, 5.2, NFR 3.3_
   - _Depends: 2.1_
 
-- [ ] 4. 起動時 fail-fast entrypoint の追加
+- [x] 4. 起動時 fail-fast entrypoint の追加
 - [x] 4.1 `web/server-entrypoint.mjs` を新規作成する
   - `resolveApiInternalUrl(process.env)` を呼び、未設定/空なら stderr にエラーメッセージ（変数名を含む）を
     出力して非ゼロ終了する。通過時に standalone `server.js` を起動する
