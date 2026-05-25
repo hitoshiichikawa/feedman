@@ -25,7 +25,7 @@
   - _Boundary: Rewrites Proxy, Startup Validation_
   - _Depends: 2.1_
 
-- [ ] 3. next.config.ts に rewrites() を追加する
+- [x] 3. next.config.ts に rewrites() を追加する
   - `web/next.config.ts` に `async rewrites()` を追加し、`buildRewrites(resolveApiInternalUrl(process.env))` を返す
   - `output: "standalone"` と既存 `headers()` は維持する
   - _Requirements: 1.3, 2.1, 2.2, 2.4, 2.5, 3.1, 3.2, 5.1, 5.2, NFR 3.3_
