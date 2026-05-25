@@ -2,24 +2,40 @@ package item
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/hitoshi/feedman/internal/model"
+	"github.com/hitoshi/feedman/internal/repository"
 )
 
 // --- テスト用モック ---
 
 // mockItemRepo はテスト用のItemRepositoryモック。
 type mockItemRepo struct {
-	items           map[string]*model.Item // id -> item
-	byFeedGUID      map[string]*model.Item // feedID+guid -> item
-	byFeedLink      map[string]*model.Item // feedID+link -> item
-	byContentHash   map[string]*model.Item // feedID+hash -> item
-	createCalls     int
-	updateCalls     int
+	items         map[string]*model.Item // id -> item
+	byFeedGUID    map[string]*model.Item // feedID+guid -> item
+	byFeedLink    map[string]*model.Item // feedID+link -> item
+	byContentHash map[string]*model.Item // feedID+hash -> item
+	createCalls   int
+	updateCalls   int
+
+	// バルクメソッドの呼び出し回数（DB 往復が記事件数に比例しないことの検証用）。
+	findBulkCalls int
+	upsertCalls   int
+
+	// 直近のバルク永続化内容。
+	lastBulkCreated []*model.Item
+	lastBulkUpdated []*model.Item
+
 	lastCreatedItem *model.Item
 	lastUpdatedItem *model.Item
+
+	// findErr / upsertErr が non-nil の場合、それぞれのバルクメソッドがエラーを返す。
+	findErr   error
+	upsertErr error
 }
 
 func newMockItemRepo() *mockItemRepo {
@@ -90,6 +106,75 @@ func (m *mockItemRepo) Update(_ context.Context, item *model.Item) error {
 	m.updateCalls++
 	m.lastUpdatedItem = item
 	m.items[item.ID] = item
+	return nil
+}
+
+// FindExistingForUpsert はバッチ化した既存記事取得をモックする。
+// 内部の byFeed* マップから guid/link/hash 別の既存記事を一括で索引して返す。
+// 実 DB 実装と同様、呼び出し回数は記事件数に依存せず 1 バッチあたり 1 回に収まる。
+func (m *mockItemRepo) FindExistingForUpsert(
+	_ context.Context,
+	feedID string,
+	guids, links, hashes []string,
+) (*repository.ExistingItems, error) {
+	m.findBulkCalls++
+	if m.findErr != nil {
+		return nil, m.findErr
+	}
+
+	result := &repository.ExistingItems{
+		ByGUID:        make(map[string]*model.Item),
+		ByLink:        make(map[string]*model.Item),
+		ByContentHash: make(map[string]*model.Item),
+	}
+	for _, g := range guids {
+		if item, ok := m.byFeedGUID[feedID+"|"+g]; ok {
+			result.ByGUID[g] = item
+		}
+	}
+	for _, l := range links {
+		if item, ok := m.byFeedLink[feedID+"|"+l]; ok {
+			result.ByLink[l] = item
+		}
+	}
+	for _, h := range hashes {
+		if item, ok := m.byContentHash[feedID+"|"+h]; ok {
+			result.ByContentHash[h] = item
+		}
+	}
+	return result, nil
+}
+
+// BulkUpsert はバルク永続化をモックする。
+// upsertErr が設定されている場合はエラーを返し、内部状態を一切変更しない（全件ロールバック相当）。
+func (m *mockItemRepo) BulkUpsert(_ context.Context, toCreate, toUpdate []*model.Item) error {
+	m.upsertCalls++
+	if m.upsertErr != nil {
+		return m.upsertErr
+	}
+
+	m.lastBulkCreated = toCreate
+	m.lastBulkUpdated = toUpdate
+
+	for _, item := range toCreate {
+		m.createCalls++
+		m.lastCreatedItem = item
+		m.items[item.ID] = item
+		if item.GuidOrID != "" {
+			m.byFeedGUID[item.FeedID+"|"+item.GuidOrID] = item
+		}
+		if item.Link != "" {
+			m.byFeedLink[item.FeedID+"|"+item.Link] = item
+		}
+		if item.ContentHash != "" {
+			m.byContentHash[item.FeedID+"|"+item.ContentHash] = item
+		}
+	}
+	for _, item := range toUpdate {
+		m.updateCalls++
+		m.lastUpdatedItem = item
+		m.items[item.ID] = item
+	}
 	return nil
 }
 
@@ -281,7 +366,7 @@ func TestUpsertItems_IdentityPriority_GUIDOverLink(t *testing.T) {
 	parsedItems := []model.ParsedItem{
 		{
 			GuidOrID: "guid-abc",                        // guidで一致
-			Link:     "https://example.com/target-link",  // linkでも別の記事に一致
+			Link:     "https://example.com/target-link", // linkでも別の記事に一致
 			Title:    "更新タイトル",
 			Content:  "<p>更新</p>",
 		},
@@ -880,7 +965,7 @@ func TestUpsertItems_GUIDNotFound_FallbackToLink(t *testing.T) {
 
 	parsedItems := []model.ParsedItem{
 		{
-			GuidOrID: "nonexistent-guid", // GUIDでは見つからない
+			GuidOrID: "nonexistent-guid",             // GUIDでは見つからない
 			Link:     "https://example.com/fallback", // linkで見つかる
 			Title:    "更新タイトル",
 			Content:  "<p>更新</p>",
@@ -985,5 +1070,394 @@ func TestUpsertItems_Update_ContentHashUpdated(t *testing.T) {
 	}
 	if u.ContentHash == "" {
 		t.Error("ContentHashが空であってはならない")
+	}
+}
+
+// --- バルク化に伴う AC 網羅テスト ---
+
+// TestUpsertItems_Mixed50_Counts は50件の混在バッチ（新規N件・既存M件）で
+// inserted=N / updated=M が返ることを検証する（Requirement 1.1, 1.2）。
+func TestUpsertItems_Mixed50_Counts(t *testing.T) {
+	repo := newMockItemRepo()
+	sanitizer := &mockSanitizer{}
+
+	const existingCount = 20 // M
+	const newCount = 30      // N
+	// 既存記事 M 件をリポジトリに用意する。
+	for i := 0; i < existingCount; i++ {
+		repo.addExistingItem(&model.Item{
+			ID:       fmt.Sprintf("existing-%d", i),
+			FeedID:   "feed-1",
+			GuidOrID: fmt.Sprintf("existing-guid-%d", i),
+			Title:    fmt.Sprintf("既存記事-%d", i),
+		})
+	}
+
+	svc := NewItemUpsertService(repo, sanitizer)
+
+	// 既存 M 件と新規 N 件を交互に混在させたバッチ（合計 50 件）。
+	parsedItems := make([]model.ParsedItem, 0, existingCount+newCount)
+	for i := 0; i < existingCount; i++ {
+		parsedItems = append(parsedItems, model.ParsedItem{
+			GuidOrID: fmt.Sprintf("existing-guid-%d", i),
+			Title:    fmt.Sprintf("更新-%d", i),
+			Content:  "<p>更新</p>",
+		})
+	}
+	for i := 0; i < newCount; i++ {
+		parsedItems = append(parsedItems, model.ParsedItem{
+			GuidOrID: fmt.Sprintf("new-guid-%d", i),
+			Title:    fmt.Sprintf("新規-%d", i),
+			Content:  "<p>新規</p>",
+		})
+	}
+
+	inserted, updated, err := svc.UpsertItems(context.Background(), "feed-1", parsedItems)
+	if err != nil {
+		t.Fatalf("UpsertItems returned error: %v", err)
+	}
+	if inserted != newCount {
+		t.Errorf("inserted = %d, want %d", inserted, newCount)
+	}
+	if updated != existingCount {
+		t.Errorf("updated = %d, want %d", updated, existingCount)
+	}
+}
+
+// TestUpsertItems_RoundTripsConstant は記事件数を変えても DB 往復が定数オーダーに
+// 収まることを検証する（Requirement 2.1, 2.2, NFR 3.1）。
+func TestUpsertItems_RoundTripsConstant(t *testing.T) {
+	cases := []int{1, 10, 50}
+
+	for _, n := range cases {
+		t.Run(fmt.Sprintf("%d件でも往復回数が定数のとき定数オーダーに収まる", n), func(t *testing.T) {
+			repo := newMockItemRepo()
+			sanitizer := &mockSanitizer{}
+			svc := NewItemUpsertService(repo, sanitizer)
+
+			parsedItems := make([]model.ParsedItem, 0, n)
+			for i := 0; i < n; i++ {
+				parsedItems = append(parsedItems, model.ParsedItem{
+					GuidOrID: fmt.Sprintf("guid-%d", i),
+					Title:    fmt.Sprintf("記事-%d", i),
+				})
+			}
+
+			_, _, err := svc.UpsertItems(context.Background(), "feed-1", parsedItems)
+			if err != nil {
+				t.Fatalf("UpsertItems returned error: %v", err)
+			}
+
+			// バルクメソッドの呼び出しは記事件数に依存せず固定回数（各 1 回）であること。
+			if repo.findBulkCalls != 1 {
+				t.Errorf("findBulkCalls = %d, want 1 (記事件数 %d に依存しない定数)", repo.findBulkCalls, n)
+			}
+			if repo.upsertCalls != 1 {
+				t.Errorf("upsertCalls = %d, want 1 (記事件数 %d に依存しない定数)", repo.upsertCalls, n)
+			}
+		})
+	}
+}
+
+// TestUpsertItems_Update_PreservesID は既存記事更新時に id が新規採番されず保持されることを
+// 検証する（Requirement 1.3）。
+func TestUpsertItems_Update_PreservesID(t *testing.T) {
+	repo := newMockItemRepo()
+	sanitizer := &mockSanitizer{}
+
+	repo.addExistingItem(&model.Item{
+		ID:       "preserve-id-1",
+		FeedID:   "feed-1",
+		GuidOrID: "guid-preserve",
+		Title:    "古い",
+	})
+
+	svc := NewItemUpsertService(repo, sanitizer)
+
+	parsedItems := []model.ParsedItem{
+		{
+			GuidOrID: "guid-preserve",
+			Title:    "新しい",
+			Content:  "<p>新</p>",
+		},
+	}
+
+	_, updated, err := svc.UpsertItems(context.Background(), "feed-1", parsedItems)
+	if err != nil {
+		t.Fatalf("UpsertItems returned error: %v", err)
+	}
+	if updated != 1 {
+		t.Errorf("updated = %d, want 1", updated)
+	}
+	if repo.lastUpdatedItem.ID != "preserve-id-1" {
+		t.Errorf("更新後の id = %q, want %q（新規採番してはならない）", repo.lastUpdatedItem.ID, "preserve-id-1")
+	}
+}
+
+// TestUpsertItems_Update_SanitizedContentAndHash は更新時にサニタイズ後コンテンツ・サマリーと
+// 再計算した content_hash が保存されることを検証する（Requirement 1.5）。
+func TestUpsertItems_Update_SanitizedContentAndHash(t *testing.T) {
+	repo := newMockItemRepo()
+	sanitizer := &mockSanitizer{}
+
+	oldPubTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	repo.addExistingItem(&model.Item{
+		ID:          "sanitize-hash-1",
+		FeedID:      "feed-1",
+		GuidOrID:    "guid-sanitize-hash",
+		Title:       "古い",
+		Summary:     "古いサマリー",
+		PublishedAt: &oldPubTime,
+		ContentHash: "old-hash",
+	})
+
+	svc := NewItemUpsertService(repo, sanitizer)
+
+	newPubTime := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	parsedItems := []model.ParsedItem{
+		{
+			GuidOrID:    "guid-sanitize-hash",
+			Title:       "新しい",
+			Content:     "<script>x</script><p>本文</p>",
+			Summary:     "<iframe>y</iframe>要約",
+			PublishedAt: &newPubTime,
+		},
+	}
+
+	_, _, err := svc.UpsertItems(context.Background(), "feed-1", parsedItems)
+	if err != nil {
+		t.Fatalf("UpsertItems returned error: %v", err)
+	}
+
+	u := repo.lastUpdatedItem
+	if u == nil {
+		t.Fatal("lastUpdatedItem should not be nil")
+	}
+	if u.Content != "[sanitized]<script>x</script><p>本文</p>" {
+		t.Errorf("更新コンテンツがサニタイズされるべき, got %q", u.Content)
+	}
+	if u.Summary != "[sanitized]<iframe>y</iframe>要約" {
+		t.Errorf("更新サマリーがサニタイズされるべき, got %q", u.Summary)
+	}
+	// content_hash はサニタイズ後サマリーで再計算された値であること。
+	want := computeContentHash("新しい", &newPubTime, "[sanitized]<iframe>y</iframe>要約")
+	if u.ContentHash != want {
+		t.Errorf("content_hash = %q, want %q（サニタイズ後サマリーで再計算）", u.ContentHash, want)
+	}
+}
+
+// TestUpsertItems_DBError_FindReturnsZeroAndWrappedError は既存記事取得時のエラーで
+// (0, 0, err) を返し、発生元エラーが wrap されることを検証する（Requirement 3.1, 3.2, 3.3）。
+func TestUpsertItems_DBError_FindReturnsZeroAndWrappedError(t *testing.T) {
+	repo := newMockItemRepo()
+	sanitizer := &mockSanitizer{}
+
+	sentinel := errors.New("find boom")
+	repo.findErr = sentinel
+
+	svc := NewItemUpsertService(repo, sanitizer)
+
+	parsedItems := []model.ParsedItem{
+		{GuidOrID: "guid-1", Title: "記事"},
+		{GuidOrID: "guid-2", Title: "記事2"},
+	}
+
+	inserted, updated, err := svc.UpsertItems(context.Background(), "feed-1", parsedItems)
+	if err == nil {
+		t.Fatal("エラーが返るべき")
+	}
+	if inserted != 0 || updated != 0 {
+		t.Errorf("(inserted, updated) = (%d, %d), want (0, 0)", inserted, updated)
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("発生元エラーが wrap されるべき: %v", err)
+	}
+	// 永続化が呼ばれていない（1 件も書き込んでいない）こと。
+	if repo.upsertCalls != 0 {
+		t.Errorf("upsertCalls = %d, want 0（取得失敗時は永続化しない）", repo.upsertCalls)
+	}
+}
+
+// TestUpsertItems_DBError_UpsertRollsBackAndReturnsZero は永続化時のエラーで全件ロールバックし
+// (0, 0, err) を返し発生元エラーが wrap されることを検証する（Requirement 3.1, 3.2, 3.3）。
+func TestUpsertItems_DBError_UpsertRollsBackAndReturnsZero(t *testing.T) {
+	repo := newMockItemRepo()
+	sanitizer := &mockSanitizer{}
+
+	sentinel := errors.New("upsert boom")
+	repo.upsertErr = sentinel
+
+	svc := NewItemUpsertService(repo, sanitizer)
+
+	parsedItems := []model.ParsedItem{
+		{GuidOrID: "guid-new-1", Title: "新規1"},
+		{GuidOrID: "guid-new-2", Title: "新規2"},
+	}
+
+	inserted, updated, err := svc.UpsertItems(context.Background(), "feed-1", parsedItems)
+	if err == nil {
+		t.Fatal("エラーが返るべき")
+	}
+	if inserted != 0 || updated != 0 {
+		t.Errorf("(inserted, updated) = (%d, %d), want (0, 0)", inserted, updated)
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("発生元エラーが wrap されるべき: %v", err)
+	}
+	// ロールバック相当: モックの内部状態に記事が永続化されていないこと。
+	if len(repo.items) != 0 {
+		t.Errorf("永続化された記事数 = %d, want 0（全件ロールバック）", len(repo.items))
+	}
+}
+
+// TestUpsertItems_SingleNewItem は1件の新規記事で (1, 0, nil) を返すことを検証する
+// （Requirement 4.3）。
+func TestUpsertItems_SingleNewItem(t *testing.T) {
+	repo := newMockItemRepo()
+	sanitizer := &mockSanitizer{}
+	svc := NewItemUpsertService(repo, sanitizer)
+
+	parsedItems := []model.ParsedItem{
+		{GuidOrID: "single-new", Title: "単一新規"},
+	}
+
+	inserted, updated, err := svc.UpsertItems(context.Background(), "feed-1", parsedItems)
+	if err != nil {
+		t.Fatalf("UpsertItems returned error: %v", err)
+	}
+	if inserted != 1 || updated != 0 {
+		t.Errorf("(inserted, updated) = (%d, %d), want (1, 0)", inserted, updated)
+	}
+}
+
+// TestUpsertItems_SingleExistingItem は1件の既存記事一致で (0, 1, nil) を返すことを検証する
+// （Requirement 4.4）。
+func TestUpsertItems_SingleExistingItem(t *testing.T) {
+	repo := newMockItemRepo()
+	sanitizer := &mockSanitizer{}
+
+	repo.addExistingItem(&model.Item{
+		ID:       "single-existing",
+		FeedID:   "feed-1",
+		GuidOrID: "single-existing-guid",
+		Title:    "既存",
+	})
+
+	svc := NewItemUpsertService(repo, sanitizer)
+
+	parsedItems := []model.ParsedItem{
+		{GuidOrID: "single-existing-guid", Title: "更新"},
+	}
+
+	inserted, updated, err := svc.UpsertItems(context.Background(), "feed-1", parsedItems)
+	if err != nil {
+		t.Fatalf("UpsertItems returned error: %v", err)
+	}
+	if inserted != 0 || updated != 1 {
+		t.Errorf("(inserted, updated) = (%d, %d), want (0, 1)", inserted, updated)
+	}
+}
+
+// TestUpsertItems_EmptyItems_NoDBAccess は空スライスでDBアクセスせず早期 return することを
+// 検証する（Requirement 4.1）。
+func TestUpsertItems_EmptyItems_NoDBAccess(t *testing.T) {
+	repo := newMockItemRepo()
+	sanitizer := &mockSanitizer{}
+	svc := NewItemUpsertService(repo, sanitizer)
+
+	inserted, updated, err := svc.UpsertItems(context.Background(), "feed-1", []model.ParsedItem{})
+	if err != nil {
+		t.Fatalf("UpsertItems returned error: %v", err)
+	}
+	if inserted != 0 || updated != 0 {
+		t.Errorf("(inserted, updated) = (%d, %d), want (0, 0)", inserted, updated)
+	}
+	if repo.findBulkCalls != 0 || repo.upsertCalls != 0 {
+		t.Errorf("空入力時は DB へアクセスしてはならない: findBulkCalls=%d upsertCalls=%d", repo.findBulkCalls, repo.upsertCalls)
+	}
+}
+
+// TestUpsertItems_NilItems_NoDBAccess はnilでDBアクセスせず早期 return することを
+// 検証する（Requirement 4.2）。
+func TestUpsertItems_NilItems_NoDBAccess(t *testing.T) {
+	repo := newMockItemRepo()
+	sanitizer := &mockSanitizer{}
+	svc := NewItemUpsertService(repo, sanitizer)
+
+	inserted, updated, err := svc.UpsertItems(context.Background(), "feed-1", nil)
+	if err != nil {
+		t.Fatalf("UpsertItems returned error: %v", err)
+	}
+	if inserted != 0 || updated != 0 {
+		t.Errorf("(inserted, updated) = (%d, %d), want (0, 0)", inserted, updated)
+	}
+	if repo.findBulkCalls != 0 || repo.upsertCalls != 0 {
+		t.Errorf("nil 入力時は DB へアクセスしてはならない: findBulkCalls=%d upsertCalls=%d", repo.findBulkCalls, repo.upsertCalls)
+	}
+}
+
+// TestUpsertItems_BatchInternalDuplicate_LastWins はバッチ内で同一性判定上同一とみなされる
+// 記事が重複する場合、最終要素が勝つ（後勝ち）ことを検証する（オーケストレーター確定事項）。
+func TestUpsertItems_BatchInternalDuplicate_LastWins(t *testing.T) {
+	repo := newMockItemRepo()
+	sanitizer := &mockSanitizer{}
+	svc := NewItemUpsertService(repo, sanitizer)
+
+	// 同一 guid を持つ新規記事を 3 件並べる（DB には未存在）。
+	parsedItems := []model.ParsedItem{
+		{GuidOrID: "dup-guid", Title: "1番目"},
+		{GuidOrID: "dup-guid", Title: "2番目"},
+		{GuidOrID: "dup-guid", Title: "最後"},
+	}
+
+	inserted, updated, err := svc.UpsertItems(context.Background(), "feed-1", parsedItems)
+	if err != nil {
+		t.Fatalf("UpsertItems returned error: %v", err)
+	}
+	// 事前 dedup により 1 件の新規としてのみ書き込まれる。
+	if inserted != 1 || updated != 0 {
+		t.Errorf("(inserted, updated) = (%d, %d), want (1, 0)", inserted, updated)
+	}
+	// 後勝ち: 最終要素のタイトルが採用されること。
+	if repo.lastCreatedItem == nil {
+		t.Fatal("lastCreatedItem should not be nil")
+	}
+	if repo.lastCreatedItem.Title != "最後" {
+		t.Errorf("採用されたタイトル = %q, want %q（後勝ち）", repo.lastCreatedItem.Title, "最後")
+	}
+}
+
+// TestUpsertItems_BatchInternalDuplicate_ExistingLastWins は同一 guid の重複が既存記事に
+// 一致する場合も最終要素が勝つことを検証する（オーケストレーター確定事項 / Requirement 1.4）。
+func TestUpsertItems_BatchInternalDuplicate_ExistingLastWins(t *testing.T) {
+	repo := newMockItemRepo()
+	sanitizer := &mockSanitizer{}
+
+	repo.addExistingItem(&model.Item{
+		ID:       "dup-existing",
+		FeedID:   "feed-1",
+		GuidOrID: "dup-existing-guid",
+		Title:    "既存",
+	})
+
+	svc := NewItemUpsertService(repo, sanitizer)
+
+	parsedItems := []model.ParsedItem{
+		{GuidOrID: "dup-existing-guid", Title: "更新1"},
+		{GuidOrID: "dup-existing-guid", Title: "更新最後"},
+	}
+
+	inserted, updated, err := svc.UpsertItems(context.Background(), "feed-1", parsedItems)
+	if err != nil {
+		t.Fatalf("UpsertItems returned error: %v", err)
+	}
+	if inserted != 0 || updated != 1 {
+		t.Errorf("(inserted, updated) = (%d, %d), want (0, 1)", inserted, updated)
+	}
+	if repo.lastUpdatedItem.Title != "更新最後" {
+		t.Errorf("採用されたタイトル = %q, want %q（後勝ち）", repo.lastUpdatedItem.Title, "更新最後")
+	}
+	if repo.lastUpdatedItem.ID != "dup-existing" {
+		t.Errorf("更新対象 id = %q, want %q", repo.lastUpdatedItem.ID, "dup-existing")
 	}
 }
