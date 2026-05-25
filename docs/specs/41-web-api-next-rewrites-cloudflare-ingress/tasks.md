@@ -6,7 +6,7 @@
   - エンドポイントパス・`credentials: "include"`・`ApiError`・`createApiClient` のシグネチャは不変
   - doc comment を単一オリジン相対パス方針に更新する
   - _Requirements: 1.2, 1.4, 2.3, 5.2, 5.3, 6.3, NFR 1.1_
-- [ ] 1.2 `web/src/lib/api.test.ts` を更新する
+- [x] 1.2 `web/src/lib/api.test.ts` を更新する
   - 既存の相対パス期待ケース（`/api/feeds` 等）を維持する（Req 6.1）
   - `NEXT_PUBLIC_API_URL` が設定されても相対パスで `fetch` されることを確認するケースを追加する
   - _Requirements: 1.4, 6.1_
