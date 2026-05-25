@@ -2,8 +2,7 @@
 .git
 .gitignore
 
-# Kiro仕様・AI設定
-.kiro/
+# AI設定
 .claude/
 CLAUDE.md
 
