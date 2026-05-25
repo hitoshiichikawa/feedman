@@ -13,7 +13,7 @@
   - _Depends: 1.1_
 
 - [ ] 2. rewrites 生成ロジックと API_INTERNAL_URL 検証の純粋モジュール追加
-- [ ] 2.1 `web/src/lib/rewrites.ts` を新規作成する (P)
+- [x] 2.1 `web/src/lib/rewrites.ts` を新規作成する (P)
   - `API_INTERNAL_URL_ENV` 定数、`resolveApiInternalUrl(env)`（未設定/空で throw・末尾スラッシュ正規化）、
     `buildRewrites(base)`（`/api/:path*`・`/auth/:path*` をプレフィックス保持で転送する 2 ルール生成）を実装する
   - _Requirements: 2.1, 2.2, 4.1, 4.2, 4.3_
