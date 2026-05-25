@@ -16,14 +16,18 @@ services:
     build:
       context: ./web
       dockerfile: Dockerfile
-      args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
     ports:
       - "${WEB_PORT:-3000}:3000"
     environment:
       - NODE_ENV=production
+      # 内部 API 接続先（server-side のみで参照、ブラウザ非公開）。
+      # rewrites が /api/* /auth/* をこの URL へ転送する。未設定なら起動時に fail-fast する。
+      - API_INTERNAL_URL=${API_INTERNAL_URL:-http://api:8080}
     networks:
       - external
+      - internal
+    depends_on:
+      - api
     restart: unless-stopped
 
   api:
@@ -37,9 +41,15 @@ services:
       - DATABASE_URL=postgres://${POSTGRES_USER:-feedman}:${POSTGRES_PASSWORD:-feedman}@db:5432/${POSTGRES_DB:-feedman}?sslmode=disable
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
-      - GOOGLE_REDIRECT_URL=${GOOGLE_REDIRECT_URL:-http://localhost:8080/auth/google/callback}
+      # 単一オリジン化後はブラウザ可視オリジン（web のオリジン）配下の callback URL を設定する。
+      # 例: 本番 https://<host>/auth/google/callback / ローカル http://localhost:3000/auth/google/callback
+      # （Google Cloud Console の承認済みリダイレクト URI にも同値を登録すること）
+      - GOOGLE_REDIRECT_URL=${GOOGLE_REDIRECT_URL:-http://localhost:3000/auth/google/callback}
       - SESSION_SECRET=${SESSION_SECRET}
-      - BASE_URL=${BASE_URL:-http://localhost:8080}
+      # 単一オリジン化後はブラウザ可視オリジン（web のオリジン）を設定する。
+      # callback 後のリダイレクト先・Cookie の Secure 自動判定（https で true）に利用される。
+      # 例: 本番 https://<host> / ローカル http://localhost:3000
+      - BASE_URL=${BASE_URL:-http://localhost:3000}
       - CORS_ALLOWED_ORIGIN=${CORS_ALLOWED_ORIGIN:-http://localhost:3000}
       - COOKIE_DOMAIN=${COOKIE_DOMAIN:-}
       - SERVER_PORT=8080
