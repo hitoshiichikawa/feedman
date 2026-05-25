@@ -56,7 +56,7 @@
     Google Cloud Console redirect URI 登録手順、セキュリティ節（CSRF/Cookie）を更新
   - _Requirements: 3.3, 5.3, NFR 1.2, NFR 3.1, NFR 3.2_
 
-- [ ] 6. バックエンド非改修の回帰確認（Cookie 属性・OAuth フロー不変）
+- [x] 6. バックエンド非改修の回帰確認（Cookie 属性・OAuth フロー不変）
   - `internal/handler/auth_handler.go` の Cookie 属性（`SameSite=Lax` / `HttpOnly` / `Secure` 自動判定）と
     OAuth state 検証失敗時の挙動を変更しないことを確認する（first-party 化のためコード改修は不要）
   - `go test ./...` を実行し既存バックエンドテストスイートが全件成功することを確認する
