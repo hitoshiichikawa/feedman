@@ -106,12 +106,8 @@ func (h *SubscriptionHandler) UpdateSettings(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// フェッチ間隔のバリデーション: 30分-720分（12時間）、30分刻み
-	if !isValidFetchInterval(req.FetchIntervalMinutes) {
-		writeAPIErrorResponse(w, http.StatusBadRequest, model.NewInvalidFetchIntervalError(req.FetchIntervalMinutes))
-		return
-	}
-
+	// フェッチ間隔のバリデーションはサービス層に集約済み。
+	// 不正値はサービスが INVALID_FETCH_INTERVAL を返し handleServiceError 経由で HTTP 400 になる。
 	sub, err := h.service.UpdateSettings(r.Context(), userID, subscriptionID, req.FetchIntervalMinutes)
 	if err != nil {
 		handleServiceError(w, err)
@@ -188,10 +184,4 @@ func SetupSubscriptionRoutes(service SubscriptionServiceInterface) http.Handler 
 	})
 
 	return r
-}
-
-// isValidFetchInterval はフェッチ間隔のバリデーションを行う。
-// 30分-720分（12時間）、30分刻みであることを検証する。
-func isValidFetchInterval(minutes int) bool {
-	return minutes >= 30 && minutes <= 720 && minutes%30 == 0
 }
