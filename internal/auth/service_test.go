@@ -291,6 +291,62 @@ func TestHandleCallback_ExistingUser_LogsInAndCreatesSession(t *testing.T) {
 	}
 }
 
+func TestHandleCallback_IssuesDistinctSessionIDPerLogin(t *testing.T) {
+	// Arrange: 同一ユーザーが連続でログインしても毎回異なる session_id が払い出されること
+	// （AC R1.3 / R2.2 ログイン前後で有効な識別子が同一にならないことの基盤を担保する）
+	ctx := context.Background()
+
+	existingUserID := "existing-user-id-rotate"
+
+	provider := &mockOAuthProvider{
+		exchangeCodeFn: func(ctx context.Context, code string) (*OAuthUserInfo, error) {
+			return &OAuthUserInfo{
+				ProviderUserID: "google-user-rotate",
+				Email:          "rotate@example.com",
+				Name:           "Rotate User",
+				Provider:       "google",
+			}, nil
+		},
+	}
+
+	identityRepo := &mockIdentityRepo{
+		findByProviderFn: func(ctx context.Context, provider, providerUserID string) (*model.Identity, error) {
+			return &model.Identity{
+				ID:             "identity-rotate",
+				UserID:         existingUserID,
+				Provider:       "google",
+				ProviderUserID: "google-user-rotate",
+			}, nil
+		},
+	}
+
+	sessionRepo := &mockSessionRepo{
+		createFn: func(ctx context.Context, session *model.Session) error {
+			return nil
+		},
+	}
+
+	svc := NewService(provider, &mockUserRepo{}, identityRepo, sessionRepo, ServiceConfig{SessionMaxAge: 86400})
+
+	// Act: 2 回ログインする
+	first, err := svc.HandleCallback(ctx, "auth-code-1")
+	if err != nil {
+		t.Fatalf("first HandleCallback() error = %v", err)
+	}
+	second, err := svc.HandleCallback(ctx, "auth-code-2")
+	if err != nil {
+		t.Fatalf("second HandleCallback() error = %v", err)
+	}
+
+	// Assert: 2 回のログインで払い出された session_id が異なること
+	if first.ID == "" || second.ID == "" {
+		t.Fatal("expected non-empty session IDs")
+	}
+	if first.ID == second.ID {
+		t.Errorf("session IDs must differ between logins, got %q twice", first.ID)
+	}
+}
+
 func TestHandleCallback_OAuthError_ReturnsError(t *testing.T) {
 	ctx := context.Background()
 
