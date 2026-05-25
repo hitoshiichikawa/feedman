@@ -16,10 +16,10 @@ import (
 type FeedServiceInterface interface {
 	// RegisterFeed はURLからフィードを検出し登録する。
 	RegisterFeed(ctx context.Context, userID, inputURL string) (*model.Feed, *model.Subscription, error)
-	// GetFeed はフィード情報を取得する。
-	GetFeed(ctx context.Context, feedID string) (*model.Feed, error)
-	// UpdateFeedURL はフィードURLを更新する。
-	UpdateFeedURL(ctx context.Context, feedID, newURL string) (*model.Feed, error)
+	// GetFeed はフィード情報を取得する。userID は認可チェック用。
+	GetFeed(ctx context.Context, userID, feedID string) (*model.Feed, error)
+	// UpdateFeedURL はフィードURLを更新する。userID は認可チェック用。
+	UpdateFeedURL(ctx context.Context, userID, feedID, newURL string) (*model.Feed, error)
 }
 
 // SubscriptionDeleter は購読削除のためのインターフェース。
@@ -115,9 +115,20 @@ func (h *FeedHandler) RegisterFeed(w http.ResponseWriter, r *http.Request) {
 // GetFeed はフィード詳細を取得する。
 // GET /api/feeds/:id
 func (h *FeedHandler) GetFeed(w http.ResponseWriter, r *http.Request) {
+	userID, err := middleware.UserIDFromContext(r.Context())
+	if err != nil {
+		writeAPIErrorResponse(w, http.StatusUnauthorized, &model.APIError{
+			Code:     "UNAUTHORIZED",
+			Message:  "認証が必要です。",
+			Category: "auth",
+			Action:   "ログインしてください。",
+		})
+		return
+	}
+
 	feedID := chi.URLParam(r, "id")
 
-	feed, err := h.service.GetFeed(r.Context(), feedID)
+	feed, err := h.service.GetFeed(r.Context(), userID, feedID)
 	if err != nil {
 		handleServiceError(w, err)
 		return
@@ -140,6 +151,17 @@ func (h *FeedHandler) GetFeed(w http.ResponseWriter, r *http.Request) {
 // UpdateFeedURL はフィードURLを更新する。
 // PATCH /api/feeds/:id
 func (h *FeedHandler) UpdateFeedURL(w http.ResponseWriter, r *http.Request) {
+	userID, err := middleware.UserIDFromContext(r.Context())
+	if err != nil {
+		writeAPIErrorResponse(w, http.StatusUnauthorized, &model.APIError{
+			Code:     "UNAUTHORIZED",
+			Message:  "認証が必要です。",
+			Category: "auth",
+			Action:   "ログインしてください。",
+		})
+		return
+	}
+
 	feedID := chi.URLParam(r, "id")
 
 	var req updateFeedURLRequest
@@ -158,7 +180,7 @@ func (h *FeedHandler) UpdateFeedURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	feed, err := h.service.UpdateFeedURL(r.Context(), feedID, req.FeedURL)
+	feed, err := h.service.UpdateFeedURL(r.Context(), userID, feedID, req.FeedURL)
 	if err != nil {
 		handleServiceError(w, err)
 		return

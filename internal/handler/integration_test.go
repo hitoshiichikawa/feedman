@@ -104,14 +104,14 @@ func createIntegrationRouter(state *integrationState) http.Handler {
 				state.subsByUser[userID] = append(state.subsByUser[userID], sub.ID)
 				return f, sub, nil
 			},
-			getFeedFn: func(ctx context.Context, feedID string) (*model.Feed, error) {
+			getFeedFn: func(ctx context.Context, userID, feedID string) (*model.Feed, error) {
 				f, ok := state.feeds[feedID]
 				if !ok {
 					return nil, nil
 				}
 				return f, nil
 			},
-			updateFeedURLFn: func(ctx context.Context, feedID, newURL string) (*model.Feed, error) {
+			updateFeedURLFn: func(ctx context.Context, userID, feedID, newURL string) (*model.Feed, error) {
 				f, ok := state.feeds[feedID]
 				if !ok {
 					return nil, &model.APIError{

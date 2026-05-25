@@ -62,7 +62,7 @@ func createTestRouter() (http.Handler, *mockSessionFinderForRouter) {
 					FeedID: "feed-test-1",
 				}, nil
 			},
-			getFeedFn: func(ctx context.Context, feedID string) (*model.Feed, error) {
+			getFeedFn: func(ctx context.Context, userID, feedID string) (*model.Feed, error) {
 				return &model.Feed{
 					ID:      feedID,
 					FeedURL: "https://example.com/feed.xml",
@@ -70,7 +70,7 @@ func createTestRouter() (http.Handler, *mockSessionFinderForRouter) {
 					Title:   "Test Feed",
 				}, nil
 			},
-			updateFeedURLFn: func(ctx context.Context, feedID, newURL string) (*model.Feed, error) {
+			updateFeedURLFn: func(ctx context.Context, userID, feedID, newURL string) (*model.Feed, error) {
 				return &model.Feed{
 					ID:      feedID,
 					FeedURL: newURL,

@@ -405,9 +405,16 @@ func TestFeedService_GetFeed(t *testing.T) {
 		Title:   "テストフィード",
 	}
 
-	svc := NewFeedService(feedRepo, newMockSubRepo(), &mockDetector{}, &mockFaviconFetcher{})
+	subRepo := newMockSubRepo()
+	subRepo.subs["sub-1"] = &model.Subscription{
+		ID:     "sub-1",
+		UserID: "user-1",
+		FeedID: "feed-1",
+	}
 
-	feed, err := svc.GetFeed(context.Background(), "feed-1")
+	svc := NewFeedService(feedRepo, subRepo, &mockDetector{}, &mockFaviconFetcher{})
+
+	feed, err := svc.GetFeed(context.Background(), "user-1", "feed-1")
 	if err != nil {
 		t.Fatalf("GetFeed returned error: %v", err)
 	}
@@ -424,12 +431,42 @@ func TestFeedService_GetFeed_NotFound(t *testing.T) {
 	feedRepo := newMockFeedRepo()
 	svc := NewFeedService(feedRepo, newMockSubRepo(), &mockDetector{}, &mockFaviconFetcher{})
 
-	feed, err := svc.GetFeed(context.Background(), "nonexistent")
+	feed, err := svc.GetFeed(context.Background(), "user-1", "nonexistent")
 	if err != nil {
 		t.Fatalf("GetFeed returned error: %v", err)
 	}
 	if feed != nil {
 		t.Error("存在しないフィードはnilを返すべき")
+	}
+}
+
+// TestFeedService_GetFeed_NotSubscribed_ReturnsNil は他ユーザー (購読していない) のフィード取得が
+// IDOR を避けるため nil を返すことをテストする (issue #34 リグレッション)。
+func TestFeedService_GetFeed_NotSubscribed_ReturnsNil(t *testing.T) {
+	feedRepo := newMockFeedRepo()
+	feedRepo.feeds["feed-1"] = &model.Feed{
+		ID:      "feed-1",
+		FeedURL: "https://example.com/feed.xml",
+		Title:   "他ユーザーのフィード",
+	}
+
+	subRepo := newMockSubRepo()
+	// user-other のみが購読
+	subRepo.subs["sub-1"] = &model.Subscription{
+		ID:     "sub-1",
+		UserID: "user-other",
+		FeedID: "feed-1",
+	}
+
+	svc := NewFeedService(feedRepo, subRepo, &mockDetector{}, &mockFaviconFetcher{})
+
+	// user-attacker は購読していない
+	feed, err := svc.GetFeed(context.Background(), "user-attacker", "feed-1")
+	if err != nil {
+		t.Fatalf("GetFeed returned error: %v", err)
+	}
+	if feed != nil {
+		t.Error("購読していないフィードは nil を返すべき (IDOR 防止)")
 	}
 }
 
@@ -443,9 +480,16 @@ func TestFeedService_UpdateFeedURL(t *testing.T) {
 		FetchStatus: model.FetchStatusActive,
 	}
 
-	svc := NewFeedService(feedRepo, newMockSubRepo(), &mockDetector{}, &mockFaviconFetcher{})
+	subRepo := newMockSubRepo()
+	subRepo.subs["sub-1"] = &model.Subscription{
+		ID:     "sub-1",
+		UserID: "user-1",
+		FeedID: "feed-1",
+	}
 
-	feed, err := svc.UpdateFeedURL(context.Background(), "feed-1", "https://example.com/new-feed.xml")
+	svc := NewFeedService(feedRepo, subRepo, &mockDetector{}, &mockFaviconFetcher{})
+
+	feed, err := svc.UpdateFeedURL(context.Background(), "user-1", "feed-1", "https://example.com/new-feed.xml")
 	if err != nil {
 		t.Fatalf("UpdateFeedURL returned error: %v", err)
 	}
@@ -462,9 +506,51 @@ func TestFeedService_UpdateFeedURL_NotFound(t *testing.T) {
 	feedRepo := newMockFeedRepo()
 	svc := NewFeedService(feedRepo, newMockSubRepo(), &mockDetector{}, &mockFaviconFetcher{})
 
-	_, err := svc.UpdateFeedURL(context.Background(), "nonexistent", "https://example.com/new-feed.xml")
+	_, err := svc.UpdateFeedURL(context.Background(), "user-1", "nonexistent", "https://example.com/new-feed.xml")
 	if err == nil {
 		t.Fatal("存在しないフィードの更新はエラーを返すべき")
+	}
+}
+
+// TestFeedService_UpdateFeedURL_NotSubscribed_ReturnsNotFound は他ユーザー (購読していない) のフィード更新が
+// IDOR を避けるため FEED_NOT_FOUND を返すことをテストする (issue #34 リグレッション)。
+func TestFeedService_UpdateFeedURL_NotSubscribed_ReturnsNotFound(t *testing.T) {
+	feedRepo := newMockFeedRepo()
+	feedRepo.feeds["feed-1"] = &model.Feed{
+		ID:          "feed-1",
+		FeedURL:     "https://example.com/feed.xml",
+		Title:       "他ユーザーのフィード",
+		FetchStatus: model.FetchStatusActive,
+	}
+
+	subRepo := newMockSubRepo()
+	// user-other のみが購読
+	subRepo.subs["sub-1"] = &model.Subscription{
+		ID:     "sub-1",
+		UserID: "user-other",
+		FeedID: "feed-1",
+	}
+
+	svc := NewFeedService(feedRepo, subRepo, &mockDetector{}, &mockFaviconFetcher{})
+
+	// user-attacker による URL 書き換え試行
+	_, err := svc.UpdateFeedURL(context.Background(), "user-attacker", "feed-1", "https://attacker.example.com/feed.xml")
+	if err == nil {
+		t.Fatal("購読していないフィードの更新はエラーを返すべき (IDOR 防止)")
+	}
+	apiErr, ok := err.(*model.APIError)
+	if !ok {
+		t.Fatalf("APIError 型が期待されるが、%T が返された", err)
+	}
+	if apiErr.Code != "FEED_NOT_FOUND" {
+		t.Errorf("エラーコード = %q, want %q", apiErr.Code, "FEED_NOT_FOUND")
+	}
+	// フィードが更新されていないことを確認
+	if feedRepo.updateCalls != 0 {
+		t.Errorf("購読していないフィードへの更新は実行されないべき。updateCalls = %d", feedRepo.updateCalls)
+	}
+	if feedRepo.feeds["feed-1"].FeedURL != "https://example.com/feed.xml" {
+		t.Errorf("フィード URL が書き換えられている: %q", feedRepo.feeds["feed-1"].FeedURL)
 	}
 }
 

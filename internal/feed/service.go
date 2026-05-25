@@ -128,12 +128,36 @@ func (s *FeedService) RegisterFeed(ctx context.Context, userID string, inputURL 
 }
 
 // GetFeed はフィード情報を取得する。
-func (s *FeedService) GetFeed(ctx context.Context, feedID string) (*model.Feed, error) {
+// 認可: リクエストユーザーが当該フィードを購読している場合のみ取得可能。
+// 購読していない場合は IDOR を避けるため nil, nil を返す（ハンドラーで 404 として扱う）。
+func (s *FeedService) GetFeed(ctx context.Context, userID, feedID string) (*model.Feed, error) {
+	sub, err := s.subRepo.FindByUserAndFeed(ctx, userID, feedID)
+	if err != nil {
+		return nil, fmt.Errorf("購読の確認に失敗しました: %w", err)
+	}
+	if sub == nil {
+		return nil, nil
+	}
 	return s.feedRepo.FindByID(ctx, feedID)
 }
 
 // UpdateFeedURL はフィードURLを更新する。
-func (s *FeedService) UpdateFeedURL(ctx context.Context, feedID string, newURL string) (*model.Feed, error) {
+// 認可: リクエストユーザーが当該フィードを購読している場合のみ更新可能。
+// 購読していない場合は IDOR を避けるため FEED_NOT_FOUND を返す。
+func (s *FeedService) UpdateFeedURL(ctx context.Context, userID, feedID, newURL string) (*model.Feed, error) {
+	sub, err := s.subRepo.FindByUserAndFeed(ctx, userID, feedID)
+	if err != nil {
+		return nil, fmt.Errorf("購読の確認に失敗しました: %w", err)
+	}
+	if sub == nil {
+		return nil, &model.APIError{
+			Code:     "FEED_NOT_FOUND",
+			Message:  "指定されたフィードが見つかりません。",
+			Category: "feed",
+			Action:   "フィードIDを確認してください。",
+		}
+	}
+
 	feed, err := s.feedRepo.FindByID(ctx, feedID)
 	if err != nil {
 		return nil, fmt.Errorf("フィードの取得に失敗しました: %w", err)
