@@ -4,17 +4,16 @@
  * credentials: "include" により Cookie を自動送信する。
  * CSRF保護はSameSite=Lax Cookie + CORSポリシーで実現する。
  *
- * NEXT_PUBLIC_API_URL 環境変数でAPIサーバーのベースURLを指定する。
- * 未設定の場合は同一オリジン（相対パス）にフォールバックする。
+ * API は常に同一オリジンの相対パス経由で呼び出す（単一オリジン構成）。
+ * NEXT_PUBLIC_API_URL は参照しない（build-once / ビルド時 URL 焼き込みの廃止のため）。
+ * 内部 API への転送は Next.js の rewrites（実行時設定 API_INTERNAL_URL）が担う。
  */
 
 /**
- * APIサーバーのベースURL。
- * 末尾スラッシュは除去して保持する。
+ * API のベース URL。常に空文字（同一オリジン相対パス）。
+ * NEXT_PUBLIC_API_URL は参照しない（build-once / 単一オリジン化のため）。
  */
-export const API_BASE_URL = (
-  process.env.NEXT_PUBLIC_API_URL || ""
-).replace(/\/+$/, "");
+export const API_BASE_URL = "";
 
 /** APIエラークラス */
 export class ApiError extends Error {
