@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. API クライアントの NEXT_PUBLIC_API_URL 依存撤去
-- [ ] 1.1 `web/src/lib/api.ts` を相対パス固定にする
+- [x] 1.1 `web/src/lib/api.ts` を相対パス固定にする
   - `API_BASE_URL` を常に `""` にし、`process.env.NEXT_PUBLIC_API_URL` 参照とフォールバック記述を撤去する
   - エンドポイントパス・`credentials: "include"`・`ApiError`・`createApiClient` のシグネチャは不変
   - doc comment を単一オリジン相対パス方針に更新する
