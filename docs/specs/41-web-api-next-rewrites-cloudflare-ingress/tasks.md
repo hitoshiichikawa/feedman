@@ -37,7 +37,7 @@
     出力して非ゼロ終了する。通過時に standalone `server.js` を起動する
   - _Requirements: 4.1, 4.2, 4.3, NFR 2.1_
   - _Depends: 2.1_
-- [ ] 4.2 `web/Dockerfile` を更新する
+- [x] 4.2 `web/Dockerfile` を更新する
   - builder stage の `ARG/ENV NEXT_PUBLIC_API_URL` を削除する
   - runner stage で `server-entrypoint.mjs` をコピーし `CMD ["node", "server-entrypoint.mjs"]` に変更する
   - _Requirements: 1.1, 4.1, 4.3, 5.3, NFR 1.2_
