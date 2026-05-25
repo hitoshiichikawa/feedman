@@ -131,6 +131,29 @@ type ItemRepository interface {
 
 	// Update は既存記事を上書き更新する。履歴は保持しない。
 	Update(ctx context.Context, item *model.Item) error
+
+	// FindExistingForUpsert は同一性判定に必要な既存記事を一括取得する。
+	// guids / links / hashes は当該バッチに含まれる guid_or_id / link / content_hash の
+	// 候補集合であり、それぞれを定数回（合計 3 回）のバッチ SELECT で引く。
+	// 記事件数に比例した DB 往復を発生させないための一括取得手段。
+	// 戻り値の ExistingItems は呼び出し側の 3 段階優先順位判定に用いる。
+	FindExistingForUpsert(ctx context.Context, feedID string, guids, links, hashes []string) (*ExistingItems, error)
+
+	// BulkUpsert は新規記事の一括 INSERT と既存記事の一括 UPDATE を単一トランザクションで実行する。
+	// 途中でエラーが発生した場合は当該バッチを全件ロールバックし、1 件も永続化しない。
+	// toCreate / toUpdate のいずれかが空でも安全に動作する。
+	BulkUpsert(ctx context.Context, toCreate, toUpdate []*model.Item) error
+}
+
+// ExistingItems は同一性判定のための既存記事を guid_or_id / link / content_hash 別に索引した結果。
+// いずれのマップも feed_id 単位で取得済みの既存記事を保持する。
+type ExistingItems struct {
+	// ByGUID は guid_or_id をキーとする既存記事マップ。
+	ByGUID map[string]*model.Item
+	// ByLink は link をキーとする既存記事マップ。
+	ByLink map[string]*model.Item
+	// ByContentHash は content_hash をキーとする既存記事マップ。
+	ByContentHash map[string]*model.Item
 }
 
 // HatebuItemRepository ははてなブックマーク取得に必要な記事データ操作のインターフェース。
