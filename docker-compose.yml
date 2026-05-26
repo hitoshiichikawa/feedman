@@ -23,6 +23,11 @@ services:
       # 内部 API 接続先（server-side のみで参照、ブラウザ非公開）。
       # rewrites が /api/* /auth/* をこの URL へ転送する。未設定なら起動時に fail-fast する。
       - API_INTERNAL_URL=${API_INTERNAL_URL:-http://api:8080}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "14"
     networks:
       - external
       - internal
