@@ -117,10 +117,10 @@ vi .env.production
 | `GOOGLE_CLIENT_ID` | api | Google Cloud Console で取得した OAuth クライアント ID |
 | `GOOGLE_CLIENT_SECRET` | api | Google Cloud Console で取得した OAuth クライアントシークレット |
 | `GOOGLE_REDIRECT_URL` | api | ブラウザ可視オリジン配下の callback URL（例: `https://<host>/auth/google/callback`）。Google Cloud Console の登録値と一致させる |
-| `SESSION_SECRET` | api | ランダムな文字列（下記コマンドで生成） |
+| `SESSION_SECRET` | api / worker | **起動に必須**。未設定/空のまま `docker compose up` / `config` すると fail-fast で停止する。ランダムな文字列を下記コマンドで生成して設定する |
 | `BASE_URL` | api | ブラウザ可視オリジン（例: `https://<host>`）。callback 後のリダイレクト先・Cookie の Secure 自動判定に利用 |
 | `API_INTERNAL_URL` | web | 内部 API 接続先（例: `http://api:8080`）。**実行時**に web が rewrites の転送先として参照。ブラウザ非公開。未設定なら web は起動時に fail-fast |
-| `POSTGRES_PASSWORD` | db | PostgreSQL パスワード（本番では必ずデフォルトから変更） |
+| `POSTGRES_PASSWORD` | db | **起動に必須**。未設定/空のまま `docker compose up` / `config` すると fail-fast で停止する（弱い既知のデフォルトは廃止済み）。下記コマンドで生成した値を設定する |
 | `DATABASE_URL` | api / worker | DB 接続 URL。未設定ならコンテナ内 DB（`db` ホスト, `sslmode=disable`）向けデフォルトが適用される。**外部 PostgreSQL 接続時は `sslmode` に `require` 以上を明示すること**（[本番デプロイ時の注意事項](#本番デプロイ時の注意事項)参照） |
 | `CORS_ALLOWED_ORIGIN` | api | CORS 許可オリジン（単一オリジン化で CORS プリフライトは発生しなくなるが、設定撤去は #23 の領分のため残置） |
 
@@ -128,8 +128,16 @@ vi .env.production
 > 相対パスで API を呼ぶため、ビルド時に API の URL を焼き込みません（build-once）。内部 API への
 > 転送先は実行時の `API_INTERNAL_URL` で指定します。
 
+`SESSION_SECRET` と `POSTGRES_PASSWORD` は起動に必須です。**未設定/空のまま `docker compose up`
+（や `docker compose config`）を実行すると、Compose 構成が fail-fast し、どの環境変数が必要かを
+示すエラーメッセージを出力して停止します**（弱い既知のデフォルト値での起動導線は廃止済み）。
+以下のコマンドで安全なランダム値を生成し、`.env.production` に設定してください:
+
 ```bash
 # SESSION_SECRET の生成
+openssl rand -base64 32
+
+# POSTGRES_PASSWORD の生成
 openssl rand -base64 32
 ```
 
@@ -172,7 +180,9 @@ docker compose --env-file .env.production exec api /feedman migrate
 
 - `.env.sample` を `.env.production` にコピーし、本番用の値を設定する
 - **`.env.production` は絶対に Git にコミットしない**（`.gitignore` で除外済み）
-- `SESSION_SECRET` には `openssl rand -base64 32` で生成した十分に長いランダム文字列を設定する
+- `SESSION_SECRET` と `POSTGRES_PASSWORD` は **起動に必須**。`openssl rand -base64 32` で生成した
+  十分に長いランダム値を設定する。**未設定/空のまま起動すると Compose 構成が fail-fast し、
+  どの環境変数が必要かを示すエラーで停止する**（弱い既知のデフォルト値での起動導線は廃止済み）
 - **単一オリジン化に伴う設定**:
   - `API_INTERNAL_URL` を内部 API の接続先（例: `http://api:8080`）に設定する。これは web の
     **実行時**環境変数であり、ビルド時引数ではない（同一イメージを環境横断で再利用できる = build-once）。
@@ -184,7 +194,8 @@ docker compose --env-file .env.production exec api /feedman migrate
   - `NEXT_PUBLIC_API_URL` は廃止済み。設定しても無視され、ブラウザは常に同一オリジン相対パスで API を呼ぶ
 - 単一 ingress（Cloudflare 等のリバースプロキシ）を前段に置き、TLS 終端のうえ **すべてのリクエストを
   `web`（:3000）へルーティング**する。`api`（:8080）はブラウザに公開せず内部ネットワークに留める
-- PostgreSQL のパスワードをデフォルト（`feedman`）から変更する
+- `POSTGRES_PASSWORD` は必須化済みで、弱い既知のデフォルト（`feedman`）は廃止された。未設定だと
+  起動できないため、上記のとおり `openssl rand -base64 32` で生成した値を設定する
 - DB ポートはデフォルトで非公開。開発時に直接接続が必要な場合のみ `DB_PORT=5432` を設定する
 - **DB 接続の TLS（`sslmode`）設定**:
   - コンテナ内 DB（`db` ホスト）を利用する場合のみ `sslmode=disable` が許容される（コンテナ間の
