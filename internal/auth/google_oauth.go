@@ -8,12 +8,18 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 const (
-	defaultGoogleAuthURL    = "https://accounts.google.com/o/oauth2/auth"
-	defaultGoogleTokenURL   = "https://oauth2.googleapis.com/token"
+	defaultGoogleAuthURL     = "https://accounts.google.com/o/oauth2/auth"
+	defaultGoogleTokenURL    = "https://oauth2.googleapis.com/token"
 	defaultGoogleUserInfoURL = "https://www.googleapis.com/oauth2/v3/userinfo"
+
+	// defaultOAuthHTTPTimeout はOAuthエンドポイントへの外部リクエストに適用する
+	// クライアントレベルのタイムアウト。上流の無応答によるリクエストの無期限ハングと
+	// それに伴うリソース滞留を防ぐ。
+	defaultOAuthHTTPTimeout = 10 * time.Second
 )
 
 // GoogleOAuthConfig はGoogle OAuthプロバイダーの設定。
@@ -31,9 +37,14 @@ type GoogleOAuthConfig struct {
 // GoogleOAuthProvider はGoogle OAuth 2.0による認証を提供する。
 type GoogleOAuthProvider struct {
 	config GoogleOAuthConfig
+	// httpClient はトークン交換・ユーザー情報取得の両リクエストで共有する、
+	// 明示的なタイムアウトを持つHTTPクライアント。http.DefaultClient を直接使うと
+	// クライアントレベルのタイムアウトが効かず無期限ハングし得るため、専用クライアントを保持する。
+	httpClient *http.Client
 }
 
 // NewGoogleOAuthProvider はGoogleOAuthProviderを生成する。
+// 外部リクエスト用に defaultOAuthHTTPTimeout のタイムアウトを持つHTTPクライアントを初期化する。
 func NewGoogleOAuthProvider(config GoogleOAuthConfig) *GoogleOAuthProvider {
 	if config.AuthURL == "" {
 		config.AuthURL = defaultGoogleAuthURL
@@ -44,7 +55,10 @@ func NewGoogleOAuthProvider(config GoogleOAuthConfig) *GoogleOAuthProvider {
 	if config.UserInfoURL == "" {
 		config.UserInfoURL = defaultGoogleUserInfoURL
 	}
-	return &GoogleOAuthProvider{config: config}
+	return &GoogleOAuthProvider{
+		config:     config,
+		httpClient: &http.Client{Timeout: defaultOAuthHTTPTimeout},
+	}
 }
 
 // GetLoginURL はGoogle OAuthの認証URLを生成する。
@@ -114,7 +128,7 @@ func (p *GoogleOAuthProvider) exchangeToken(ctx context.Context, code string) (*
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("token request failed: %w", err)
 	}
@@ -149,7 +163,7 @@ func (p *GoogleOAuthProvider) fetchUserInfo(ctx context.Context, accessToken str
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("user info request failed: %w", err)
 	}
