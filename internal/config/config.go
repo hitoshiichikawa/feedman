@@ -53,6 +53,11 @@ type Config struct {
 
 	// CORS
 	CORSAllowedOrigin string
+
+	// Security
+	// HSTSEnabled は HSTS（Strict-Transport-Security）ヘッダーの出力可否を制御する。
+	// 既定値は false（HSTS 非出力 = 本機能導入前と等価）。
+	HSTSEnabled bool
 }
 
 // Load は環境変数からConfigを読み込む。
@@ -114,6 +119,7 @@ func Load() (*Config, error) {
 	cfg.CookieSecure = strings.HasPrefix(cfg.BaseURL, "https://")
 	cfg.CookieDomain = getEnvString("COOKIE_DOMAIN", "")
 	cfg.CORSAllowedOrigin = getEnvString("CORS_ALLOWED_ORIGIN", "http://localhost:3000")
+	cfg.HSTSEnabled = getEnvBool("HSTS_ENABLED", false)
 
 	return cfg, nil
 }
@@ -123,6 +129,26 @@ func getEnvString(key, defaultVal string) string {
 		return v
 	}
 	return defaultVal
+}
+
+// getEnvBool は環境変数を bool として読み込む。
+// 未設定（空文字）の場合は defaultVal を返す。
+// 不正値（strconv.ParseBool が受け付けない値）の場合は Warn ログを出力し defaultVal を返して起動を継続する。
+func getEnvBool(key string, defaultVal bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return defaultVal
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		slog.Warn("環境変数のパースに失敗したためデフォルト値を採用します",
+			slog.String("key", key),
+			slog.String("value", v),
+			slog.Bool("default", defaultVal),
+		)
+		return defaultVal
+	}
+	return b
 }
 
 func getEnvInt(key string, defaultVal int) int {

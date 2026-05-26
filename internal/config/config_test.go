@@ -162,6 +162,66 @@ func TestLoad_DefaultValues(t *testing.T) {
 	if cfg.ServerPort != "8080" {
 		t.Errorf("ServerPort = %q, want %q", cfg.ServerPort, "8080")
 	}
+
+	// Security defaults: HSTS は未設定時 false（本機能導入前と等価）。
+	if cfg.HSTSEnabled != false {
+		t.Errorf("HSTSEnabled = %v, want %v (default)", cfg.HSTSEnabled, false)
+	}
+}
+
+// TestLoad_HSTSEnabled は HSTS_ENABLED 環境変数の読み込みを検証する。
+// Requirement 3.3（未指定・不正値時は既定値採用で起動継続）と NFR 1.2 に対応。
+func TestLoad_HSTSEnabled(t *testing.T) {
+	t.Run("HSTS_ENABLEDがtrueのときHSTSEnabledがtrueになる", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("HSTS_ENABLED", "true")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if !cfg.HSTSEnabled {
+			t.Error("HSTSEnabled = false, want true")
+		}
+	})
+
+	t.Run("HSTS_ENABLEDが未設定のときHSTSEnabledがfalseになる", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("HSTS_ENABLED", "")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if cfg.HSTSEnabled {
+			t.Error("HSTSEnabled = true, want false (default for unset)")
+		}
+	})
+
+	t.Run("HSTS_ENABLEDが不正値のときHSTSEnabledが既定値falseになり起動を継続する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("HSTS_ENABLED", "not-a-bool")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error (should continue startup with default), got %v", err)
+		}
+		if cfg.HSTSEnabled {
+			t.Error("HSTSEnabled = true, want false (default for invalid value)")
+		}
+	})
 }
 
 func TestLoad_CustomValues(t *testing.T) {
@@ -503,6 +563,83 @@ func TestGetEnvDuration(t *testing.T) {
 
 		// Act
 		got := getEnvDuration(key, defaultVal)
+
+		// Assert
+		if got != defaultVal {
+			t.Errorf("got = %v, want %v (default fallback)", got, defaultVal)
+		}
+		if n := len(h.warnRecords()); n != 0 {
+			t.Errorf("warn records = %d, want 0", n)
+		}
+	})
+}
+
+// TestGetEnvBool は getEnvBool のパース失敗時警告ログ・フォールバック・正常系を検証する。
+// Requirement 3.3（未指定・不正値時は既定値採用で起動継続）に対応。
+func TestGetEnvBool(t *testing.T) {
+	const key = "TEST_GET_ENV_BOOL"
+	const defaultVal = false
+
+	t.Run("不正値のときデフォルト値を採用しWarnを1件出力する", func(t *testing.T) {
+		// Arrange
+		h := installCaptureLogger(t)
+		t.Setenv(key, "yesnt")
+
+		// Act
+		got := getEnvBool(key, defaultVal)
+
+		// Assert
+		if got != defaultVal {
+			t.Errorf("got = %v, want %v (default fallback)", got, defaultVal)
+		}
+		if n := len(h.warnRecords()); n != 1 {
+			t.Fatalf("warn records = %d, want 1", n)
+		}
+	})
+
+	t.Run("不正値のときWarnログにキー名・不正値・デフォルト値を構造化フィールドで含める", func(t *testing.T) {
+		// Arrange
+		h := installCaptureLogger(t)
+		t.Setenv(key, "yesnt")
+
+		// Act
+		getEnvBool(key, defaultVal)
+
+		// Assert
+		recs := h.warnRecords()
+		if len(recs) != 1 {
+			t.Fatalf("warn records = %d, want 1", len(recs))
+		}
+		r := recs[0]
+		assertAttr(t, r, "key", key)
+		assertAttr(t, r, "value", "yesnt")
+		assertAttr(t, r, "default", "false")
+	})
+
+	t.Run("正常値のとき値を採用しWarnを出力しない", func(t *testing.T) {
+		// Arrange
+		h := installCaptureLogger(t)
+		t.Setenv(key, "true")
+
+		// Act
+		got := getEnvBool(key, defaultVal)
+
+		// Assert
+		if got != true {
+			t.Errorf("got = %v, want %v", got, true)
+		}
+		if n := len(h.warnRecords()); n != 0 {
+			t.Errorf("warn records = %d, want 0", n)
+		}
+	})
+
+	t.Run("未設定（空文字）のときデフォルト値を採用しWarnを出力しない", func(t *testing.T) {
+		// Arrange
+		h := installCaptureLogger(t)
+		t.Setenv(key, "")
+
+		// Act
+		got := getEnvBool(key, defaultVal)
 
 		// Assert
 		if got != defaultVal {

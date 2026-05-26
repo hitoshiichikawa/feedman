@@ -43,6 +43,10 @@ type RouterDeps struct {
 	CORSAllowedOrigin string
 	RateLimiter       *middleware.RateLimiter
 
+	// HSTSEnabled は HSTS（Strict-Transport-Security）ヘッダーの出力可否。
+	// false（既定）の場合は HTTPS 配信でも HSTS を付与しない。
+	HSTSEnabled bool
+
 	// アクセスログ出力に使用する構造化ロガー。
 	// nil の場合は slog.Default() にフォールバックする（後方互換）。
 	Logger *slog.Logger
@@ -85,7 +89,7 @@ func NewRouter(deps *RouterDeps) http.Handler {
 	r.Use(middleware.NewRecoveryMiddleware())
 
 	// セキュリティヘッダーを適用（全ルートに効く）
-	r.Use(middleware.NewSecurityHeadersMiddleware())
+	r.Use(middleware.NewSecurityHeadersMiddleware(deps.HSTSEnabled))
 
 	// CORS ミドルウェアを適用（全ルートに効く）
 	r.Use(middleware.NewCORSMiddleware(deps.CORSAllowedOrigin))
