@@ -44,16 +44,17 @@ func NewTrustedCIDRMiddleware(cidrs []string) func(next http.Handler) http.Handl
 
 // isTrustedRemoteAddr は remoteAddr（host:port 形式）の IP が nets のいずれかに含まれるかを判定する。
 // パース不能な remoteAddr / IP、および nets が空の場合は false（拒否）を返す（安全側）。
+//
+// IP の抽出は clientIPFromRemoteAddr に委譲する（X-Forwarded-For を信頼しない方針を共有するため）。
 func isTrustedRemoteAddr(remoteAddr string, nets []*net.IPNet) bool {
 	if len(nets) == 0 {
 		return false
 	}
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		// port を含まない形式の可能性があるため、remoteAddr 全体を IP として試す。
-		host = remoteAddr
+	ipStr := clientIPFromRemoteAddr(remoteAddr)
+	if ipStr == "" {
+		return false
 	}
-	ip := net.ParseIP(host)
+	ip := net.ParseIP(ipStr)
 	if ip == nil {
 		return false
 	}
