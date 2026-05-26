@@ -58,7 +58,7 @@
   - _Depends: 2.1_
 
 - [ ] 6. worker プロセスへの metrics listener と全レイヤ wiring
-- [ ] 6.1 worker 用 metrics listener ヘルパを追加する
+- [x] 6.1 worker 用 metrics listener ヘルパを追加する
   - `internal/app/metrics_listener.go` に `startWorkerMetricsListener(ctx, addr, gatherer, cidrs)` を追加
   - worker registry を gatherer として `metrics.SetupMetricsRoute` を取得し、`NewTrustedCIDRMiddleware` でラップした `http.Server` を goroutine で起動
   - ctx キャンセルで `server.Shutdown` による graceful stop（goroutine リーク防止）、起動失敗はエラーログにとどめ worker 本体を落とさない
