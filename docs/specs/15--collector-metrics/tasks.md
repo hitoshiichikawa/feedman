@@ -7,7 +7,7 @@
   - 6 メソッドが panic せず副作用なく呼べる単体テストを追加
   - _Requirements: 5.1, NFR 1.2_
   - _Boundary: NopCollector_
-- [ ] 1.2 Config に信頼 CIDR とメトリクスポートを追加する (P)
+- [x] 1.2 Config に信頼 CIDR とメトリクスポートを追加する (P)
   - `internal/config/config.go` の `Config` に `TrustedCIDRs []string` / `MetricsPort string` を追加
   - `Load()` で `METRICS_TRUSTED_CIDRS`（カンマ区切り、未設定時は空スライス）と `METRICS_PORT`（既定 9090）を読み込む
   - 未設定時に `TrustedCIDRs` を空のまま保持し、検証はミドルウェアに委譲する（NFR 2.1 は後続タスクで担保）
