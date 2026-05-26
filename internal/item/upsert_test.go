@@ -1461,3 +1461,128 @@ func TestUpsertItems_BatchInternalDuplicate_ExistingLastWins(t *testing.T) {
 		t.Errorf("更新対象 id = %q, want %q", repo.lastUpdatedItem.ID, "dup-existing")
 	}
 }
+
+// --- Task 4.1: WithMetrics によるアップサート件数記録のテスト ---
+
+// mockMetricsCollector は metrics.MetricsCollector のテスト用モック。
+// RecordItemsUpserted の呼び出し回数と最後の件数を保持する。
+type mockMetricsCollector struct {
+	itemsUpsertedCalls int
+	lastItemsUpserted  int
+}
+
+func (m *mockMetricsCollector) RecordFetchSuccess(_ string)        {}
+func (m *mockMetricsCollector) RecordFetchFailure(_, _ string)     {}
+func (m *mockMetricsCollector) RecordParseFailure(_ string)        {}
+func (m *mockMetricsCollector) RecordHTTPStatus(_ int)             {}
+func (m *mockMetricsCollector) RecordFetchLatency(_ time.Duration) {}
+func (m *mockMetricsCollector) RecordItemsUpserted(count int) {
+	m.itemsUpsertedCalls++
+	m.lastItemsUpserted = count
+}
+
+// TestUpsertItems_Metrics_RecordsUpsertedCount は UPSERT 成功時に
+// 新規 + 更新の件数が RecordItemsUpserted に加算されることを検証する（Requirement 2.6）。
+func TestUpsertItems_Metrics_RecordsUpsertedCount(t *testing.T) {
+	// Arrange: 既存 1 件（更新対象）+ 新規 1 件 → inserted=1, updated=1
+	repo := newMockItemRepo()
+	sanitizer := &mockSanitizer{}
+	repo.addExistingItem(&model.Item{
+		ID:       "existing-1",
+		FeedID:   "feed-1",
+		GuidOrID: "guid-existing",
+		Title:    "古い",
+	})
+	mc := &mockMetricsCollector{}
+	svc := NewItemUpsertService(repo, sanitizer, WithMetrics(mc))
+
+	parsedItems := []model.ParsedItem{
+		{GuidOrID: "guid-existing", Title: "更新後", Link: "https://example.com/u"},
+		{GuidOrID: "guid-new", Title: "新規", Link: "https://example.com/n"},
+	}
+
+	// Act
+	inserted, updated, err := svc.UpsertItems(context.Background(), "feed-1", parsedItems)
+	if err != nil {
+		t.Fatalf("UpsertItems returned error: %v", err)
+	}
+
+	// Assert
+	if inserted != 1 || updated != 1 {
+		t.Fatalf("(inserted, updated) = (%d, %d), want (1, 1)", inserted, updated)
+	}
+	if mc.itemsUpsertedCalls != 1 {
+		t.Errorf("RecordItemsUpserted 呼び出し回数 = %d, want 1", mc.itemsUpsertedCalls)
+	}
+	if mc.lastItemsUpserted != inserted+updated {
+		t.Errorf("記録された件数 = %d, want %d（inserted+updated）", mc.lastItemsUpserted, inserted+updated)
+	}
+}
+
+// TestUpsertItems_Metrics_NotRecordedOnError は BulkUpsert がエラー（ロールバック）の場合に
+// RecordItemsUpserted を呼ばないことを検証する（Requirement 2.6）。
+func TestUpsertItems_Metrics_NotRecordedOnError(t *testing.T) {
+	// Arrange
+	repo := newMockItemRepo()
+	repo.upsertErr = errors.New("bulk upsert failed")
+	sanitizer := &mockSanitizer{}
+	mc := &mockMetricsCollector{}
+	svc := NewItemUpsertService(repo, sanitizer, WithMetrics(mc))
+
+	parsedItems := []model.ParsedItem{
+		{GuidOrID: "guid-1", Title: "記事", Link: "https://example.com/1"},
+	}
+
+	// Act
+	_, _, err := svc.UpsertItems(context.Background(), "feed-1", parsedItems)
+
+	// Assert
+	if err == nil {
+		t.Fatal("BulkUpsert エラー時はエラーを返すべき")
+	}
+	if mc.itemsUpsertedCalls != 0 {
+		t.Errorf("エラー時の RecordItemsUpserted 呼び出し回数 = %d, want 0", mc.itemsUpsertedCalls)
+	}
+}
+
+// TestUpsertItems_Metrics_EmptyInputNotRecorded は空入力（件数 0）のとき
+// 早期 return により RecordItemsUpserted を呼ばないことを検証する。
+func TestUpsertItems_Metrics_EmptyInputNotRecorded(t *testing.T) {
+	// Arrange
+	repo := newMockItemRepo()
+	sanitizer := &mockSanitizer{}
+	mc := &mockMetricsCollector{}
+	svc := NewItemUpsertService(repo, sanitizer, WithMetrics(mc))
+
+	// Act
+	inserted, updated, err := svc.UpsertItems(context.Background(), "feed-1", nil)
+	if err != nil {
+		t.Fatalf("UpsertItems returned error: %v", err)
+	}
+
+	// Assert
+	if inserted != 0 || updated != 0 {
+		t.Errorf("(inserted, updated) = (%d, %d), want (0, 0)", inserted, updated)
+	}
+	if mc.itemsUpsertedCalls != 0 {
+		t.Errorf("空入力時の RecordItemsUpserted 呼び出し回数 = %d, want 0", mc.itemsUpsertedCalls)
+	}
+}
+
+// TestNewItemUpsertService_DefaultMetricsIsNopAndNilSafe は WithMetrics を指定しない
+// 既存 2 引数 call site でも no-op コレクタが既定値となり nil panic しないことを検証する。
+func TestNewItemUpsertService_DefaultMetricsIsNopAndNilSafe(t *testing.T) {
+	// Arrange
+	repo := newMockItemRepo()
+	sanitizer := &mockSanitizer{}
+	svc := NewItemUpsertService(repo, sanitizer)
+
+	parsedItems := []model.ParsedItem{
+		{GuidOrID: "guid-1", Title: "記事", Link: "https://example.com/1"},
+	}
+
+	// Act + Assert: option 未指定でも記録呼び出しで panic せず正常完了する
+	if _, _, err := svc.UpsertItems(context.Background(), "feed-1", parsedItems); err != nil {
+		t.Fatalf("option 未指定の UpsertItems がエラーを返した: %v", err)
+	}
+}

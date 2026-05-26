@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hitoshi/feedman/internal/metrics"
 	"github.com/hitoshi/feedman/internal/model"
 	"github.com/hitoshi/feedman/internal/repository"
 	"github.com/hitoshi/feedman/internal/security"
@@ -19,17 +20,37 @@ import (
 type ItemUpsertService struct {
 	itemRepo  repository.ItemRepository
 	sanitizer security.ContentSanitizerService
+	metrics   metrics.MetricsCollector
+}
+
+// UpsertOption は NewItemUpsertService の任意設定を表す functional option。
+type UpsertOption func(*ItemUpsertService)
+
+// WithMetrics は ItemUpsertService にメトリクスコレクタを注入する。
+// 未指定時は metrics.NopCollector{} が既定値として使われ、記録呼び出しは no-op になる。
+func WithMetrics(c metrics.MetricsCollector) UpsertOption {
+	return func(s *ItemUpsertService) {
+		s.metrics = c
+	}
 }
 
 // NewItemUpsertService はItemUpsertServiceの新しいインスタンスを生成する。
+// 既存の 2 引数 call site との後方互換のため、メトリクスコレクタは末尾の可変長
+// functional option（WithMetrics）として受け取る。opts 未指定時は no-op コレクタを既定値とする。
 func NewItemUpsertService(
 	itemRepo repository.ItemRepository,
 	sanitizer security.ContentSanitizerService,
+	opts ...UpsertOption,
 ) *ItemUpsertService {
-	return &ItemUpsertService{
+	s := &ItemUpsertService{
 		itemRepo:  itemRepo,
 		sanitizer: sanitizer,
+		metrics:   metrics.NopCollector{},
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // preparedItem はサニタイズと content_hash 計算を終えた永続化前の中間表現。
@@ -104,6 +125,10 @@ func (s *ItemUpsertService) UpsertItems(
 
 	inserted = len(toCreate)
 	updated = len(toUpdate)
+
+	// BulkUpsert 成功後にアップサート件数（新規 + 更新）を記録する（Requirement 2.6）。
+	// エラー時は上の return で抜けるため記録されない（ロールバック相当）。
+	s.metrics.RecordItemsUpserted(inserted + updated)
 
 	slog.Info("記事UPSERT完了",
 		"feed_id", feedID,
