@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,6 +20,11 @@ const maxSubscriptionsPerUser = 100
 // defaultFetchIntervalMinutes は新規購読のデフォルトフェッチ間隔（分）。
 const defaultFetchIntervalMinutes = 60
 
+// backgroundFaviconTimeout はバックグラウンドでの favicon 取得処理に課す上限時間。
+// リクエストスコープから切り離した独立 context にこのタイムアウトを付与することで、
+// goroutine が無制限に滞留するのを防ぐ（要件 4: バックグラウンド処理の有界性）。
+const backgroundFaviconTimeout = 30 * time.Second
+
 // Detector はフィード検出のインターフェース。
 // テスタビリティのためFeedDetectorを抽象化する。
 type Detector interface {
@@ -27,11 +33,17 @@ type Detector interface {
 
 // FeedService はフィード登録・管理のサービス層。
 // 検出 → フィード保存 → 購読作成 → favicon取得のフローを統括する。
+// favicon 取得は購読作成完了後に独立した goroutine で非同期実行され、
+// 登録レスポンスの応答時間に影響しない（要件 1: タイムアウト安全性）。
 type FeedService struct {
 	feedRepo       repository.FeedRepository
 	subRepo        repository.SubscriptionRepository
 	detector       Detector
 	faviconFetcher FaviconFetcherService
+
+	// faviconWG はバックグラウンドの favicon 取得 goroutine の完了を追跡する。
+	// テストから非同期完了を待つために用いる（本番では Wait を呼ばないため挙動に影響しない）。
+	faviconWG sync.WaitGroup
 }
 
 // NewFeedService はFeedServiceの新しいインスタンスを生成する。
@@ -121,10 +133,55 @@ func (s *FeedService) RegisterFeed(ctx context.Context, userID string, inputURL 
 		return nil, nil, fmt.Errorf("購読の作成に失敗しました: %w", err)
 	}
 
-	// 5. favicon取得（非同期ではなく同期で実行。取得失敗時はnullとして保存）
-	s.fetchAndSaveFavicon(ctx, feed)
+	// 5. favicon取得（非同期）。
+	// リクエストスコープの ctx から切り離した独立 context で実行し、
+	// 取得完了を待たずに登録レスポンスを返す（要件 1）。
+	// ctx のキャンセル/タイムアウトに引きずられないこと（要件 3.3）、
+	// かつ上限時間を付与して goroutine リークを防ぐこと（要件 4）。
+	s.startFaviconFetch(ctx, feed.ID, faviconTargetURL(feed))
 
 	return feed, sub, nil
+}
+
+// startFaviconFetch はリクエストスコープから切り離した独立 context で
+// favicon 取得を非同期実行する goroutine を起動する。
+// 独立 context には backgroundFaviconTimeout の上限時間を付与し、
+// goroutine の完了を faviconWG で追跡する。
+func (s *FeedService) startFaviconFetch(ctx context.Context, feedID, siteURL string) {
+	if s.faviconFetcher == nil {
+		return
+	}
+
+	// リクエスト ctx の値（トレース情報等）は引き継ぎつつ、
+	// キャンセル/デッドラインの伝播を断ち切る独立 context を生成する。
+	bgCtx := context.WithoutCancel(ctx)
+
+	s.faviconWG.Add(1)
+	go func() {
+		defer s.faviconWG.Done()
+
+		// 上限時間を付与し、処理完了または打ち切り時に必ずリソースを解放する（要件 4.3）。
+		timeoutCtx, cancel := context.WithTimeout(bgCtx, backgroundFaviconTimeout)
+		defer cancel()
+
+		s.fetchAndSaveFavicon(timeoutCtx, feedID, siteURL)
+	}()
+}
+
+// waitFaviconFetch は進行中のバックグラウンド favicon 取得 goroutine の完了を待つ。
+// 本番フローでは呼ばれず、非同期完了を決定論的に検証したいテストからのみ利用する
+// （テスト容易性のための補助であり、本番挙動には影響しない）。
+func (s *FeedService) waitFaviconFetch() {
+	s.faviconWG.Wait()
+}
+
+// faviconTargetURL は favicon 取得の対象となるサイト URL を決定する。
+// SiteURL が空の場合は FeedURL をフォールバックとして用いる。
+func faviconTargetURL(feed *model.Feed) string {
+	if feed.SiteURL != "" {
+		return feed.SiteURL
+	}
+	return feed.FeedURL
 }
 
 // GetFeed はフィード情報を取得する。
@@ -182,38 +239,32 @@ func (s *FeedService) UpdateFeedURL(ctx context.Context, userID, feedID, newURL 
 }
 
 // fetchAndSaveFavicon はフィードのfaviconを取得して保存する。
-// 取得失敗時はログ出力のみで、エラーを返さない。
-func (s *FeedService) fetchAndSaveFavicon(ctx context.Context, feed *model.Feed) {
+// 取得失敗・未検出・タイムアウト時はログ出力のみで、エラーを返さず favicon を null のまま保持する。
+// 返却済みの feed ポインタへの並行書き込みを避けるため、引数は feedID / siteURL のみとし、
+// 取得結果はローカル変数経由で DB（UpdateFavicon）にのみ反映する。
+func (s *FeedService) fetchAndSaveFavicon(ctx context.Context, feedID, siteURL string) {
 	if s.faviconFetcher == nil {
 		return
 	}
 
-	// サイトURLからfaviconを取得
-	siteURL := feed.SiteURL
-	if siteURL == "" {
-		siteURL = feed.FeedURL
-	}
-
 	data, mimeType, err := s.faviconFetcher.FetchFaviconForSite(ctx, siteURL)
 	if err != nil {
-		slog.Warn("favicon取得エラー", "feedID", feed.ID, "siteURL", siteURL, "error", err)
+		slog.Warn("favicon取得エラー", "feedID", feedID, "siteURL", siteURL, "error", err)
 		return
 	}
 
 	if data == nil {
-		slog.Info("favicon未検出（nullとして保存）", "feedID", feed.ID, "siteURL", siteURL)
+		slog.Info("favicon未検出（nullとして保存）", "feedID", feedID, "siteURL", siteURL)
 		return
 	}
 
 	// faviconをDB保存
-	if err := s.feedRepo.UpdateFavicon(ctx, feed.ID, data, mimeType); err != nil {
-		slog.Warn("favicon保存エラー", "feedID", feed.ID, "error", err)
+	if err := s.feedRepo.UpdateFavicon(ctx, feedID, data, mimeType); err != nil {
+		slog.Warn("favicon保存エラー", "feedID", feedID, "error", err)
 		return
 	}
 
-	feed.FaviconData = data
-	feed.FaviconMime = mimeType
-	slog.Info("favicon保存完了", "feedID", feed.ID, "mimeType", mimeType, "size", len(data))
+	slog.Info("favicon保存完了", "feedID", feedID, "mimeType", mimeType, "size", len(data))
 }
 
 // extractSiteURL はフィードURLまたは入力URLからサイトURLを抽出する。
