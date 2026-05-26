@@ -116,6 +116,7 @@ func (a *ItemServiceAdapterFromDomain) ListItems(ctx context.Context, userID, fe
 			FeedID:          it.FeedID,
 			Title:           it.Title,
 			Link:            it.Link,
+			Summary:         it.Summary,
 			PublishedAt:     it.PublishedAt,
 			IsDateEstimated: it.IsDateEstimated,
 			IsRead:          it.IsRead,
