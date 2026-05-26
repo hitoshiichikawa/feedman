@@ -127,6 +127,142 @@ func TestItemHandler_ListItems_Success(t *testing.T) {
 	}
 }
 
+// TestItemHandler_ListItems_IncludesSummary は記事一覧レスポンスに概要(summary)が
+// 含まれること、および空概要でもフィールドが省略されず空文字列で返ることを検証する。
+// Req 1.1 / 1.3 / NFR 1.1 に対応。
+func TestItemHandler_ListItems_IncludesSummary(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+
+	cases := []struct {
+		name        string
+		summary     string
+		wantSummary string
+	}{
+		{name: "概要が存在するとき概要テキストを返す", summary: "記事の概要テキスト", wantSummary: "記事の概要テキスト"},
+		{name: "概要が空のとき空文字列を返す", summary: "", wantSummary: ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			svc := &mockItemService{
+				listItemsFn: func(ctx context.Context, userID, feedID string, filter model.ItemFilter, cursor string, limit int) (*itemListResult, error) {
+					return &itemListResult{
+						Items: []itemSummaryResponse{
+							{
+								ID:          "item-1",
+								FeedID:      "feed-1",
+								Title:       "テスト記事",
+								Link:        "https://example.com/1",
+								Summary:     tc.summary,
+								PublishedAt: now,
+							},
+						},
+					}, nil
+				},
+			}
+			h := NewItemHandler(svc, &mockItemStateService{})
+
+			req := httptest.NewRequest(http.MethodGet, "/api/feeds/feed-1/items", nil)
+			req = withUserID(req, "user-123")
+			req = withChiURLParam(req, "id", "feed-1")
+			w := httptest.NewRecorder()
+
+			// Act
+			h.ListItems(w, req)
+
+			// Assert
+			if w.Result().StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusOK)
+			}
+
+			var result struct {
+				Items []map[string]interface{} `json:"items"`
+			}
+			if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+				t.Fatalf("failed to decode response: %v", err)
+			}
+			if len(result.Items) != 1 {
+				t.Fatalf("items length = %d, want 1", len(result.Items))
+			}
+
+			// summaryフィールドが必ず存在すること（空でも省略しない）
+			summaryVal, ok := result.Items[0]["summary"]
+			if !ok {
+				t.Fatal("expected summary field in item response (must not be omitted)")
+			}
+			if summaryVal != tc.wantSummary {
+				t.Errorf("summary = %v, want %q", summaryVal, tc.wantSummary)
+			}
+		})
+	}
+}
+
+// TestItemHandler_ListItems_PreservesExistingFields は概要追加後も既存フィールドが
+// 変更されずに保持されることを検証する。Req 1.4 / NFR 1.1 に対応。
+func TestItemHandler_ListItems_PreservesExistingFields(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	svc := &mockItemService{
+		listItemsFn: func(ctx context.Context, userID, feedID string, filter model.ItemFilter, cursor string, limit int) (*itemListResult, error) {
+			return &itemListResult{
+				Items: []itemSummaryResponse{
+					{
+						ID:              "item-1",
+						FeedID:          "feed-1",
+						Title:           "テスト記事",
+						Link:            "https://example.com/1",
+						Summary:         "概要",
+						PublishedAt:     now,
+						IsDateEstimated: true,
+						IsRead:          true,
+						IsStarred:       true,
+						HatebuCount:     7,
+					},
+				},
+			}, nil
+		},
+	}
+	h := NewItemHandler(svc, &mockItemStateService{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/feeds/feed-1/items", nil)
+	req = withUserID(req, "user-123")
+	req = withChiURLParam(req, "id", "feed-1")
+	w := httptest.NewRecorder()
+
+	h.ListItems(w, req)
+
+	var result struct {
+		Items []map[string]interface{} `json:"items"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("items length = %d, want 1", len(result.Items))
+	}
+
+	item := result.Items[0]
+	// 既存フィールドが全て存在し変更されていないこと
+	wantFields := map[string]interface{}{
+		"id":                "item-1",
+		"feed_id":           "feed-1",
+		"title":             "テスト記事",
+		"link":              "https://example.com/1",
+		"is_date_estimated": true,
+		"is_read":           true,
+		"is_starred":        true,
+		"hatebu_count":      float64(7),
+	}
+	for k, want := range wantFields {
+		if got := item[k]; got != want {
+			t.Errorf("%s = %v, want %v", k, got, want)
+		}
+	}
+	if _, ok := item["published_at"]; !ok {
+		t.Error("expected published_at field in item response")
+	}
+}
+
 func TestItemHandler_ListItems_WithUnreadFilter(t *testing.T) {
 	receivedFilter := model.ItemFilterAll
 	svc := &mockItemService{

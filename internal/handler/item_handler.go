@@ -51,6 +51,7 @@ type itemSummaryResponse struct {
 	FeedID          string    `json:"feed_id"`
 	Title           string    `json:"title"`
 	Link            string    `json:"link"`
+	Summary         string    `json:"summary"` // サニタイズ済みの概要（空の場合は空文字列）
 	PublishedAt     time.Time `json:"published_at"`
 	IsDateEstimated bool      `json:"is_date_estimated"`
 	IsRead          bool      `json:"is_read"`
