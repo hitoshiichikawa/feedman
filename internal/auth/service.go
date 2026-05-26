@@ -120,9 +120,11 @@ func (s *Service) HandleCallback(ctx context.Context, code string) (*model.Sessi
 		}
 
 		userID = newUserID
+		// PII（メールアドレス平文）をログに残さないため、email はマスク値で出力する。
+		// 後方互換のため user_id / provider のキー名・出力有無は変更しない。
 		slog.Info("new user created",
 			slog.String("user_id", userID),
-			slog.String("email", userInfo.Email),
+			slog.String("email", maskEmail(userInfo.Email)),
 			slog.String("provider", userInfo.Provider),
 		)
 	}
