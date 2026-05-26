@@ -928,6 +928,79 @@ func TestSetupFeedRoutes_DeleteEndpoint(t *testing.T) {
 	}
 }
 
+// --- mapAPIErrorToHTTPStatus（エラーコード→HTTPステータスマッピング）のテスト ---
+
+// TestMapAPIErrorToHTTPStatus_KnownCodes は既知のエラーコードがそれぞれ対応する
+// HTTPステータスへマッピングされる正常系を検証する（要件 1.2）。
+func TestMapAPIErrorToHTTPStatus_KnownCodes(t *testing.T) {
+	tests := []struct {
+		name       string
+		code       string
+		wantStatus int
+	}{
+		{"FEED_NOT_DETECTED のとき 422", model.ErrCodeFeedNotDetected, http.StatusUnprocessableEntity},
+		{"INVALID_URL のとき 400", model.ErrCodeInvalidURL, http.StatusBadRequest},
+		{"SSRF_BLOCKED のとき 403", model.ErrCodeSSRFBlocked, http.StatusForbidden},
+		{"FETCH_FAILED のとき 502", model.ErrCodeFetchFailed, http.StatusBadGateway},
+		{"PARSE_FAILED のとき 422", model.ErrCodeParseFailed, http.StatusUnprocessableEntity},
+		{"SUBSCRIPTION_LIMIT のとき 409", model.ErrCodeSubscriptionLimit, http.StatusConflict},
+		{"DUPLICATE_SUBSCRIPTION のとき 409", "DUPLICATE_SUBSCRIPTION", http.StatusConflict},
+		{"FEED_NOT_FOUND のとき 404", "FEED_NOT_FOUND", http.StatusNotFound},
+		{"SUBSCRIPTION_NOT_FOUND のとき 404", model.ErrCodeSubscriptionNotFound, http.StatusNotFound},
+		{"ITEM_NOT_FOUND のとき 404", model.ErrCodeItemNotFound, http.StatusNotFound},
+		{"INVALID_FILTER のとき 400", model.ErrCodeInvalidFilter, http.StatusBadRequest},
+		{"INVALID_FETCH_INTERVAL のとき 400", model.ErrCodeInvalidFetchInterval, http.StatusBadRequest},
+		{"FEED_NOT_STOPPED のとき 409", model.ErrCodeFeedNotStopped, http.StatusConflict},
+		{"USER_NOT_FOUND のとき 404", model.ErrCodeUserNotFound, http.StatusNotFound},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Arrange
+			apiErr := &model.APIError{Code: tt.code}
+
+			// Act
+			got := mapAPIErrorToHTTPStatus(apiErr)
+
+			// Assert
+			if got != tt.wantStatus {
+				t.Errorf("mapAPIErrorToHTTPStatus(code=%q) = %d, want %d", tt.code, got, tt.wantStatus)
+			}
+		})
+	}
+}
+
+// TestMapAPIErrorToHTTPStatus_UnknownCode_ReturnsInternalServerError は未マップの
+// エラーコードが default 分岐で HTTP 500（Internal Server Error）にフォールバックする
+// ことを検証する（要件 1.1）。
+func TestMapAPIErrorToHTTPStatus_UnknownCode_ReturnsInternalServerError(t *testing.T) {
+	// Arrange: マッピング表に存在しない未知のエラーコード。
+	apiErr := &model.APIError{Code: "SOME_UNMAPPED_ERROR_CODE"}
+
+	// Act
+	got := mapAPIErrorToHTTPStatus(apiErr)
+
+	// Assert
+	if got != http.StatusInternalServerError {
+		t.Errorf("未知コードの default 分岐 = %d, want %d", got, http.StatusInternalServerError)
+	}
+}
+
+// TestMapAPIErrorToHTTPStatus_EmptyCode_ReturnsInternalServerError は空のエラーコード
+// （境界値）も default 分岐で 500 にフォールバックすることを検証する（要件 1.1）。
+func TestMapAPIErrorToHTTPStatus_EmptyCode_ReturnsInternalServerError(t *testing.T) {
+	// Arrange: 空文字コードはどの case にも一致しない。
+	apiErr := &model.APIError{Code: ""}
+
+	// Act
+	got := mapAPIErrorToHTTPStatus(apiErr)
+
+	// Assert
+	if got != http.StatusInternalServerError {
+		t.Errorf("空コードの default 分岐 = %d, want %d", got, http.StatusInternalServerError)
+	}
+}
+
 func TestSetupFeedRoutes_UnknownRoute_Returns404Or405(t *testing.T) {
 	router := SetupFeedRoutes(&mockFeedService{}, &mockSubscriptionDeleter{}, nil)
 

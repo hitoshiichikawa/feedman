@@ -693,6 +693,64 @@ func TestFeedDetector_Concurrent_NoDataRace(t *testing.T) {
 	// Assert: 競合が無いことは -race フラグが検出する。ここでは到達のみ確認。
 }
 
+// --- SSRF ガード有効/無効の HTTP クライアント生成経路のテスト（要件 2） ---
+
+// TestNewFeedDetector_SSRFGuardEnabled_UsesSafeClient はSSRFガードが有効化されたとき、
+// HTTPクライアント生成が SSRF 対策付きクライアント（guard.NewSafeClient）を選択する経路を
+// 検証する（要件 2.1）。実際の HTTP 取得まで通して経路が観測可能であることを確認する。
+func TestNewFeedDetector_SSRFGuardEnabled_UsesSafeClient(t *testing.T) {
+	// Arrange: フィードを返すテスト用サーバとSSRFガード（有効）を用意する。
+	rssXML := `<?xml version="1.0"?><rss version="2.0"><channel><title>Test</title></channel></rss>`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		fmt.Fprint(w, rssXML)
+	}))
+	defer server.Close()
+
+	guard := &mockSSRFGuard{}
+
+	// Act: ガード有効でDetectorを生成する（生成時に NewSafeClient 経路を通る）。
+	d := NewFeedDetector(guard)
+	_, err := d.DetectFeedURL(context.Background(), server.URL+"/feed.xml")
+
+	// Assert: SSRF 対策付きクライアント生成（NewSafeClient）が選択され、検出も成功している。
+	if err != nil {
+		t.Fatalf("DetectFeedURL returned error: %v", err)
+	}
+	if got := guard.newSafeClientCalls(); got != 1 {
+		t.Errorf("SSRFガード有効時は NewSafeClient が1回呼ばれるべき。結果: %d 回", got)
+	}
+}
+
+// TestNewFeedDetector_SSRFGuardDisabled_UsesPlainClient はSSRFガードが無効（nil）であるとき、
+// HTTPクライアント生成が SSRF 対策なしの素のクライアント（NewSafeClient 非経由・既定タイムアウト）を
+// 選択する経路を検証する（要件 2.2）。
+func TestNewFeedDetector_SSRFGuardDisabled_UsesPlainClient(t *testing.T) {
+	// Arrange: フィードを返すテスト用サーバを用意する（ガードは nil）。
+	rssXML := `<?xml version="1.0"?><rss version="2.0"><channel><title>Test</title></channel></rss>`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		fmt.Fprint(w, rssXML)
+	}))
+	defer server.Close()
+
+	// Act: ガード無効（nil）でDetectorを生成する（素のクライアント経路を通る）。
+	d := NewFeedDetector(nil)
+	client := d.getHTTPClient()
+	_, err := d.DetectFeedURL(context.Background(), server.URL+"/feed.xml")
+
+	// Assert: 素のクライアント（既定タイムアウト）が選択され、検出も成功している。
+	if err != nil {
+		t.Fatalf("DetectFeedURL returned error: %v", err)
+	}
+	if client == nil {
+		t.Fatal("SSRFガード無効時もHTTPクライアントは生成されるべき")
+	}
+	if client.Timeout != detectorTimeout {
+		t.Errorf("素のクライアントは detectorTimeout(%v) を持つべき。結果: %v", detectorTimeout, client.Timeout)
+	}
+}
+
 // --- mockSSRFGuard ---
 
 // mockSSRFGuard はテスト用のSSRFGuardモック。
