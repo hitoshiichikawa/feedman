@@ -37,7 +37,7 @@
   - _Boundary: Fetcher_
 
 - [ ] 4. UPSERT サービス層へのメトリクス記録の組み込み
-- [ ] 4.1 ItemUpsertService に WithMetrics option とアップサート件数記録を追加する
+- [x] 4.1 ItemUpsertService に WithMetrics option とアップサート件数記録を追加する
   - `internal/item/upsert.go` の `ItemUpsertService` に `metrics metrics.MetricsCollector` フィールドを追加
   - `UpsertOption` 型と `WithMetrics(c)` を定義し、`NewItemUpsertService(...)` の末尾に `opts ...UpsertOption` を追加（既存 2 引数 call site は不変）
   - option 未指定時は `NopCollector{}` を既定値にする
