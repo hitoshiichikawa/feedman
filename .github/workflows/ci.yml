@@ -17,6 +17,12 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Build backend entrypoint
+        # cmd/feedman のエントリポイントが欠落しバックエンドがビルドできない状態を
+        # CI で機械的に検出する（再発防止 / Req 5.1, 5.3）。Dockerfile が前提とする
+        # 静的バイナリ構成（CGO_ENABLED=0）と同条件でビルドできることを確認する。
+        run: CGO_ENABLED=0 go build -o /tmp/feedman ./cmd/feedman
+
       - name: Run tests
         run: go test ./...
 
