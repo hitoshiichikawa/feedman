@@ -31,13 +31,29 @@ type FaviconFetcherService interface {
 // FaviconFetcher はfavicon取得機能の実装。
 type FaviconFetcher struct {
 	ssrfGuard SSRFValidator
+	// httpClient はリクエスト間で再利用するHTTPクライアント。
+	// コンストラクタで一度だけ生成し、生成後は read-only なフィールド参照となるため、
+	// 複数 goroutine からの同時アクセスでもデータ競合は発生しない（NFR 2.1）。
+	httpClient *http.Client
 }
 
 // NewFaviconFetcher はFaviconFetcherの新しいインスタンスを生成する。
+// HTTPクライアントはここで一度だけ生成し、以降のリクエストで使い回す
+// （コネクションプールを共有して無駄な TCP/TLS ハンドシェイクを抑制する）。
 func NewFaviconFetcher(ssrfGuard SSRFValidator) *FaviconFetcher {
 	return &FaviconFetcher{
-		ssrfGuard: ssrfGuard,
+		ssrfGuard:  ssrfGuard,
+		httpClient: newFaviconHTTPClient(ssrfGuard),
 	}
+}
+
+// newFaviconHTTPClient はfavicon取得用のHTTPクライアントを生成する。
+// SSRFGuardが設定されている場合はSSRF防止付きクライアントを返す。
+func newFaviconHTTPClient(ssrfGuard SSRFValidator) *http.Client {
+	if ssrfGuard != nil {
+		return ssrfGuard.NewSafeClient(faviconTimeout, maxFaviconSize)
+	}
+	return &http.Client{Timeout: faviconTimeout}
 }
 
 // FetchFavicon は指定URLからfaviconを取得する。
@@ -114,12 +130,10 @@ func (f *FaviconFetcher) FetchFaviconForSite(ctx context.Context, siteURL string
 	return f.FetchFavicon(ctx, faviconURL)
 }
 
-// getHTTPClient はHTTPクライアントを取得する。
+// getHTTPClient はコンストラクタで生成済みの再利用HTTPクライアントを返す。
+// リクエストごとに新しいクライアントを生成せず、コネクションプールを共有する。
 func (f *FaviconFetcher) getHTTPClient() *http.Client {
-	if f.ssrfGuard != nil {
-		return f.ssrfGuard.NewSafeClient(faviconTimeout, maxFaviconSize)
-	}
-	return &http.Client{Timeout: faviconTimeout}
+	return f.httpClient
 }
 
 // guessDefaultFaviconURL はサイトURLからデフォルトのfavicon URLを推測する。

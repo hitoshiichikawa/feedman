@@ -40,16 +40,38 @@ type SSRFValidator interface {
 	NewSafeClient(timeout time.Duration, maxResponseSize int64) *http.Client
 }
 
+// detectorTimeout はフィード検出のHTTPタイムアウト。
+const detectorTimeout = 10 * time.Second
+
+// detectorMaxResponseSize はフィード検出時に読み込むレスポンスの最大サイズ（5MB）。
+const detectorMaxResponseSize = 5 * 1024 * 1024
+
 // FeedDetector はフィード自動検出機能を提供する。
 type FeedDetector struct {
 	ssrfGuard SSRFValidator
+	// httpClient はリクエスト間で再利用するHTTPクライアント。
+	// コンストラクタで一度だけ生成し、生成後は read-only なフィールド参照となるため、
+	// 複数 goroutine からの同時アクセスでもデータ競合は発生しない（NFR 2.1）。
+	httpClient *http.Client
 }
 
 // NewFeedDetector はFeedDetectorの新しいインスタンスを生成する。
+// HTTPクライアントはここで一度だけ生成し、以降のリクエストで使い回す
+// （コネクションプールを共有して無駄な TCP/TLS ハンドシェイクを抑制する）。
 func NewFeedDetector(ssrfGuard SSRFValidator) *FeedDetector {
 	return &FeedDetector{
-		ssrfGuard: ssrfGuard,
+		ssrfGuard:  ssrfGuard,
+		httpClient: newDetectorHTTPClient(ssrfGuard),
 	}
+}
+
+// newDetectorHTTPClient はフィード検出用のHTTPクライアントを生成する。
+// SSRFGuardが設定されている場合はSSRF防止付きクライアントを返す。
+func newDetectorHTTPClient(ssrfGuard SSRFValidator) *http.Client {
+	if ssrfGuard != nil {
+		return ssrfGuard.NewSafeClient(detectorTimeout, detectorMaxResponseSize)
+	}
+	return &http.Client{Timeout: detectorTimeout}
 }
 
 // feedContentTypes はフィードとして認識するContent-Typeのリスト。
@@ -308,8 +330,7 @@ func (d *FeedDetector) DetectFeedURL(ctx context.Context, inputURL string) (stri
 	defer resp.Body.Close()
 
 	// レスポンスボディを読み込み（最大5MB）
-	const maxBodySize = 5 * 1024 * 1024
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, detectorMaxResponseSize))
 	if err != nil {
 		return "", model.NewFetchFailedError(fmt.Sprintf("レスポンスの読み取りに失敗: %v", err))
 	}
@@ -343,11 +364,8 @@ func (d *FeedDetector) DetectFeedURL(ctx context.Context, inputURL string) (stri
 	return best.URL, nil
 }
 
-// getHTTPClient はHTTPクライアントを取得する。
-// SSRFGuardが設定されている場合はSSRF防止付きクライアントを返す。
+// getHTTPClient はコンストラクタで生成済みの再利用HTTPクライアントを返す。
+// リクエストごとに新しいクライアントを生成せず、コネクションプールを共有する。
 func (d *FeedDetector) getHTTPClient() *http.Client {
-	if d.ssrfGuard != nil {
-		return d.ssrfGuard.NewSafeClient(10*time.Second, 5*1024*1024)
-	}
-	return &http.Client{Timeout: 10 * time.Second}
+	return d.httpClient
 }
