@@ -30,6 +30,15 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
+# Next.js standalone server（server.js）は process.env.HOSTNAME へ bind する。
+# Docker は既定でコンテナ ID を HOSTNAME に設定するため、image 側で 0.0.0.0 に
+# 上書きして全 interface へ bind させる（外部 environment 無しでも公開ポート経由で
+# 到達可能にする image 自己完結性）。compose / docker run -e の HOSTNAME 指定が
+# あれば Docker の env 優先順位でこの ENV を上書きできる。
+ENV HOSTNAME=0.0.0.0
+# 待ち受けポートを明示する（EXPOSE 3000 と整合）。environment で上書き可能。
+ENV PORT=3000
+
 # Next.js のスタンドアロン出力を利用（node ユーザーで所有）
 COPY --from=builder --chown=node:node /app/.next/standalone ./
 COPY --from=builder --chown=node:node /app/.next/static ./.next/static
