@@ -1,7 +1,7 @@
 "use client";
 
 import { useInfiniteQuery } from "@tanstack/react-query";
-import { createApiClient } from "@/lib/api";
+import { apiClient } from "@/lib/api";
 import type { ItemFilter, ItemListResponse } from "@/types/item";
 
 /**
@@ -14,8 +14,6 @@ import type { ItemFilter, ItemListResponse } from "@/types/item";
  * @param filter - フィルタ種別（all / unread / starred）
  */
 export function useItems(feedId: string | null, filter: ItemFilter) {
-  const api = createApiClient();
-
   return useInfiniteQuery<ItemListResponse>({
     queryKey: ["items", feedId, filter],
     queryFn: async ({ pageParam }) => {
@@ -25,7 +23,7 @@ export function useItems(feedId: string | null, filter: ItemFilter) {
       if (pageParam) {
         params.set("cursor", pageParam as string);
       }
-      return api.get<ItemListResponse>(
+      return apiClient.get<ItemListResponse>(
         `/api/feeds/${feedId}/items?${params.toString()}`
       );
     },

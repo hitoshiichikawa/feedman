@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { createApiClient } from "@/lib/api";
+import { apiClient } from "@/lib/api";
 import type { ItemListResponse } from "@/types/item";
 import type { InfiniteData } from "@tanstack/react-query";
 
@@ -12,12 +12,11 @@ import type { InfiniteData } from "@tanstack/react-query";
  * 成功時にitemsクエリキャッシュを無効化する。
  */
 export function useMarkAsRead() {
-  const api = createApiClient();
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: (itemId: string) =>
-      api.put(`/api/items/${itemId}/state`, { is_read: true }),
+      apiClient.put(`/api/items/${itemId}/state`, { is_read: true }),
     onSuccess: () => {
       // itemsとfeedsの未読数キャッシュを無効化
       queryClient.invalidateQueries({ queryKey: ["items"] });
@@ -39,12 +38,11 @@ interface ToggleStarParams {
  * 楽観的更新でUIを即時反映し、エラー時にロールバックする。
  */
 export function useToggleStar() {
-  const api = createApiClient();
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: ({ itemId, isStarred }: ToggleStarParams) =>
-      api.put(`/api/items/${itemId}/state`, { is_starred: isStarred }),
+      apiClient.put(`/api/items/${itemId}/state`, { is_starred: isStarred }),
     onMutate: async ({ itemId, isStarred }) => {
       // 進行中のrefetchをキャンセル
       await queryClient.cancelQueries({ queryKey: ["items"] });
