@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. NopCollector と設定値（信頼 CIDR / メトリクスポート）の追加
-- [ ] 1.1 NopCollector を追加する (P)
+- [x] 1.1 NopCollector を追加する (P)
   - `internal/metrics/nop.go` に `MetricsCollector` の no-op 実装 `NopCollector` を追加
   - 6 メソッドすべてを空実装。既存 `metrics.go` は変更しない（追加のみ）
   - 6 メソッドが panic せず副作用なく呼べる単体テストを追加
