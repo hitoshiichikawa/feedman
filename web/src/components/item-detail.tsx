@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import { ExternalLink, Star, Bookmark } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { sanitizeContentHtml } from "@/lib/sanitize";
 import type { ItemDetail as ItemDetailType } from "@/types/item";
 
 /** ItemDetail コンポーネントのプロパティ */
@@ -40,6 +41,13 @@ export function ItemDetail({
   /** はてブ数の表示テキスト */
   const hatebuDisplay =
     item.hatebu_fetched_at === null ? "-" : String(item.hatebu_count);
+
+  // 記事本文を DOM 挿入前にクライアント側でサニタイズする（多層防御）。
+  // 同一記事本文に対する再計算を避けるため item.content をキーにメモ化する。
+  const sanitizedContent = useMemo(
+    () => sanitizeContentHtml(item.content),
+    [item.content]
+  );
 
   return (
     <div className="border-t bg-background px-4 py-4 space-y-4">
@@ -103,7 +111,7 @@ export function ItemDetail({
       <div
         data-testid="item-content"
         className="prose prose-sm dark:prose-invert max-w-none"
-        dangerouslySetInnerHTML={{ __html: item.content }}
+        dangerouslySetInnerHTML={{ __html: sanitizedContent }}
       />
     </div>
   );
