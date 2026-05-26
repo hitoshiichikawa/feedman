@@ -60,7 +60,7 @@ type subscriptionSettingsRequest struct {
 func (h *SubscriptionHandler) ListSubscriptions(w http.ResponseWriter, r *http.Request) {
 	userID, err := middleware.UserIDFromContext(r.Context())
 	if err != nil {
-		writeAPIErrorResponse(w, http.StatusUnauthorized, &model.APIError{
+		middleware.WriteErrorResponse(w, http.StatusUnauthorized, &model.APIError{
 			Code:     "UNAUTHORIZED",
 			Message:  "認証が必要です。",
 			Category: "auth",
@@ -84,7 +84,7 @@ func (h *SubscriptionHandler) ListSubscriptions(w http.ResponseWriter, r *http.R
 func (h *SubscriptionHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	userID, err := middleware.UserIDFromContext(r.Context())
 	if err != nil {
-		writeAPIErrorResponse(w, http.StatusUnauthorized, &model.APIError{
+		middleware.WriteErrorResponse(w, http.StatusUnauthorized, &model.APIError{
 			Code:     "UNAUTHORIZED",
 			Message:  "認証が必要です。",
 			Category: "auth",
@@ -97,7 +97,7 @@ func (h *SubscriptionHandler) UpdateSettings(w http.ResponseWriter, r *http.Requ
 
 	var req subscriptionSettingsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeAPIErrorResponse(w, http.StatusBadRequest, &model.APIError{
+		middleware.WriteErrorResponse(w, http.StatusBadRequest, &model.APIError{
 			Code:     "INVALID_REQUEST",
 			Message:  "リクエストボディの解析に失敗しました。",
 			Category: "validation",
@@ -123,7 +123,7 @@ func (h *SubscriptionHandler) UpdateSettings(w http.ResponseWriter, r *http.Requ
 func (h *SubscriptionHandler) Unsubscribe(w http.ResponseWriter, r *http.Request) {
 	userID, err := middleware.UserIDFromContext(r.Context())
 	if err != nil {
-		writeAPIErrorResponse(w, http.StatusUnauthorized, &model.APIError{
+		middleware.WriteErrorResponse(w, http.StatusUnauthorized, &model.APIError{
 			Code:     "UNAUTHORIZED",
 			Message:  "認証が必要です。",
 			Category: "auth",
@@ -147,7 +147,7 @@ func (h *SubscriptionHandler) Unsubscribe(w http.ResponseWriter, r *http.Request
 func (h *SubscriptionHandler) ResumeFetch(w http.ResponseWriter, r *http.Request) {
 	userID, err := middleware.UserIDFromContext(r.Context())
 	if err != nil {
-		writeAPIErrorResponse(w, http.StatusUnauthorized, &model.APIError{
+		middleware.WriteErrorResponse(w, http.StatusUnauthorized, &model.APIError{
 			Code:     "UNAUTHORIZED",
 			Message:  "認証が必要です。",
 			Category: "auth",

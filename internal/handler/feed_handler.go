@@ -63,20 +63,12 @@ type feedResponse struct {
 	FetchStatus string `json:"fetch_status"`
 }
 
-// apiErrorResponse は統一エラーフォーマットのレスポンス。
-type apiErrorResponse struct {
-	Code     string `json:"code"`
-	Message  string `json:"message"`
-	Category string `json:"category"`
-	Action   string `json:"action"`
-}
-
 // RegisterFeed はフィード登録を処理する。
 // POST /api/feeds
 func (h *FeedHandler) RegisterFeed(w http.ResponseWriter, r *http.Request) {
 	userID, err := middleware.UserIDFromContext(r.Context())
 	if err != nil {
-		writeAPIErrorResponse(w, http.StatusUnauthorized, &model.APIError{
+		middleware.WriteErrorResponse(w, http.StatusUnauthorized, &model.APIError{
 			Code:     "UNAUTHORIZED",
 			Message:  "認証が必要です。",
 			Category: "auth",
@@ -87,7 +79,7 @@ func (h *FeedHandler) RegisterFeed(w http.ResponseWriter, r *http.Request) {
 
 	var req registerFeedRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeAPIErrorResponse(w, http.StatusBadRequest, &model.APIError{
+		middleware.WriteErrorResponse(w, http.StatusBadRequest, &model.APIError{
 			Code:     "INVALID_REQUEST",
 			Message:  "リクエストボディの解析に失敗しました。",
 			Category: "validation",
@@ -97,7 +89,7 @@ func (h *FeedHandler) RegisterFeed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.URL == "" {
-		writeAPIErrorResponse(w, http.StatusBadRequest, model.NewInvalidURLError("URLが空です"))
+		middleware.WriteErrorResponse(w, http.StatusBadRequest, model.NewInvalidURLError("URLが空です"))
 		return
 	}
 
@@ -117,7 +109,7 @@ func (h *FeedHandler) RegisterFeed(w http.ResponseWriter, r *http.Request) {
 func (h *FeedHandler) GetFeed(w http.ResponseWriter, r *http.Request) {
 	userID, err := middleware.UserIDFromContext(r.Context())
 	if err != nil {
-		writeAPIErrorResponse(w, http.StatusUnauthorized, &model.APIError{
+		middleware.WriteErrorResponse(w, http.StatusUnauthorized, &model.APIError{
 			Code:     "UNAUTHORIZED",
 			Message:  "認証が必要です。",
 			Category: "auth",
@@ -135,7 +127,7 @@ func (h *FeedHandler) GetFeed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if feed == nil {
-		writeAPIErrorResponse(w, http.StatusNotFound, &model.APIError{
+		middleware.WriteErrorResponse(w, http.StatusNotFound, &model.APIError{
 			Code:     "FEED_NOT_FOUND",
 			Message:  "指定されたフィードが見つかりません。",
 			Category: "feed",
@@ -153,7 +145,7 @@ func (h *FeedHandler) GetFeed(w http.ResponseWriter, r *http.Request) {
 func (h *FeedHandler) UpdateFeedURL(w http.ResponseWriter, r *http.Request) {
 	userID, err := middleware.UserIDFromContext(r.Context())
 	if err != nil {
-		writeAPIErrorResponse(w, http.StatusUnauthorized, &model.APIError{
+		middleware.WriteErrorResponse(w, http.StatusUnauthorized, &model.APIError{
 			Code:     "UNAUTHORIZED",
 			Message:  "認証が必要です。",
 			Category: "auth",
@@ -166,7 +158,7 @@ func (h *FeedHandler) UpdateFeedURL(w http.ResponseWriter, r *http.Request) {
 
 	var req updateFeedURLRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeAPIErrorResponse(w, http.StatusBadRequest, &model.APIError{
+		middleware.WriteErrorResponse(w, http.StatusBadRequest, &model.APIError{
 			Code:     "INVALID_REQUEST",
 			Message:  "リクエストボディの解析に失敗しました。",
 			Category: "validation",
@@ -176,7 +168,7 @@ func (h *FeedHandler) UpdateFeedURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.FeedURL == "" {
-		writeAPIErrorResponse(w, http.StatusBadRequest, model.NewInvalidURLError("フィードURLが空です"))
+		middleware.WriteErrorResponse(w, http.StatusBadRequest, model.NewInvalidURLError("フィードURLが空です"))
 		return
 	}
 
@@ -195,7 +187,7 @@ func (h *FeedHandler) UpdateFeedURL(w http.ResponseWriter, r *http.Request) {
 func (h *FeedHandler) DeleteFeed(w http.ResponseWriter, r *http.Request) {
 	userID, err := middleware.UserIDFromContext(r.Context())
 	if err != nil {
-		writeAPIErrorResponse(w, http.StatusUnauthorized, &model.APIError{
+		middleware.WriteErrorResponse(w, http.StatusUnauthorized, &model.APIError{
 			Code:     "UNAUTHORIZED",
 			Message:  "認証が必要です。",
 			Category: "auth",
@@ -252,30 +244,18 @@ func toFeedResponse(feed *model.Feed) feedResponse {
 	}
 }
 
-// writeAPIErrorResponse は統一エラーフォーマットでエラーレスポンスを書き込む。
-func writeAPIErrorResponse(w http.ResponseWriter, statusCode int, apiErr *model.APIError) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(apiErrorResponse{
-		Code:     apiErr.Code,
-		Message:  apiErr.Message,
-		Category: apiErr.Category,
-		Action:   apiErr.Action,
-	})
-}
-
 // handleServiceError はサービス層から返されたエラーを適切なHTTPステータスコードに変換する。
 func handleServiceError(w http.ResponseWriter, err error) {
 	var apiErr *model.APIError
 	if errors.As(err, &apiErr) {
 		statusCode := mapAPIErrorToHTTPStatus(apiErr)
-		writeAPIErrorResponse(w, statusCode, apiErr)
+		middleware.WriteErrorResponse(w, statusCode, apiErr)
 		return
 	}
 
 	// APIError以外のエラーは内部サーバーエラーとして扱う
 	slog.Error("internal server error", slog.String("error", err.Error()))
-	writeAPIErrorResponse(w, http.StatusInternalServerError, &model.APIError{
+	middleware.WriteErrorResponse(w, http.StatusInternalServerError, &model.APIError{
 		Code:     "INTERNAL_ERROR",
 		Message:  "内部エラーが発生しました。",
 		Category: "system",
