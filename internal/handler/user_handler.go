@@ -34,7 +34,7 @@ func NewUserHandler(service UserServiceInterface) *UserHandler {
 func (h *UserHandler) Withdraw(w http.ResponseWriter, r *http.Request) {
 	userID, err := middleware.UserIDFromContext(r.Context())
 	if err != nil {
-		writeAPIErrorResponse(w, http.StatusUnauthorized, &model.APIError{
+		middleware.WriteErrorResponse(w, http.StatusUnauthorized, &model.APIError{
 			Code:     "UNAUTHORIZED",
 			Message:  "認証が必要です。",
 			Category: "auth",
