@@ -359,6 +359,121 @@ func TestService_ResumeFetch_NotStopped_ReturnsError(t *testing.T) {
 	}
 }
 
+// TestService_Unsubscribe_NilItemStateRepo_SkipsItemStateDelete は
+// 記事状態リポジトリが未設定（nil）のとき、記事状態削除をスキップしたうえで
+// 購読削除が正常に完了することを検証する（要件 3.1）。
+func TestService_Unsubscribe_NilItemStateRepo_SkipsItemStateDelete(t *testing.T) {
+	// Arrange: itemStateRepo を nil で生成する。
+	deleteCalled := false
+	subRepo := &mockSubRepo{
+		findByIDFn: func(ctx context.Context, id string) (*model.Subscription, error) {
+			return &model.Subscription{ID: "sub-1", UserID: "user-1", FeedID: "feed-1"}, nil
+		},
+		deleteFn: func(ctx context.Context, id string) error {
+			deleteCalled = true
+			return nil
+		},
+	}
+
+	svc := NewService(subRepo, nil, nil)
+
+	// Act
+	err := svc.Unsubscribe(context.Background(), "user-1", "sub-1")
+
+	// Assert: nil 分岐でも購読削除が呼ばれ、エラーなく完了する。
+	if err != nil {
+		t.Fatalf("Unsubscribe returned error: %v", err)
+	}
+	if !deleteCalled {
+		t.Error("expected subscription Delete to be called even when itemStateRepo is nil")
+	}
+}
+
+// TestService_Unsubscribe_ItemStateDeleteError_PropagatesError は
+// 記事状態リポジトリの削除（DeleteByUserAndFeed）がエラーを返したとき、
+// 購読解除がそのエラーを呼び出し元へ伝播し、購読削除を行わないことを検証する（要件 3.2）。
+func TestService_Unsubscribe_ItemStateDeleteError_PropagatesError(t *testing.T) {
+	// Arrange: DeleteByUserAndFeed がエラーを返す。
+	sentinelErr := errors.New("delete item states failed")
+	deleteCalled := false
+	subRepo := &mockSubRepo{
+		findByIDFn: func(ctx context.Context, id string) (*model.Subscription, error) {
+			return &model.Subscription{ID: "sub-1", UserID: "user-1", FeedID: "feed-1"}, nil
+		},
+		deleteFn: func(ctx context.Context, id string) error {
+			deleteCalled = true
+			return nil
+		},
+	}
+	itemStateRepo := &mockItemStateRepo{
+		deleteByUserAndFeedFn: func(ctx context.Context, userID, feedID string) error {
+			return sentinelErr
+		},
+	}
+
+	svc := NewService(subRepo, itemStateRepo, nil)
+
+	// Act
+	err := svc.Unsubscribe(context.Background(), "user-1", "sub-1")
+
+	// Assert: エラーが wrap されて伝播し、購読削除は実行されない。
+	if err == nil {
+		t.Fatal("expected error from item state delete, got nil")
+	}
+	if !errors.Is(err, sentinelErr) {
+		t.Errorf("expected wrapped error to match sentinel, got %v", err)
+	}
+	if deleteCalled {
+		t.Error("subscription Delete should not be called when item state delete fails")
+	}
+}
+
+// TestService_ResumeFetch_NotStopped_ReturnsFeedNotStoppedAndDoesNotUpdate は
+// 停止中ではない（active）フィードに対してフェッチ再開が呼ばれたとき、
+// 状態前提違反として FEED_NOT_STOPPED 専用エラーを返し、フィード状態を更新しないことを
+// 検証する（要件 4.1）。
+func TestService_ResumeFetch_NotStopped_ReturnsFeedNotStoppedAndDoesNotUpdate(t *testing.T) {
+	// Arrange: フィードは active 状態（停止中ではない）。
+	updateCalled := false
+	subRepo := &mockSubRepo{
+		findByIDFn: func(ctx context.Context, id string) (*model.Subscription, error) {
+			return &model.Subscription{ID: "sub-1", UserID: "user-1", FeedID: "feed-1"}, nil
+		},
+	}
+	feedRepo := &mockFeedRepo{
+		findByIDFn: func(ctx context.Context, id string) (*model.Feed, error) {
+			return &model.Feed{ID: "feed-1", FetchStatus: model.FetchStatusActive}, nil
+		},
+		updateFetchStateFn: func(ctx context.Context, feed *model.Feed) error {
+			updateCalled = true
+			return nil
+		},
+	}
+
+	svc := NewService(subRepo, nil, feedRepo)
+
+	// Act
+	result, err := svc.ResumeFetch(context.Background(), "user-1", "sub-1")
+
+	// Assert: 専用エラー（FEED_NOT_STOPPED）が返り、状態更新は呼ばれない。
+	if err == nil {
+		t.Fatal("expected error for non-stopped feed, got nil")
+	}
+	apiErr, ok := err.(*model.APIError)
+	if !ok {
+		t.Fatalf("error type = %T, want *model.APIError", err)
+	}
+	if apiErr.Code != model.ErrCodeFeedNotStopped {
+		t.Errorf("error code = %q, want %q", apiErr.Code, model.ErrCodeFeedNotStopped)
+	}
+	if updateCalled {
+		t.Error("UpdateFetchState should not be called when feed is not stopped")
+	}
+	if result != nil {
+		t.Errorf("expected nil result, got %+v", result)
+	}
+}
+
 // TestService_UpdateSettings_Success は有効間隔・所有者一致・全依存成功時に
 // 更新後の購読情報を返し UpdateFetchInterval が呼ばれることを検証する（要件 1.1）。
 func TestService_UpdateSettings_Success(t *testing.T) {
