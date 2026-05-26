@@ -4,6 +4,7 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -145,8 +146,17 @@ func (s *Service) Logout(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("failed to delete session: %w", err)
 	}
 
-	slog.Info("user logged out", slog.String("session_id", sessionID))
+	slog.Info("user logged out", slog.String("session_id_hash", hashSessionIDForLog(sessionID)))
 	return nil
+}
+
+// hashSessionIDForLog はセッションIDをログ出力用の復元不能な短縮値に変換する。
+// SHA-256 ハッシュの hex 表現の先頭 8 文字を返す純粋関数であり、副作用を持たず
+// error も返さない。空文字を含む任意の入力に対してパニックせず安全に値を返す。
+// 生のセッションIDをログに残さずセッション単位の追跡可能性を維持するために用いる。
+func hashSessionIDForLog(sessionID string) string {
+	sum := sha256.Sum256([]byte(sessionID))
+	return hex.EncodeToString(sum[:])[:8]
 }
 
 // GetCurrentUser はセッションから現在のユーザーを取得する。

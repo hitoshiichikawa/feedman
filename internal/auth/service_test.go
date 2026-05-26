@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -431,6 +432,67 @@ func TestLogout_EmptySessionID_ReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty session ID")
 	}
+}
+
+func TestHashSessionIDForLog_SameInput_ReturnsSameValue(t *testing.T) {
+	// Req 2.1: 同一のセッション ID から短縮値を生成すると常に同一の短縮値を返す
+	// Arrange
+	sessionID := "session-consistent-123"
+
+	// Act
+	first := hashSessionIDForLog(sessionID)
+	second := hashSessionIDForLog(sessionID)
+
+	// Assert
+	if first != second {
+		t.Errorf("same input must yield same value, got %q and %q", first, second)
+	}
+}
+
+func TestHashSessionIDForLog_DifferentInput_ReturnsDistinctValue(t *testing.T) {
+	// Req 2.2: 異なるセッション ID から短縮値を生成するとそれぞれ区別可能な短縮値を返す
+	// Arrange
+	idA := "session-a"
+	idB := "session-b"
+
+	// Act
+	hashA := hashSessionIDForLog(idA)
+	hashB := hashSessionIDForLog(idB)
+
+	// Assert
+	if hashA == hashB {
+		t.Errorf("different inputs must yield distinct values, both got %q", hashA)
+	}
+}
+
+func TestHashSessionIDForLog_ReturnsEightCharsWithoutRawInput(t *testing.T) {
+	// Req 1.3 / NFR 1.2: 短縮値はハッシュ値の先頭 8 文字に限定され、生入力を復元・露出しない
+	// Arrange
+	sessionID := "super-secret-session-token-value"
+
+	// Act
+	hash := hashSessionIDForLog(sessionID)
+
+	// Assert
+	if len(hash) != 8 {
+		t.Errorf("hash length = %d, want 8", len(hash))
+	}
+	if strings.Contains(hash, sessionID) {
+		t.Errorf("hash %q must not contain raw session ID %q", hash, sessionID)
+	}
+}
+
+func TestHashSessionIDForLog_EmptyInput_ReturnsValueWithoutPanic(t *testing.T) {
+	// Req 3.1: 空文字のセッション ID が渡されてもパニックせず短縮値を返す
+	t.Run("空文字入力のときパニックせず8文字の値を返す", func(t *testing.T) {
+		// Act
+		hash := hashSessionIDForLog("")
+
+		// Assert
+		if len(hash) != 8 {
+			t.Errorf("hash length for empty input = %d, want 8", len(hash))
+		}
+	})
 }
 
 func TestGetCurrentUser_ValidSession_ReturnsUser(t *testing.T) {
