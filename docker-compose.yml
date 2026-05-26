@@ -29,6 +29,12 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+    # リソース上限（Option A: 保守的初期値。将来の実測に基づき調整する前提）
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
 
   api:
     build:
@@ -74,6 +80,12 @@ services:
       - internal
       - external
     restart: unless-stopped
+    # リソース上限（Option A: 保守的初期値。将来の実測に基づき調整する前提）
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
 
   worker:
     build:
@@ -111,6 +123,12 @@ services:
       - internal
       - external
     restart: unless-stopped
+    # リソース上限（Option A: 保守的初期値。将来の実測に基づき調整する前提）
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
 
   db:
     image: postgres:16-alpine
@@ -128,6 +146,12 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    # リソース上限（Option A: 保守的初期値。将来の実測に基づき調整する前提）
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
 
 networks:
   internal:
