@@ -66,7 +66,7 @@
   - _Requirements: 1.2, 1.3, 3.1, 3.2, 3.3, 5.3, NFR 1.1_
   - _Boundary: Worker MetricsListener, TrustedCIDRMiddleware_
   - _Depends: 1.1, 2.1_
-- [ ] 6.2 runServe / runWorker で registry・Collector を生成し全レイヤを wiring する
+- [x] 6.2 runServe / runWorker で registry・Collector を生成し全レイヤを wiring する
   - `internal/app/app.go` の `runServe` で serve 専用 `prometheus.NewRegistry()` + `NewCollector` を生成し、CIDR mw と `SetupMetricsRoute` を `RouterDeps` に注入
   - `runWorker` で worker 専用 registry + Collector を生成し、`fetchpkg.NewFetcher` と `item.NewItemUpsertService` に `WithMetrics` で注入、`startWorkerMetricsListener` を ctx 付きで起動
   - serve の既存 server timeout（Read/Write/Idle）は変更しない（Requirement 5.2）
