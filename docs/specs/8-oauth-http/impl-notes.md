@@ -71,3 +71,5 @@
 - Feature Flag Protocol は本リポジトリ CLAUDE.md で `**採否**: opt-out` のため通常フローで実装。
 - requirements.md / design.md / tasks.md は本 impl ステージでは書き換えていない（design.md /
   tasks.md は本 Issue では未生成 = design-less impl）。
+
+STATUS: complete
