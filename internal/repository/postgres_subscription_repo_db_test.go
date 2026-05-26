@@ -67,8 +67,8 @@ func setupSubscriptionTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// insertTestUser はテスト用ユーザーを作成し、その ID を返す。
-func insertTestUser(t *testing.T, db *sql.DB, email string) string {
+// insertTestUserForSub はテスト用ユーザーを作成し、その ID を返す。
+func insertTestUserForSub(t *testing.T, db *sql.DB, email string) string {
 	t.Helper()
 	var userID string
 	err := db.QueryRow(
@@ -81,9 +81,9 @@ func insertTestUser(t *testing.T, db *sql.DB, email string) string {
 	return userID
 }
 
-// insertTestFeed はテスト用フィードを作成し、その ID を返す。
+// insertTestFeedForSub はテスト用フィードを作成し、その ID を返す。
 // faviconMime が nil の場合は favicon_mime を NULL のまま（未設定）で挿入する。
-func insertTestFeed(t *testing.T, db *sql.DB, feedURL, title string, faviconMime *string) string {
+func insertTestFeedForSub(t *testing.T, db *sql.DB, feedURL, title string, faviconMime *string) string {
 	t.Helper()
 	var feedID string
 	err := db.QueryRow(
@@ -96,8 +96,8 @@ func insertTestFeed(t *testing.T, db *sql.DB, feedURL, title string, faviconMime
 	return feedID
 }
 
-// insertTestSubscription はテスト用購読を作成する。
-func insertTestSubscription(t *testing.T, db *sql.DB, userID, feedID string) {
+// insertTestSubscriptionForSub はテスト用購読を作成する。
+func insertTestSubscriptionForSub(t *testing.T, db *sql.DB, userID, feedID string) {
 	t.Helper()
 	_, err := db.Exec(
 		`INSERT INTO subscriptions (user_id, feed_id) VALUES ($1, $2)`,
@@ -122,9 +122,9 @@ func TestListByUserIDWithFeedInfo_FaviconMimeNull(t *testing.T) {
 
 	// Req 1.1 / Req 1.3 / Req 3.1: favicon_mime が NULL のフィードのみを購読
 	t.Run("favicon_mimeがNULLのフィードのみを購読しているとき成功し空文字を返す", func(t *testing.T) {
-		userID := insertTestUser(t, db, "null-only@test.com")
-		feedID := insertTestFeed(t, db, "https://example.com/null-only.xml", "No Favicon Feed", nil)
-		insertTestSubscription(t, db, userID, feedID)
+		userID := insertTestUserForSub(t, db, "null-only@test.com")
+		feedID := insertTestFeedForSub(t, db, "https://example.com/null-only.xml", "No Favicon Feed", nil)
+		insertTestSubscriptionForSub(t, db, userID, feedID)
 
 		results, err := repo.ListByUserIDWithFeedInfo(ctx, userID)
 		if err != nil {
@@ -145,14 +145,14 @@ func TestListByUserIDWithFeedInfo_FaviconMimeNull(t *testing.T) {
 	// Req 1.2 / Req 2.1 / Req 2.2 / Req 4.2: favicon あり/なし混在で全件返り、
 	// favicon ありのものは実際の mime 値が返る
 	t.Run("faviconあり/なし混在のとき全件返り favicon ありは実際のmime値を返す", func(t *testing.T) {
-		userID := insertTestUser(t, db, "mixed@test.com")
+		userID := insertTestUserForSub(t, db, "mixed@test.com")
 
 		mime := "image/png"
-		feedWithFaviconID := insertTestFeed(t, db, "https://example.com/with-favicon.xml", "With Favicon", &mime)
-		feedWithoutFaviconID := insertTestFeed(t, db, "https://example.com/without-favicon.xml", "Without Favicon", nil)
+		feedWithFaviconID := insertTestFeedForSub(t, db, "https://example.com/with-favicon.xml", "With Favicon", &mime)
+		feedWithoutFaviconID := insertTestFeedForSub(t, db, "https://example.com/without-favicon.xml", "Without Favicon", nil)
 
-		insertTestSubscription(t, db, userID, feedWithFaviconID)
-		insertTestSubscription(t, db, userID, feedWithoutFaviconID)
+		insertTestSubscriptionForSub(t, db, userID, feedWithFaviconID)
+		insertTestSubscriptionForSub(t, db, userID, feedWithoutFaviconID)
 
 		results, err := repo.ListByUserIDWithFeedInfo(ctx, userID)
 		if err != nil {
@@ -187,7 +187,7 @@ func TestListByUserIDWithFeedInfo_FaviconMimeNull(t *testing.T) {
 
 	// Req 1.4: 購読を 1 件も持たないとき空の一覧を返す
 	t.Run("購読が1件もないとき空の一覧を返す", func(t *testing.T) {
-		userID := insertTestUser(t, db, "empty@test.com")
+		userID := insertTestUserForSub(t, db, "empty@test.com")
 
 		results, err := repo.ListByUserIDWithFeedInfo(ctx, userID)
 		if err != nil {
