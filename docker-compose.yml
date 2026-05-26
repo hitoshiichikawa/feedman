@@ -38,7 +38,10 @@ services:
     ports:
       - "${SERVER_PORT:-8080}:8080"
     environment:
-      - DATABASE_URL=postgres://${POSTGRES_USER:-feedman}:${POSTGRES_PASSWORD:-feedman}@db:5432/${POSTGRES_DB:-feedman}?sslmode=disable
+      # 未指定時はコンテナ内 DB（`db` ホスト、TLS 無効構成）向けデフォルトを適用する。
+      # 外部 PostgreSQL へ接続する場合は `.env` 等で DATABASE_URL を上書きし、sslmode に
+      # require 以上（require / verify-ca / verify-full）を明示すること（平文通信防止）。
+      - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER:-feedman}:${POSTGRES_PASSWORD:-feedman}@db:5432/${POSTGRES_DB:-feedman}?sslmode=disable}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       # 単一オリジン化後はブラウザ可視オリジン（web のオリジン）配下の callback URL を設定する。
@@ -78,7 +81,10 @@ services:
       dockerfile: Dockerfile
     command: ["worker"]
     environment:
-      - DATABASE_URL=postgres://${POSTGRES_USER:-feedman}:${POSTGRES_PASSWORD:-feedman}@db:5432/${POSTGRES_DB:-feedman}?sslmode=disable
+      # 未指定時はコンテナ内 DB（`db` ホスト、TLS 無効構成）向けデフォルトを適用する。
+      # 外部 PostgreSQL へ接続する場合は `.env` 等で DATABASE_URL を上書きし、sslmode に
+      # require 以上（require / verify-ca / verify-full）を明示すること（平文通信防止）。
+      - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER:-feedman}:${POSTGRES_PASSWORD:-feedman}@db:5432/${POSTGRES_DB:-feedman}?sslmode=disable}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-dummy}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-dummy}
       - GOOGLE_REDIRECT_URL=${GOOGLE_REDIRECT_URL:-http://localhost:8080/auth/google/callback}
