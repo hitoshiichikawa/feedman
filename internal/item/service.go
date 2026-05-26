@@ -39,6 +39,7 @@ type ItemSummary struct {
 	FeedID          string
 	Title           string
 	Link            string
+	Summary         string // サニタイズ済みの概要テキスト
 	PublishedAt     time.Time
 	IsDateEstimated bool
 	IsRead          bool
@@ -107,6 +108,7 @@ func (s *ItemService) ListItems(
 			FeedID:          item.FeedID,
 			Title:           item.Title,
 			Link:            item.Link,
+			Summary:         item.Summary,
 			PublishedAt:     pubAt,
 			IsDateEstimated: item.IsDateEstimated,
 			IsRead:          item.IsRead,
