@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -183,6 +184,180 @@ func TestFaviconFetcher_FetchFavicon_LargeResponse(t *testing.T) {
 	if data != nil {
 		t.Error("expected nil favicon data for large response")
 	}
+}
+
+// --- HTTP クライアント再利用のテスト（Requirement 3 / 4 / 5 / 6） ---
+
+// TestFaviconFetcher_GetHTTPClient_ReusesSameInstanceWithGuard はSSRFガード有効時に
+// 同一インスタンスでgetHTTPClientを複数回呼んでも同一クライアントを使い回し、
+// NewSafeClientの追加生成が発生しないことをテストする（AC 3.1, 3.2, 5.2）。
+func TestFaviconFetcher_GetHTTPClient_ReusesSameInstanceWithGuard(t *testing.T) {
+	// Arrange
+	guard := &mockSSRFGuard{}
+	f := NewFaviconFetcher(guard)
+
+	// Act
+	c1 := f.getHTTPClient()
+	c2 := f.getHTTPClient()
+	c3 := f.getHTTPClient()
+
+	// Assert
+	if c1 != c2 || c2 != c3 {
+		t.Error("同一インスタンスのgetHTTPClientは同一のHTTPクライアントを返すべき")
+	}
+	if guard.newSafeClientCalls() > 1 {
+		t.Errorf("NewSafeClientの呼び出しは1回までであるべき。結果: %d 回", guard.newSafeClientCalls())
+	}
+}
+
+// TestFaviconFetcher_GetHTTPClient_ReusesSameInstanceWithoutGuard はSSRFガード無効時(nil)に
+// 同一インスタンスでgetHTTPClientを複数回呼んでも同一クライアントを使い回すことをテストする（AC 3.1, 3.2）。
+func TestFaviconFetcher_GetHTTPClient_ReusesSameInstanceWithoutGuard(t *testing.T) {
+	// Arrange
+	f := NewFaviconFetcher(nil)
+
+	// Act
+	c1 := f.getHTTPClient()
+	c2 := f.getHTTPClient()
+
+	// Assert
+	if c1 != c2 {
+		t.Error("SSRFガード無効時も同一インスタンスのgetHTTPClientは同一クライアントを返すべき")
+	}
+	if c1 == nil {
+		t.Fatal("getHTTPClientはnilを返すべきではない")
+	}
+}
+
+// TestFaviconFetcher_FetchFavicon_NoAdditionalClientPerRequest は同一インスタンスから
+// 複数回favicon取得しても新しいHTTPクライアントが追加生成されず、結果が一致することをテストする（AC 3.2, 4.1, 3）。
+func TestFaviconFetcher_FetchFavicon_NoAdditionalClientPerRequest(t *testing.T) {
+	// Arrange
+	pngData := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(pngData)
+	}))
+	defer server.Close()
+
+	guard := &mockSSRFGuard{}
+	f := NewFaviconFetcher(guard)
+
+	// Act: 同一インスタンスから3回取得
+	for i := 0; i < 3; i++ {
+		data, mimeType, err := f.FetchFavicon(context.Background(), server.URL+"/favicon.ico")
+		if err != nil {
+			t.Fatalf("iteration %d: FetchFavicon returned error: %v", i, err)
+		}
+		// Assert: 各回で結果が一致（AC 4.1）
+		if len(data) != len(pngData) {
+			t.Errorf("iteration %d: 期待データ長 %d, 結果 %d", i, len(pngData), len(data))
+		}
+		if mimeType != "image/png" {
+			t.Errorf("iteration %d: 期待MIME image/png, 結果 %q", i, mimeType)
+		}
+	}
+
+	// Assert: クライアント追加生成なし（AC 3.2）
+	if guard.newSafeClientCalls() > 1 {
+		t.Errorf("複数回取得してもNewSafeClientは1回までであるべき。結果: %d 回", guard.newSafeClientCalls())
+	}
+}
+
+// TestFaviconFetcher_FetchFavicon_FailureResultStable は同一インスタンスから
+// 取得失敗(404)を複数回試行しても各回で同一の挙動(nil・空MIME・エラーなし)を返すことをテストする（AC 4.2）。
+func TestFaviconFetcher_FetchFavicon_FailureResultStable(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	guard := &mockSSRFGuard{}
+	f := NewFaviconFetcher(guard)
+
+	// Act & Assert: 2回連続で同一の失敗挙動
+	for i := 0; i < 2; i++ {
+		data, mimeType, err := f.FetchFavicon(context.Background(), server.URL+"/favicon.ico")
+		if err != nil {
+			t.Fatalf("iteration %d: 取得失敗時はエラーを返すべきでない: %v", i, err)
+		}
+		if data != nil {
+			t.Errorf("iteration %d: 取得失敗時はnilデータであるべき", i)
+		}
+		if mimeType != "" {
+			t.Errorf("iteration %d: 取得失敗時は空MIMEであるべき。結果: %q", i, mimeType)
+		}
+	}
+}
+
+// TestFaviconFetcher_SSRFBlocked_StableAfterReuse はクライアント再利用後もSSRFブロックが
+// 維持され、複数回試行で各回ともValidateURL経由でブロックされることをテストする（AC 5.2, 5.4）。
+func TestFaviconFetcher_SSRFBlocked_StableAfterReuse(t *testing.T) {
+	// Arrange
+	guard := &mockSSRFGuard{blockAll: true}
+	f := NewFaviconFetcher(guard)
+
+	// Act & Assert: 2回連続でブロック（nil・空MIME・エラーなし）
+	for i := 0; i < 2; i++ {
+		data, mimeType, err := f.FetchFavicon(context.Background(), "http://192.168.1.1/favicon.ico")
+		if err != nil {
+			t.Fatalf("iteration %d: SSRFブロック時はエラーを返すべきでない: %v", i, err)
+		}
+		if data != nil {
+			t.Errorf("iteration %d: SSRFブロック時はnilデータであるべき", i)
+		}
+		if mimeType != "" {
+			t.Errorf("iteration %d: SSRFブロック時は空MIMEであるべき。結果: %q", i, mimeType)
+		}
+	}
+	// 各リクエストでValidateURLが呼ばれている
+	if guard.validateURLCalls() != 2 {
+		t.Errorf("ValidateURLは各リクエストで呼ばれるべき。期待: 2回, 結果: %d 回", guard.validateURLCalls())
+	}
+}
+
+// TestFaviconFetcher_GetHTTPClient_TimeoutPreserved は再利用クライアントが既存の
+// タイムアウト値(faviconTimeout=5秒)を維持していることをテストする（AC 6.2）。
+func TestFaviconFetcher_GetHTTPClient_TimeoutPreserved(t *testing.T) {
+	// Arrange
+	f := NewFaviconFetcher(nil)
+
+	// Act
+	client := f.getHTTPClient()
+
+	// Assert
+	if client.Timeout != faviconTimeout {
+		t.Errorf("FaviconFetcherのタイムアウトはfaviconTimeout(%v)であるべき。結果: %v", faviconTimeout, client.Timeout)
+	}
+}
+
+// TestFaviconFetcher_Concurrent_NoDataRace は複数goroutineから同一インスタンスを
+// 同時利用してもデータ競合が発生しないことをテストする（NFR 2.1。-race と併用）。
+func TestFaviconFetcher_Concurrent_NoDataRace(t *testing.T) {
+	// Arrange
+	pngData := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(pngData)
+	}))
+	defer server.Close()
+
+	guard := &mockSSRFGuard{}
+	f := NewFaviconFetcher(guard)
+
+	// Act: 10 goroutineから同時取得
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, _ = f.FetchFavicon(context.Background(), server.URL+"/favicon.ico")
+		}()
+	}
+	wg.Wait()
+
+	// Assert: 競合が無いことは -race フラグが検出する。
 }
 
 // mockSSRFGuardForFavicon は既にdetector_test.goで定義されているmockSSRFGuardを使用する。
