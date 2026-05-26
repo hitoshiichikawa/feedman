@@ -79,6 +79,9 @@ export interface ApiClient {
 
 /**
  * APIクライアントを生成する。
+ *
+ * 通常の利用側はモジュールレベルの共有インスタンス `apiClient` を参照すること。
+ * 本関数はテスト時のモック差し替えや、独立したインスタンスが必要な場合のために温存している。
  */
 export function createApiClient(): ApiClient {
   return {
@@ -92,3 +95,12 @@ export function createApiClient(): ApiClient {
     delete: <T = unknown>(url: string) => request<T>("DELETE", url),
   };
 }
+
+/**
+ * モジュールレベルの共有 API クライアントインスタンス。
+ *
+ * API クライアントはステートレス（`request` をラップするだけで固有状態を持たない）であるため、
+ * モジュール初期化時に一度だけ生成し全消費者で共有する。各フック・コンポーネントは
+ * レンダリングごとに `createApiClient()` を呼ばず、本インスタンスを参照すること。
+ */
+export const apiClient: ApiClient = createApiClient();

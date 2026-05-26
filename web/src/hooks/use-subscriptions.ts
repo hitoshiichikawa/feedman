@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { createApiClient } from "@/lib/api";
+import { apiClient } from "@/lib/api";
 
 /** フェッチ間隔更新のパラメータ */
 interface UpdateFetchIntervalParams {
@@ -15,7 +15,6 @@ interface UpdateFetchIntervalParams {
  * PATCH /api/subscriptions/:id に { fetch_interval_minutes: number } を送信する。
  */
 export function useUpdateFetchInterval() {
-  const api = createApiClient();
   const queryClient = useQueryClient();
 
   return useMutation({
@@ -23,7 +22,7 @@ export function useUpdateFetchInterval() {
       subscriptionId,
       fetchIntervalMinutes,
     }: UpdateFetchIntervalParams) =>
-      api.patch(`/api/subscriptions/${subscriptionId}`, {
+      apiClient.patch(`/api/subscriptions/${subscriptionId}`, {
         fetch_interval_minutes: fetchIntervalMinutes,
       }),
     onSuccess: () => {
@@ -39,12 +38,11 @@ export function useUpdateFetchInterval() {
  * 成功時にfeedsキャッシュを無効化する。
  */
 export function useUnsubscribe() {
-  const api = createApiClient();
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: (subscriptionId: string) =>
-      api.delete(`/api/subscriptions/${subscriptionId}`),
+      apiClient.delete(`/api/subscriptions/${subscriptionId}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["feeds"] });
     },
@@ -58,11 +56,10 @@ export function useUnsubscribe() {
  * 成功時にfeedsキャッシュを無効化する。
  */
 export function useResumeFeed() {
-  const api = createApiClient();
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (feedId: string) => api.post(`/api/feeds/${feedId}/resume`),
+    mutationFn: (feedId: string) => apiClient.post(`/api/feeds/${feedId}/resume`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["feeds"] });
     },
