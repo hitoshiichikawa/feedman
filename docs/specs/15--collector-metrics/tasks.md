@@ -14,7 +14,7 @@
   - _Requirements: 4.1, NFR 2.1_
   - _Boundary: Config_
 
-- [ ] 2. 信頼 CIDR ミドルウェアの実装
+- [x] 2. 信頼 CIDR ミドルウェアの実装
 - [x] 2.1 TrustedCIDRMiddleware を実装する (P)
   - `internal/middleware/trusted_cidr.go` に `NewTrustedCIDRMiddleware(cidrs []string) func(next http.Handler) http.Handler` を追加（既存ミドルウェアのコンストラクタ関数パターンに準拠）
   - 起動時に `net.ParseCIDR` で `[]*net.IPNet` を構築し、不正な CIDR 文字列はスキップしてログ出力
