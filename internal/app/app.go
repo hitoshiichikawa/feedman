@@ -155,6 +155,7 @@ func runServe(cfg *config.Config) error {
 		SessionFinder:     sessionRepo,
 		CORSAllowedOrigin: cfg.CORSAllowedOrigin,
 		RateLimiter:       rateLimiter,
+		HSTSEnabled:       cfg.HSTSEnabled,
 		Logger:            slog.Default(),
 
 		AuthService: authService,
