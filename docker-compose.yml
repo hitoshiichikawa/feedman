@@ -74,7 +74,7 @@ services:
         max-size: "10m"
         max-file: "14"
     healthcheck:
-      test: ["/feedman", "healthcheck"]
+      test: ["CMD", "/feedman", "healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 3
