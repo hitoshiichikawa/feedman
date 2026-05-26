@@ -14,6 +14,8 @@ export interface ItemSummary {
   feed_id: string;
   title: string;
   link: string;
+  /** サニタイズ済みの概要テキスト（空の場合は空文字列） */
+  summary: string;
   published_at: string;
   is_date_estimated: boolean;
   is_read: boolean;
@@ -27,7 +29,6 @@ export interface ItemSummary {
 export interface ItemDetail extends ItemSummary {
   /** サニタイズ済みHTMLコンテンツ */
   content: string;
-  summary: string;
   author: string;
 }
 

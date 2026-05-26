@@ -154,11 +154,13 @@ interface ItemRowProps {
 /**
  * 記事行コンポーネント
  *
- * 記事タイトル、日付（推定フラグ付き）、既読/スター状態を表示する。
+ * 記事タイトル、概要、日付（推定フラグ付き）、既読/スター状態を表示する。
+ * 公開日時はタイトルと同一行の右側に、概要はタイトル直下に表示する。
  */
 function ItemRow({ item, isExpanded, onClick }: ItemRowProps) {
   const date = new Date(item.published_at);
   const formattedDate = formatDate(date);
+  const hasSummary = item.summary.trim().length > 0;
 
   return (
     <button
@@ -172,15 +174,33 @@ function ItemRow({ item, isExpanded, onClick }: ItemRowProps) {
       )}
       onClick={onClick}
     >
-      <div className="flex items-start gap-2">
+      {/* タイトル行: タイトル(左) + 公開日時/スター(右) を同一行に配置 */}
+      <div
+        data-testid={`item-title-row-${item.id}`}
+        className="flex items-start gap-2"
+      >
         {/* タイトル */}
         <span
           className={cn(
-            "flex-1 text-sm line-clamp-2",
+            "flex-1 min-w-0 text-sm line-clamp-2",
             !item.is_read && "font-medium"
           )}
         >
           {item.title}
+        </span>
+
+        {/* 公開日時（タイトル右側・縮小しすぎないよう whitespace-nowrap で判読性を維持） */}
+        <span className="flex flex-shrink-0 items-center gap-1 text-xs text-muted-foreground whitespace-nowrap">
+          <time dateTime={item.published_at}>{formattedDate}</time>
+          {item.is_date_estimated && (
+            <span
+              data-testid="date-estimated"
+              className="text-orange-500"
+              title="公開日が不明なため、取得日時を表示しています"
+            >
+              (推定)
+            </span>
+          )}
         </span>
 
         {/* スターアイコン */}
@@ -192,19 +212,15 @@ function ItemRow({ item, isExpanded, onClick }: ItemRowProps) {
         )}
       </div>
 
-      {/* 日付表示 */}
-      <div className="flex items-center gap-1 text-xs text-muted-foreground">
-        <time dateTime={item.published_at}>{formattedDate}</time>
-        {item.is_date_estimated && (
-          <span
-            data-testid="date-estimated"
-            className="text-xs text-orange-500"
-            title="公開日が不明なため、取得日時を表示しています"
-          >
-            (推定)
-          </span>
-        )}
-      </div>
+      {/* 概要（空のときは描画しない。最大2行で省略） */}
+      {hasSummary && (
+        <p
+          data-testid={`item-summary-${item.id}`}
+          className="text-xs text-muted-foreground line-clamp-2"
+        >
+          {item.summary}
+        </p>
+      )}
     </button>
   );
 }

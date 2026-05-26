@@ -44,6 +44,7 @@ const mockItemsResponse: ItemListResponse = {
       feed_id: "feed-1",
       title: "最新の記事タイトル",
       link: "https://example.com/article-1",
+      summary: "最新記事の概要テキストです。",
       published_at: "2026-02-27T10:00:00Z",
       is_date_estimated: false,
       is_read: false,
@@ -56,6 +57,7 @@ const mockItemsResponse: ItemListResponse = {
       feed_id: "feed-1",
       title: "推定日付の記事",
       link: "https://example.com/article-2",
+      summary: "",
       published_at: "2026-02-26T10:00:00Z",
       is_date_estimated: true,
       is_read: true,
@@ -274,5 +276,120 @@ describe("ItemList コンポーネント", () => {
     await waitFor(() => {
       expect(screen.getByText("記事がありません")).toBeInTheDocument();
     });
+  });
+
+  // --- 概要表示 (Requirement 2) ---
+
+  it("概要があるとき記事行のタイトル直下に概要が表示されること", async () => {
+    // Arrange / Act
+    render(
+      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      { wrapper: createWrapper() }
+    );
+
+    // Assert
+    await waitFor(() => {
+      expect(screen.getByText("最新の記事タイトル")).toBeInTheDocument();
+    });
+
+    const row = screen.getByTestId("item-row-item-1");
+    const summary = within(row).getByTestId("item-summary-item-1");
+    expect(summary).toHaveTextContent("最新記事の概要テキストです。");
+  });
+
+  it("概要が空のとき概要領域を描画しないこと", async () => {
+    // Arrange / Act
+    render(
+      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      { wrapper: createWrapper() }
+    );
+
+    // Assert
+    await waitFor(() => {
+      expect(screen.getByTestId("item-row-item-2")).toBeInTheDocument();
+    });
+
+    // item-2 は summary 空のため概要要素を描画しない
+    expect(screen.queryByTestId("item-summary-item-2")).not.toBeInTheDocument();
+  });
+
+  it("概要テキストがタイトルより小さく薄い配色で表示されること", async () => {
+    // Arrange / Act
+    render(
+      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      { wrapper: createWrapper() }
+    );
+
+    // Assert
+    await waitFor(() => {
+      expect(screen.getByText("最新の記事タイトル")).toBeInTheDocument();
+    });
+
+    const summary = screen.getByTestId("item-summary-item-1");
+    // フォントサイズ縮小 (text-xs) と低コントラスト配色 (text-muted-foreground)
+    expect(summary.className).toContain("text-xs");
+    expect(summary.className).toContain("text-muted-foreground");
+  });
+
+  // --- 長い概要の省略 (Requirement 3) ---
+
+  it("概要が最大2行で省略されるよう line-clamp-2 が適用されること", async () => {
+    // Arrange / Act
+    render(
+      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      { wrapper: createWrapper() }
+    );
+
+    // Assert
+    await waitFor(() => {
+      expect(screen.getByText("最新の記事タイトル")).toBeInTheDocument();
+    });
+
+    const summary = screen.getByTestId("item-summary-item-1");
+    expect(summary.className).toContain("line-clamp-2");
+  });
+
+  // --- タイムスタンプのタイトル右側配置 (Requirement 4) ---
+
+  it("公開日時がタイトルと同一行の右側に配置されること", async () => {
+    // Arrange / Act
+    render(
+      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      { wrapper: createWrapper() }
+    );
+
+    // Assert
+    await waitFor(() => {
+      expect(screen.getByText("最新の記事タイトル")).toBeInTheDocument();
+    });
+
+    const row = screen.getByTestId("item-row-item-1");
+    const titleRow = within(row).getByTestId("item-title-row-item-1");
+    const time = within(row).getByRole("time");
+    const summary = within(row).getByTestId("item-summary-item-1");
+
+    // 日時はタイトル行(同一行)に含まれる
+    expect(titleRow).toContainElement(time as HTMLElement);
+    // 概要はタイトル行の外（下）に配置され、日時を含まない
+    expect(summary).not.toContainElement(time as HTMLElement);
+  });
+
+  it("推定日付の記事では推定フラグが日時に隣接して表示されること", async () => {
+    // Arrange / Act
+    render(
+      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      { wrapper: createWrapper() }
+    );
+
+    // Assert
+    await waitFor(() => {
+      expect(screen.getByTestId("item-row-item-2")).toBeInTheDocument();
+    });
+
+    const row = screen.getByTestId("item-row-item-2");
+    const titleRow = within(row).getByTestId("item-title-row-item-2");
+    const estimated = within(row).getByTestId("date-estimated");
+    // 推定フラグはタイトル行（=日時のある行）に維持される
+    expect(titleRow).toContainElement(estimated as HTMLElement);
   });
 });
