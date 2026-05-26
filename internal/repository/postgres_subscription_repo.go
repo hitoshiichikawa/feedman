@@ -184,7 +184,7 @@ func (r *PostgresSubscriptionRepo) ListByUserIDWithFeedInfo(ctx context.Context,
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT
 			s.id, s.user_id, s.feed_id, s.fetch_interval_minutes, s.created_at, s.updated_at,
-			f.title, f.feed_url, f.favicon_data, f.favicon_mime, f.fetch_status, COALESCE(f.error_message, ''),
+			f.title, f.feed_url, f.favicon_data, COALESCE(f.favicon_mime, ''), f.fetch_status, COALESCE(f.error_message, ''),
 			COALESCE(unread.cnt, 0)
 		 FROM subscriptions s
 		 JOIN feeds f ON s.feed_id = f.id
