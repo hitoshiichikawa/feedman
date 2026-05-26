@@ -58,6 +58,15 @@ type Config struct {
 	// HSTSEnabled は HSTS（Strict-Transport-Security）ヘッダーの出力可否を制御する。
 	// 既定値は false（HSTS 非出力 = 本機能導入前と等価）。
 	HSTSEnabled bool
+
+	// Metrics
+	// TrustedCIDRs は /metrics エンドポイントへのアクセスを許可する信頼ネットワーク範囲（CIDR 表記）。
+	// METRICS_TRUSTED_CIDRS（カンマ区切り）から読み込む。未設定時は空スライス。
+	// 各要素の検証（不正 CIDR の判定）はミドルウェア側に委譲する。
+	TrustedCIDRs []string
+	// MetricsPort は worker プロセスがメトリクスを公開する listener のポート。
+	// METRICS_PORT から読み込む。既定値は "9090"。
+	MetricsPort string
 }
 
 // Load は環境変数からConfigを読み込む。
@@ -120,8 +129,27 @@ func Load() (*Config, error) {
 	cfg.CookieDomain = getEnvString("COOKIE_DOMAIN", "")
 	cfg.CORSAllowedOrigin = getEnvString("CORS_ALLOWED_ORIGIN", "http://localhost:3000")
 	cfg.HSTSEnabled = getEnvBool("HSTS_ENABLED", false)
+	cfg.TrustedCIDRs = parseCommaSeparated(os.Getenv("METRICS_TRUSTED_CIDRS"))
+	cfg.MetricsPort = getEnvString("METRICS_PORT", "9090")
 
 	return cfg, nil
+}
+
+// parseCommaSeparated はカンマ区切りの文字列を要素スライスに分解する。
+// 各要素は前後の空白を除去し、空要素は除外する。
+// 入力が空文字（未設定）の場合は空スライス（nil）を返す。
+func parseCommaSeparated(v string) []string {
+	if strings.TrimSpace(v) == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 func getEnvString(key, defaultVal string) string {
