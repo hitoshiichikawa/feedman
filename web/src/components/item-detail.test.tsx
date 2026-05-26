@@ -309,4 +309,20 @@ describe("ItemDetail コンポーネント", () => {
     expect(contentArea).toBeInTheDocument();
     expect(contentArea.innerHTML).toBe("");
   });
+
+  it("タイトルが元記事への外部リンクであり、新規タブで開くこと", () => {
+    render(
+      <ItemDetail
+        item={mockItem}
+        onMarkAsRead={() => {}}
+        onToggleStar={() => {}}
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    const titleLink = screen.getByRole("link", { name: "テスト記事のタイトル" });
+    expect(titleLink).toHaveAttribute("href", "https://example.com/article-1");
+    expect(titleLink).toHaveAttribute("target", "_blank");
+    expect(titleLink).toHaveAttribute("rel", "noopener noreferrer");
+  });
 });

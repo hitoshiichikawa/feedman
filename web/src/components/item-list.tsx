@@ -173,15 +173,19 @@ function ItemRow({ item, isExpanded, onClick }: ItemRowProps) {
       onClick={onClick}
     >
       <div className="flex items-start gap-2">
-        {/* タイトル */}
-        <span
+        {/* タイトルリンク */}
+        <a
+          href={item.link}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
           className={cn(
-            "flex-1 text-sm line-clamp-2",
+            "flex-1 text-sm line-clamp-2 hover:underline cursor-pointer",
             !item.is_read && "font-medium"
           )}
         >
           {item.title}
-        </span>
+        </a>
 
         {/* スターアイコン */}
         {item.is_starred && (

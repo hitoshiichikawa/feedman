@@ -275,4 +275,48 @@ describe("ItemList コンポーネント", () => {
       expect(screen.getByText("記事がありません")).toBeInTheDocument();
     });
   });
+
+  it("タイトルが元記事への外部リンクであり、新規タブで開くこと", async () => {
+    render(
+      <ItemList
+        feedId="feed-1"
+        onSelectItem={() => {}}
+        expandedItemId={null}
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("最新の記事タイトル")).toBeInTheDocument();
+    });
+
+    const link = screen.getByRole("link", { name: "最新の記事タイトル" });
+    expect(link).toHaveAttribute("href", "https://example.com/article-1");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+  });
+
+  it("タイトルリンクをクリックした際に親行のクリックイベントが伝搬しないこと", async () => {
+    const user = userEvent.setup();
+    const onSelectItem = vi.fn();
+
+    render(
+      <ItemList
+        feedId="feed-1"
+        onSelectItem={onSelectItem}
+        expandedItemId={null}
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("最新の記事タイトル")).toBeInTheDocument();
+    });
+
+    const link = screen.getByRole("link", { name: "最新の記事タイトル" });
+    await user.click(link);
+
+    // e.stopPropagation()により、onSelectItemが呼び出されないこと
+    expect(onSelectItem).not.toHaveBeenCalled();
+  });
 });
