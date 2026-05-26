@@ -360,6 +360,70 @@ func TestFaviconFetcher_Concurrent_NoDataRace(t *testing.T) {
 	// Assert: 競合が無いことは -race フラグが検出する。
 }
 
+// --- SSRF ガード有効/無効の HTTP クライアント生成経路のテスト（要件 2） ---
+
+// TestNewFaviconFetcher_SSRFGuardEnabled_UsesSafeClient はSSRFガードが有効化されたとき、
+// favicon取得のHTTPクライアント生成が SSRF 対策付きクライアント（guard.NewSafeClient）を
+// 選択する経路を検証する（要件 2.3）。実際の取得まで通して経路が観測可能であることを確認する。
+func TestNewFaviconFetcher_SSRFGuardEnabled_UsesSafeClient(t *testing.T) {
+	// Arrange: favicon を返すテスト用サーバとSSRFガード（有効）を用意する。
+	pngData := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(pngData)
+	}))
+	defer server.Close()
+
+	guard := &mockSSRFGuard{}
+
+	// Act: ガード有効でFetcherを生成する（生成時に NewSafeClient 経路を通る）。
+	f := NewFaviconFetcher(guard)
+	data, _, err := f.FetchFavicon(context.Background(), server.URL+"/favicon.ico")
+
+	// Assert: SSRF 対策付きクライアント生成（NewSafeClient）が選択され、取得も成功している。
+	if err != nil {
+		t.Fatalf("FetchFavicon returned error: %v", err)
+	}
+	if len(data) == 0 {
+		t.Error("expected non-empty favicon data")
+	}
+	if got := guard.newSafeClientCalls(); got != 1 {
+		t.Errorf("SSRFガード有効時は NewSafeClient が1回呼ばれるべき。結果: %d 回", got)
+	}
+}
+
+// TestNewFaviconFetcher_SSRFGuardDisabled_UsesPlainClient はSSRFガードが無効（nil）であるとき、
+// favicon取得のHTTPクライアント生成が SSRF 対策なしの素のクライアント（NewSafeClient 非経由・
+// 既定タイムアウト）を選択する経路を検証する（要件 2.4）。
+func TestNewFaviconFetcher_SSRFGuardDisabled_UsesPlainClient(t *testing.T) {
+	// Arrange: favicon を返すテスト用サーバを用意する（ガードは nil）。
+	pngData := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(pngData)
+	}))
+	defer server.Close()
+
+	// Act: ガード無効（nil）でFetcherを生成する（素のクライアント経路を通る）。
+	f := NewFaviconFetcher(nil)
+	client := f.getHTTPClient()
+	data, _, err := f.FetchFavicon(context.Background(), server.URL+"/favicon.ico")
+
+	// Assert: 素のクライアント（既定タイムアウト）が選択され、取得も成功している。
+	if err != nil {
+		t.Fatalf("FetchFavicon returned error: %v", err)
+	}
+	if len(data) == 0 {
+		t.Error("expected non-empty favicon data")
+	}
+	if client == nil {
+		t.Fatal("SSRFガード無効時もHTTPクライアントは生成されるべき")
+	}
+	if client.Timeout != faviconTimeout {
+		t.Errorf("素のクライアントは faviconTimeout(%v) を持つべき。結果: %v", faviconTimeout, client.Timeout)
+	}
+}
+
 // mockSSRFGuardForFavicon は既にdetector_test.goで定義されているmockSSRFGuardを使用する。
 // ここではdetector_test.goのモックが同パッケージ内で利用可能。
 
