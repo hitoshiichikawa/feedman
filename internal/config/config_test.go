@@ -138,6 +138,10 @@ func TestLoad_DefaultValues(t *testing.T) {
 	if cfg.RateLimitFeedReg != 10 {
 		t.Errorf("RateLimitFeedReg = %d, want %d", cfg.RateLimitFeedReg, 10)
 	}
+	// Req 2.1: 未認証 IP レート制限の閾値の既定値は 30 req/min/IP。
+	if cfg.RateLimitUnauthIP != 30 {
+		t.Errorf("RateLimitUnauthIP = %d, want %d", cfg.RateLimitUnauthIP, 30)
+	}
 
 	// Hatebu defaults
 	if cfg.HatebuTTL != 24*time.Hour {
@@ -375,6 +379,7 @@ func TestLoad_CustomValues(t *testing.T) {
 	t.Setenv("FETCH_INTERVAL", "10m")
 	t.Setenv("RATE_LIMIT_GENERAL", "60")
 	t.Setenv("RATE_LIMIT_FEED_REG", "5")
+	t.Setenv("RATE_LIMIT_UNAUTH_IP", "15")
 	t.Setenv("HATEBU_TTL", "12h")
 	t.Setenv("HATEBU_BATCH_INTERVAL", "20m")
 	t.Setenv("HATEBU_API_INTERVAL", "10s")
@@ -406,6 +411,10 @@ func TestLoad_CustomValues(t *testing.T) {
 	}
 	if cfg.RateLimitFeedReg != 5 {
 		t.Errorf("RateLimitFeedReg = %d, want %d", cfg.RateLimitFeedReg, 5)
+	}
+	// Req 2.2: 指定された閾値を適用する。
+	if cfg.RateLimitUnauthIP != 15 {
+		t.Errorf("RateLimitUnauthIP = %d, want %d", cfg.RateLimitUnauthIP, 15)
 	}
 	if cfg.HatebuTTL != 12*time.Hour {
 		t.Errorf("HatebuTTL = %v, want %v", cfg.HatebuTTL, 12*time.Hour)
@@ -481,6 +490,21 @@ func TestLoad_MissingBaseURL_ReturnsError(t *testing.T) {
 	_, err := Load()
 	if err == nil {
 		t.Fatal("expected error for missing BASE_URL, got nil")
+	}
+}
+
+// TestLoad_InvalidRateLimitUnauthIP_FallsBackToDefault は Req 2.3 を検証する。
+// 不正な RATE_LIMIT_UNAUTH_IP が指定されてもエラーにせず、既定値 30 で起動を継続する。
+func TestLoad_InvalidRateLimitUnauthIP_FallsBackToDefault(t *testing.T) {
+	setRequiredEnvVars(t)
+	t.Setenv("RATE_LIMIT_UNAUTH_IP", "not-a-number")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("不正値でも起動継続すべき（エラーなし）, got %v", err)
+	}
+	if cfg.RateLimitUnauthIP != 30 {
+		t.Errorf("RateLimitUnauthIP = %d, want %d (既定値フォールバック)", cfg.RateLimitUnauthIP, 30)
 	}
 }
 

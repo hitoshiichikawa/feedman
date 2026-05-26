@@ -33,6 +33,10 @@ type Config struct {
 	// Rate Limit
 	RateLimitGeneral int
 	RateLimitFeedReg int
+	// RateLimitUnauthIP は未認証エンドポイント（/auth/google/login・/auth/google/callback・
+	// /health）に適用する IP 単位レート制限の閾値（req/min/IP）。
+	// RATE_LIMIT_UNAUTH_IP から読み込む。既定値は 30。不正値時は既定値にフォールバックする。
+	RateLimitUnauthIP int
 
 	// Hatebu
 	HatebuTTL              time.Duration
@@ -119,6 +123,7 @@ func Load() (*Config, error) {
 	cfg.FetchInterval = getEnvDuration("FETCH_INTERVAL", 5*time.Minute)
 	cfg.RateLimitGeneral = getEnvInt("RATE_LIMIT_GENERAL", 120)
 	cfg.RateLimitFeedReg = getEnvInt("RATE_LIMIT_FEED_REG", 10)
+	cfg.RateLimitUnauthIP = getEnvInt("RATE_LIMIT_UNAUTH_IP", 30)
 	cfg.HatebuTTL = getEnvDuration("HATEBU_TTL", 24*time.Hour)
 	cfg.HatebuBatchInterval = getEnvDuration("HATEBU_BATCH_INTERVAL", 10*time.Minute)
 	cfg.HatebuAPIInterval = getEnvDuration("HATEBU_API_INTERVAL", 5*time.Second)

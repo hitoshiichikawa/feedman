@@ -153,6 +153,14 @@ func runServe(cfg *config.Config) error {
 	// シャットダウン時に Stop() を呼べるよう変数参照を保持する（goroutine リーク防止）。
 	rateLimiter := middleware.NewRateLimiter(rateLimiterCfg)
 
+	// 未認証エンドポイント（/auth/google/login・/auth/google/callback・/health）向けの
+	// IP 単位レート制限。閾値は cfg.RateLimitUnauthIP（既定 30 req/min/IP、不正値は config 側で
+	// 既定フォールバック済み）から構築する。これもクリーンアップ goroutine を持つため
+	// シャットダウン時に Stop() を呼べるよう参照を保持する（goroutine リーク防止）。
+	unauthIPRateLimiter := middleware.NewIPRateLimiter(
+		middleware.DefaultIPRateLimiterConfig(cfg.RateLimitUnauthIP),
+	)
+
 	// serve 専用の Prometheus registry と Collector を生成する。
 	// serve プロセスにはフェッチ系の記録経路が無いため初期値（0）の公開となるが、
 	// /metrics 自体は信頼 CIDR 制限付きで公開する（Requirement 1.1, 5.1）。
@@ -160,12 +168,13 @@ func runServe(cfg *config.Config) error {
 	_ = metrics.NewCollector(serveRegistry)
 
 	deps := &handler.RouterDeps{
-		HealthChecker:     db,
-		SessionFinder:     sessionRepo,
-		CORSAllowedOrigin: cfg.CORSAllowedOrigin,
-		RateLimiter:       rateLimiter,
-		HSTSEnabled:       cfg.HSTSEnabled,
-		Logger:            slog.Default(),
+		HealthChecker:       db,
+		SessionFinder:       sessionRepo,
+		CORSAllowedOrigin:   cfg.CORSAllowedOrigin,
+		RateLimiter:         rateLimiter,
+		UnauthIPRateLimiter: unauthIPRateLimiter,
+		HSTSEnabled:         cfg.HSTSEnabled,
+		Logger:              slog.Default(),
 
 		MetricsHandler:    metrics.SetupMetricsRoute(serveRegistry),
 		MetricsMiddleware: middleware.NewTrustedCIDRMiddleware(cfg.TrustedCIDRs),
@@ -220,7 +229,7 @@ func runServe(cfg *config.Config) error {
 
 	// グレースフルシャットダウン: 稼働中リクエストの drain 完了後に
 	// RateLimiter のクリーンアップ goroutine を停止する（高々 1 回）。
-	coordinator := newShutdownCoordinator(server, rateLimiter)
+	coordinator := newShutdownCoordinator(server, rateLimiter, unauthIPRateLimiter)
 	if err := coordinator.shutdown(ctx); err != nil {
 		return err
 	}
