@@ -146,11 +146,15 @@ func runServe(cfg *config.Config) error {
 	// デフォルト値から変更する場合のみ上書き（req/min -> req/sec に変換）
 	// configのRateLimitGeneralはreq/min単位なのでreq/secに変換する
 
+	// RateLimiter はバックグラウンドでクリーンアップ goroutine を起動するため、
+	// シャットダウン時に Stop() を呼べるよう変数参照を保持する（goroutine リーク防止）。
+	rateLimiter := middleware.NewRateLimiter(rateLimiterCfg)
+
 	deps := &handler.RouterDeps{
 		HealthChecker:     db,
 		SessionFinder:     sessionRepo,
 		CORSAllowedOrigin: cfg.CORSAllowedOrigin,
-		RateLimiter:       middleware.NewRateLimiter(rateLimiterCfg),
+		RateLimiter:       rateLimiter,
 		Logger:            slog.Default(),
 
 		AuthService: authService,
@@ -201,8 +205,11 @@ func runServe(cfg *config.Config) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := server.Shutdown(ctx); err != nil {
-		return fmt.Errorf("server shutdown failed: %w", err)
+	// グレースフルシャットダウン: 稼働中リクエストの drain 完了後に
+	// RateLimiter のクリーンアップ goroutine を停止する（高々 1 回）。
+	coordinator := newShutdownCoordinator(server, rateLimiter)
+	if err := coordinator.shutdown(ctx); err != nil {
+		return err
 	}
 
 	slog.Info("API server stopped gracefully")
