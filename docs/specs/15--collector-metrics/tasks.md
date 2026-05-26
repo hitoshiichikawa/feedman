@@ -25,7 +25,7 @@
   - _Requirements: 4.1, 4.2, 4.3, NFR 2.1, NFR 2.2_
   - _Boundary: TrustedCIDRMiddleware_
 
-- [ ] 3. フェッチャー層へのメトリクス記録の組み込み
+- [x] 3. フェッチャー層へのメトリクス記録の組み込み
 - [x] 3.1 Fetcher に WithMetrics option とメトリクス記録を追加する
   - `internal/worker/fetch/fetcher.go` の `Fetcher` に `metrics metrics.MetricsCollector` フィールドを追加
   - `FetcherOption` 型と `WithMetrics(c)` を定義し、`NewFetcher(...)` の末尾に `opts ...FetcherOption` を追加（既存 7 引数 call site は不変）
