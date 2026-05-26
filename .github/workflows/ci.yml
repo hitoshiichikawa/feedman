@@ -117,3 +117,66 @@ jobs:
 
       - name: Run npm audit (fail on high or above)
         run: npm audit --audit-level=high
+
+  trivy:
+    name: Container Image Vulnerability Scan (Trivy)
+    runs-on: ubuntu-latest
+    # NFR 2.2 / Req 4: 既存ジョブに依存せず独立して実行する（needs を付けない）。
+    # 脆弱性検出でもジョブを fail させないため continue-on-error を併用する（Req 3.1 / 3.3）。
+    steps:
+      - uses: actions/checkout@v4
+
+      # Req 1.3 の主目的（ベースイメージ・OS パッケージ由来の CVE 検出）を満たすため、
+      # config スキャンではなくイメージビルド後の image スキャンを採用する。
+      # config スキャンでは distroless-debian12 / node:20-alpine の OS パッケージ CVE を
+      # 検出できないため。
+      - name: Build api/worker image (root Dockerfile)
+        run: docker build -t feedman-api:scan -f Dockerfile .
+
+      - name: Build web image (web/Dockerfile)
+        run: docker build -t feedman-web:scan -f web/Dockerfile web
+
+      # Req 1.1 / 1.3 / NFR 3.1: ルート Dockerfile 由来イメージをスキャンし、
+      # CRITICAL/HIGH を table 形式で出力して可視化する。
+      # Req 3.1 / 3.3: exit-code: '0' により脆弱性検出でもジョブを fail させない。
+      - name: Scan api/worker image (warning only)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: feedman-api:scan
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: '0'
+          ignore-unfixed: false
+          output: trivy-api.txt
+
+      # Req 1.2 / 1.3 / NFR 3.1: web/Dockerfile 由来イメージをスキャンする。
+      - name: Scan web image (warning only)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: feedman-web:scan
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: '0'
+          ignore-unfixed: false
+          output: trivy-web.txt
+
+      # Req 3.2 / NFR 3.1: 検出結果（重大度・件数）をジョブサマリーとして残し、
+      # CI 上で参照可能にする。stdout の table 出力（CI ログ）と合わせて二重に可視化する。
+      - name: Publish scan results to job summary
+        if: always()
+        run: |
+          {
+            echo '## Trivy Container Image Scan (CRITICAL / HIGH)'
+            echo ''
+            echo '### api/worker image (root Dockerfile)'
+            echo '```'
+            cat trivy-api.txt 2>/dev/null || echo 'スキャン結果なし（trivy-api.txt 未生成）'
+            echo '```'
+            echo ''
+            echo '### web image (web/Dockerfile)'
+            echo '```'
+            cat trivy-web.txt 2>/dev/null || echo 'スキャン結果なし（trivy-web.txt 未生成）'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
