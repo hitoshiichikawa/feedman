@@ -122,7 +122,10 @@ jobs:
     name: Container Image Vulnerability Scan (Trivy)
     runs-on: ubuntu-latest
     # NFR 2.2 / Req 4: 既存ジョブに依存せず独立して実行する（needs を付けない）。
-    # 脆弱性検出でもジョブを fail させないため continue-on-error を併用する（Req 3.1 / 3.3）。
+    # Req 3.1 / 3.3: 警告のみ（PR を一切ブロックしない）とするため、ジョブ全体に
+    # continue-on-error を付与する。これにより docker build 失敗を含め trivy ジョブが
+    # CI を fail させない。後段の trivy-action は exit-code: '0' を併用し二重に担保する。
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 

@@ -17,11 +17,27 @@ job のステップ構成:
 
 ### 警告のみ（CI を fail させない）にした方法
 
-- trivy-action の `exit-code: '0'` を指定し、CRITICAL/HIGH を検出しても Trivy が非ゼロ
-  exit code を返さないようにした（Req 3.1 / 3.3）。
-- 念のための二重防御として、job レベルのコメントに記載のとおり `exit-code: '0'` を主たる
-  手段とし、検出時もステップが成功扱いになるようにした。`output:` でファイル出力した結果を
-  後続ステップ（`if: always()`）が job summary に出すため、スキャン結果は必ず可視化される。
+- trivy job 全体に **ジョブレベルの `continue-on-error: true`**（`runs-on` と同じインデント
+  階層）を付与し、`docker build` ステップを含むいずれのステップが fail しても trivy job が
+  PR の CI を fail させないようにした（Req 3.1 / 3.3 / NFR 2.2 独立実行）。
+- 加えて二重の保険として、trivy-action の `exit-code: '0'` を指定し、CRITICAL/HIGH を検出
+  しても Trivy スキャンステップが非ゼロ exit code を返さないようにしている（Req 3.1 / 3.3）。
+- `output:` でファイル出力した結果を後続ステップ（`if: always()`）が job summary に出すため、
+  スキャン結果は必ず可視化される。
+
+#### 追記: `continue-on-error` の整合修正（コメントと実装の不一致是正）
+
+初版では「continue-on-error を併用する」とコメントに記載しながら、実際には job/step の
+いずれにも `continue-on-error` を付与しておらず、`exit-code: '0'` だけで Trivy スキャン
+ステップの fail を回避していた。この構成では前段の `docker build` ステップが無保護で、
+ビルド失敗時に trivy job 全体が fail し得る（コメント記述と実態が食い違う）状態だった。
+
+確定方針「警告のみ（trivy ジョブが PR を一切ブロックしない）」（Req 3.1 / 3.3 / NFR 2.2
+独立実行）に合わせ、`trivy` ジョブ全体にジョブレベルの `continue-on-error: true` を付与
+してコメントと実装を一致させた。これにより docker build 失敗を含め trivy ジョブが PR の
+CI を fail させなくなり、既存の `exit-code: '0'`（Trivy スキャンステップの警告のみ）は
+二重の保険としてそのまま残している。本修正は他ジョブ・既存定義・requirements.md には一切
+変更を加えていない（diff で確認済み）。
 
 ## スキャン方式の選択理由（config / image / fs）
 
@@ -68,16 +84,16 @@ alpine ベース）であり、NFR 1.1 の目安（1 ジョブ 5 分以内）に
 | Req 2.1（PR トリガーで起動） | 既存 `on: pull_request: branches: [main, develop]` をそのまま利用。trivy job も同トリガーで起動 |
 | Req 2.2（push でも整合起動） | 既存 `on: push: branches: [main, develop]` をそのまま利用。トリガー定義は無変更 |
 | Req 2.3（CI チェック一覧に表示） | `jobs.trivy` として独立 job 定義。GitHub の checks に名前 `Container Image Vulnerability Scan (Trivy)` で表示される |
-| Req 3.1（検出でも fail させない） | `exit-code: '0'` で Trivy が非ゼロ exit しない |
+| Req 3.1（検出でも fail させない） | ジョブレベル `continue-on-error: true` で trivy job 全体が fail を伝播しない。加えて `exit-code: '0'` で Trivy スキャンステップが非ゼロ exit しない（二重担保） |
 | Req 3.2（結果を CI 上で参照可能に残す） | `output:` でファイル出力し、`Publish scan results to job summary` ステップで Step Summary に table を掲載。加えて CI ログにも table 出力が残る |
-| Req 3.3（マージをブロックしない） | job が常に成功扱いになるため required check でもブロックしない |
+| Req 3.3（マージをブロックしない） | ジョブレベル `continue-on-error: true` により docker build 失敗を含め job が常に成功扱いになるため、required check でもブロックしない |
 | Req 4.1（既存各 job を従来どおり実行） | 既存 job 定義を一切変更せず、trivy を新規追加のみ（diff で確認済み） |
 | Req 4.2（検出が既存 job 成否を変えない） | trivy は独立 job で `needs` 無し。他 job の成否に影響しない |
 | Req 4.3（依存脆弱性スキャンとスコープ非重複） | trivy は Dockerfile/コンテナイメージ（ベースイメージ・OS パッケージ）が対象。govulncheck（Go 依存）/ npm audit（npm 依存）とスコープが重複しない |
 | NFR 1.1（実行時間） | 軽量ベースイメージ（distroless / alpine）のため目安 5 分以内に収まる見込み |
 | NFR 1.2（軽量化・頻度調整の選択肢） | image スキャン + severity 絞り込みで抑制可能。将来 schedule 化や fs/config 併用の余地あり |
 | NFR 2.1（既存 job 成否判定ロジック不変） | 既存 job は無変更（diff で確認済み） |
-| NFR 2.2（独立実行） | `needs` 無しで独立 job として実行 |
+| NFR 2.2（独立実行） | `needs` 無しで独立 job として実行。さらにジョブレベル `continue-on-error: true` により trivy job の成否が他 job・CI 全体の結果に影響しない |
 | NFR 3.1（重大度・件数を CI 上で確認可能） | `severity: CRITICAL,HIGH` の table 出力を CI ログ + Step Summary の双方に残す |
 
 ## 検証手順と結果
