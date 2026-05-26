@@ -11,6 +11,7 @@ import (
 
 	"github.com/mmcdole/gofeed"
 
+	"github.com/hitoshi/feedman/internal/metrics"
 	"github.com/hitoshi/feedman/internal/model"
 	"github.com/hitoshi/feedman/internal/repository"
 )
@@ -37,9 +38,23 @@ type Fetcher struct {
 	logger      *slog.Logger
 	timeout     time.Duration
 	maxBodySize int64
+	metrics     metrics.MetricsCollector
+}
+
+// FetcherOption は NewFetcher の任意設定を表す functional option。
+type FetcherOption func(*Fetcher)
+
+// WithMetrics は Fetcher にメトリクスコレクタを注入する。
+// 未指定時は metrics.NopCollector{} が既定値として使われ、記録呼び出しは no-op になる。
+func WithMetrics(c metrics.MetricsCollector) FetcherOption {
+	return func(f *Fetcher) {
+		f.metrics = c
+	}
 }
 
 // NewFetcher はFetcherの新しいインスタンスを生成する。
+// 既存の 7 引数 call site との後方互換のため、メトリクスコレクタは末尾の可変長
+// functional option（WithMetrics）として受け取る。opts 未指定時は no-op コレクタを既定値とする。
 func NewFetcher(
 	feedRepo repository.FeedRepository,
 	subRepo repository.SubscriptionRepository,
@@ -48,8 +63,9 @@ func NewFetcher(
 	logger *slog.Logger,
 	timeout time.Duration,
 	maxBodySize int64,
+	opts ...FetcherOption,
 ) *Fetcher {
-	return &Fetcher{
+	f := &Fetcher{
 		feedRepo:    feedRepo,
 		subRepo:     subRepo,
 		upsertSvc:   upsertSvc,
@@ -57,13 +73,23 @@ func NewFetcher(
 		logger:      logger,
 		timeout:     timeout,
 		maxBodySize: maxBodySize,
+		metrics:     metrics.NopCollector{},
 	}
+	for _, opt := range opts {
+		opt(f)
+	}
+	return f
 }
 
 // Fetch はフィードをフェッチし、結果に応じてフィード状態を更新する。
 // FeedFetcherServiceインターフェースを実装する。
 func (f *Fetcher) Fetch(ctx context.Context, feed *model.Feed) error {
 	start := time.Now()
+
+	// フェッチ完了時に所要時間をレイテンシメトリクスへ記録する（Requirement 2.5）。
+	defer func() {
+		f.metrics.RecordFetchLatency(time.Since(start))
+	}()
 
 	// SSRF検証
 	if err := f.ssrfGuard.ValidateURL(feed.FeedURL); err != nil {
@@ -72,6 +98,7 @@ func (f *Fetcher) Fetch(ctx context.Context, feed *model.Feed) error {
 			slog.String("feed_url", feed.FeedURL),
 			slog.String("error", err.Error()),
 		)
+		f.metrics.RecordFetchFailure(feed.ID, "ssrf_validation")
 		ApplyStopFeed(feed, fmt.Sprintf("SSRF検証失敗: %s", err.Error()))
 		if updateErr := f.feedRepo.UpdateFetchState(ctx, feed); updateErr != nil {
 			f.logger.Error("フィード状態の更新に失敗しました",
@@ -109,6 +136,7 @@ func (f *Fetcher) Fetch(ctx context.Context, feed *model.Feed) error {
 			slog.String("feed_url", feed.FeedURL),
 			slog.String("error", err.Error()),
 		)
+		f.metrics.RecordFetchFailure(feed.ID, "http_request")
 		ApplyBackoff(feed, fmt.Sprintf("HTTPリクエスト失敗: %s", err.Error()))
 		if updateErr := f.feedRepo.UpdateFetchState(ctx, feed); updateErr != nil {
 			f.logger.Error("フィード状態の更新に失敗しました",
@@ -121,6 +149,9 @@ func (f *Fetcher) Fetch(ctx context.Context, feed *model.Feed) error {
 	defer resp.Body.Close()
 
 	duration := time.Since(start)
+
+	// HTTPレスポンスを受信したのでステータスコード別のレスポンス数を記録する（Requirement 2.4）。
+	f.metrics.RecordHTTPStatus(resp.StatusCode)
 
 	// HTTPステータスに基づく処理分岐
 	result := ClassifyHTTPStatus(resp.StatusCode)
@@ -142,6 +173,8 @@ func (f *Fetcher) Fetch(ctx context.Context, feed *model.Feed) error {
 			)
 			interval = 60 // デフォルト60分
 		}
+		// 304 は「変更なしで取得成功」として扱い成功数を増加させる（Requirement 2.1）。
+		f.metrics.RecordFetchSuccess(feed.ID)
 		ApplySuccess(feed, interval)
 		return f.feedRepo.UpdateFetchState(ctx, feed)
 
@@ -154,6 +187,7 @@ func (f *Fetcher) Fetch(ctx context.Context, feed *model.Feed) error {
 			slog.Int("http_status", resp.StatusCode),
 			slog.String("reason", reason),
 		)
+		f.metrics.RecordFetchFailure(feed.ID, "http_stop")
 		ApplyStopFeed(feed, reason)
 		return f.feedRepo.UpdateFetchState(ctx, feed)
 
@@ -166,6 +200,7 @@ func (f *Fetcher) Fetch(ctx context.Context, feed *model.Feed) error {
 			slog.Int("http_status", resp.StatusCode),
 			slog.Int("consecutive_errors", feed.ConsecutiveErrors+1),
 		)
+		f.metrics.RecordFetchFailure(feed.ID, "http_backoff")
 		ApplyBackoff(feed, reason)
 		return f.feedRepo.UpdateFetchState(ctx, feed)
 
@@ -177,6 +212,7 @@ func (f *Fetcher) Fetch(ctx context.Context, feed *model.Feed) error {
 			slog.String("feed_id", feed.ID),
 			slog.Int("http_status", resp.StatusCode),
 		)
+		f.metrics.RecordFetchFailure(feed.ID, "http_unexpected")
 		ApplyBackoff(feed, fmt.Sprintf("予期しないHTTPステータス: %d", resp.StatusCode))
 		return f.feedRepo.UpdateFetchState(ctx, feed)
 	}
@@ -188,6 +224,7 @@ func (f *Fetcher) Fetch(ctx context.Context, feed *model.Feed) error {
 			slog.String("feed_id", feed.ID),
 			slog.String("error", err.Error()),
 		)
+		f.metrics.RecordFetchFailure(feed.ID, "body_read")
 		ApplyBackoff(feed, fmt.Sprintf("レスポンス読み取り失敗: %s", err.Error()))
 		return f.feedRepo.UpdateFetchState(ctx, feed)
 	}
@@ -209,6 +246,9 @@ func (f *Fetcher) Fetch(ctx context.Context, feed *model.Feed) error {
 			slog.String("feed_url", feed.FeedURL),
 			slog.String("error", err.Error()),
 		)
+		// パース失敗はパース失敗数とフェッチ失敗数の両方を記録する（Requirement 2.3, 2.2）。
+		f.metrics.RecordParseFailure(feed.ID)
+		f.metrics.RecordFetchFailure(feed.ID, "parse")
 		ApplyParseFailure(feed, err.Error())
 		if updateErr := f.feedRepo.UpdateFetchState(ctx, feed); updateErr != nil {
 			f.logger.Error("フィード状態の更新に失敗しました",
@@ -237,6 +277,7 @@ func (f *Fetcher) Fetch(ctx context.Context, feed *model.Feed) error {
 			slog.String("feed_id", feed.ID),
 			slog.String("error", err.Error()),
 		)
+		f.metrics.RecordFetchFailure(feed.ID, "upsert")
 		ApplyParseFailure(feed, fmt.Sprintf("記事UPSERT失敗: %s", err.Error()))
 		if updateErr := f.feedRepo.UpdateFetchState(ctx, feed); updateErr != nil {
 			f.logger.Error("フィード状態の更新に失敗しました",
@@ -265,8 +306,12 @@ func (f *Fetcher) Fetch(ctx context.Context, feed *model.Feed) error {
 			slog.String("feed_id", feed.ID),
 			slog.String("error", updateErr.Error()),
 		)
+		f.metrics.RecordFetchFailure(feed.ID, "update_state")
 		return updateErr
 	}
+
+	// 200 で UPSERT・状態更新まで成功したのでフェッチ成功数を増加させる（Requirement 2.1）。
+	f.metrics.RecordFetchSuccess(feed.ID)
 
 	f.logger.Info("フィードフェッチが完了しました",
 		slog.String("feed_id", feed.ID),

@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/hitoshi/feedman/internal/auth"
 	"github.com/hitoshi/feedman/internal/config"
 	"github.com/hitoshi/feedman/internal/database"
@@ -19,6 +21,7 @@ import (
 	"github.com/hitoshi/feedman/internal/hatebu"
 	"github.com/hitoshi/feedman/internal/item"
 	"github.com/hitoshi/feedman/internal/logger"
+	"github.com/hitoshi/feedman/internal/metrics"
 	"github.com/hitoshi/feedman/internal/middleware"
 	"github.com/hitoshi/feedman/internal/repository"
 	"github.com/hitoshi/feedman/internal/security"
@@ -150,6 +153,12 @@ func runServe(cfg *config.Config) error {
 	// シャットダウン時に Stop() を呼べるよう変数参照を保持する（goroutine リーク防止）。
 	rateLimiter := middleware.NewRateLimiter(rateLimiterCfg)
 
+	// serve 専用の Prometheus registry と Collector を生成する。
+	// serve プロセスにはフェッチ系の記録経路が無いため初期値（0）の公開となるが、
+	// /metrics 自体は信頼 CIDR 制限付きで公開する（Requirement 1.1, 5.1）。
+	serveRegistry := prometheus.NewRegistry()
+	_ = metrics.NewCollector(serveRegistry)
+
 	deps := &handler.RouterDeps{
 		HealthChecker:     db,
 		SessionFinder:     sessionRepo,
@@ -157,6 +166,9 @@ func runServe(cfg *config.Config) error {
 		RateLimiter:       rateLimiter,
 		HSTSEnabled:       cfg.HSTSEnabled,
 		Logger:            slog.Default(),
+
+		MetricsHandler:    metrics.SetupMetricsRoute(serveRegistry),
+		MetricsMiddleware: middleware.NewTrustedCIDRMiddleware(cfg.TrustedCIDRs),
 
 		AuthService: authService,
 		AuthConfig: handler.AuthHandlerConfig{
@@ -243,22 +255,29 @@ func runWorker(cfg *config.Config) error {
 	ssrfGuard := security.NewSSRFGuard()
 	sanitizer := security.NewContentSanitizer()
 
-	// 4. フェッチャーの初期化
-	upsertSvc := item.NewItemUpsertService(itemRepo, sanitizer)
+	// 4. worker 専用の registry と Collector を生成し、各レイヤへ注入する。
+	// フェッチ／UPSERT は worker プロセスで実行されるため、フェッチ系メトリクスは
+	// この registry に蓄積され、後述の metrics listener 経由でスクレイプ可能になる（Requirement 3.1）。
+	workerRegistry := prometheus.NewRegistry()
+	collector := metrics.NewCollector(workerRegistry)
+
+	// 5. フェッチャーの初期化（WithMetrics で Collector を注入）
+	upsertSvc := item.NewItemUpsertService(itemRepo, sanitizer, item.WithMetrics(collector))
 	fetcher := fetchpkg.NewFetcher(
 		feedRepo, subRepo, upsertSvc, ssrfGuard,
 		slog.Default(), cfg.FetchTimeout, cfg.FetchMaxSize,
+		fetchpkg.WithMetrics(collector),
 	)
 
-	// 5. スケジューラの起動
+	// 6. スケジューラの起動
 	scheduler := fetchpkg.NewScheduler(
 		feedRepo, fetcher, slog.Default(), cfg.FetchMaxConcurrent,
 	)
 
-	// 6. クリーンアップジョブの初期化
+	// 7. クリーンアップジョブの初期化
 	cleanupJob := cleanup.NewCleanupJob(db, slog.Default())
 
-	// 7. はてなブックマークバッチジョブの初期化
+	// 8. はてなブックマークバッチジョブの初期化
 	hatebuClient := hatebu.NewClient(
 		&http.Client{Timeout: 10 * time.Second},
 		slog.Default(),
@@ -287,6 +306,11 @@ func runWorker(cfg *config.Config) error {
 		slog.Duration("fetch_interval", cfg.FetchInterval),
 		slog.Int("max_concurrent", cfg.FetchMaxConcurrent),
 	)
+
+	// worker 専用の metrics listener を起動する（信頼 CIDR 制限付き）。
+	// worker は HTTP ルーターを持たないため独立 listener で /metrics を公開し、
+	// ctx キャンセルで graceful stop する（Requirement 1.2, 3.1, 3.2, 3.3）。
+	startWorkerMetricsListener(ctx, ":"+cfg.MetricsPort, workerRegistry, cfg.TrustedCIDRs)
 
 	// はてなブックマークバッチジョブをバックグラウンドで起動
 	go hatebuBatch.Start(ctx)

@@ -51,6 +51,14 @@ type RouterDeps struct {
 	// nil の場合は slog.Default() にフォールバックする（後方互換）。
 	Logger *slog.Logger
 
+	// メトリクス（任意）
+	// MetricsHandler が非 nil のときのみ認証不要グループに /metrics を登録する。
+	// nil の場合は登録せず、既存ルーティングを完全に不変に保つ（後方互換）。
+	MetricsHandler http.Handler
+	// MetricsMiddleware は /metrics の前段に重ねるミドルウェア（信頼 CIDR 制限など）。
+	// nil の場合は素通し（制限なし）として扱う。MetricsHandler が nil のときは参照しない。
+	MetricsMiddleware func(http.Handler) http.Handler
+
 	// 認証
 	AuthService AuthServiceInterface
 	AuthConfig  AuthHandlerConfig
@@ -136,6 +144,18 @@ func NewRouter(deps *RouterDeps) http.Handler {
 			r.Post("/logout", authHandler.Logout)
 			r.Get("/me", authHandler.Me)
 		})
+
+		// メトリクス公開エンドポイント（任意）。
+		// MetricsHandler が非 nil のときのみ登録し、前段に MetricsMiddleware（信頼 CIDR 制限）を
+		// 重ねる。MetricsHandler が nil の場合は登録せず既存ルーティングを完全に不変に保つ（後方互換）。
+		if deps.MetricsHandler != nil {
+			mw := deps.MetricsMiddleware
+			if mw == nil {
+				// ミドルウェア未指定時は素通しとして扱い、chi の With(nil) panic を避ける。
+				mw = func(next http.Handler) http.Handler { return next }
+			}
+			r.With(mw).Handle("/metrics", deps.MetricsHandler)
+		}
 	})
 
 	// --- 認証が必要なルート ---

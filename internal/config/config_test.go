@@ -167,6 +167,147 @@ func TestLoad_DefaultValues(t *testing.T) {
 	if cfg.HSTSEnabled != false {
 		t.Errorf("HSTSEnabled = %v, want %v (default)", cfg.HSTSEnabled, false)
 	}
+
+	// Metrics defaults: 未設定時 MetricsPort は "9090"、TrustedCIDRs は空。
+	if cfg.MetricsPort != "9090" {
+		t.Errorf("MetricsPort = %q, want %q", cfg.MetricsPort, "9090")
+	}
+	if len(cfg.TrustedCIDRs) != 0 {
+		t.Errorf("TrustedCIDRs = %v, want empty (default)", cfg.TrustedCIDRs)
+	}
+}
+
+// TestLoad_MetricsTrustedCIDRs は METRICS_TRUSTED_CIDRS のカンマ区切りパースを検証する。
+// Requirement 4.1（信頼 CIDR の設定）/ NFR 2.1（未設定時は空のまま保持し検証はミドルウェアに委譲）に対応。
+func TestLoad_MetricsTrustedCIDRs(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+		want []string
+	}{
+		{
+			name: "単一CIDRのとき1要素のスライスになる",
+			env:  "10.0.0.0/8",
+			want: []string{"10.0.0.0/8"},
+		},
+		{
+			name: "複数CIDRのとき要素ごとに分割される",
+			env:  "10.0.0.0/8,192.168.0.0/16",
+			want: []string{"10.0.0.0/8", "192.168.0.0/16"},
+		},
+		{
+			name: "要素前後に空白があるときトリムされる",
+			env:  " 10.0.0.0/8 , 192.168.0.0/16 ",
+			want: []string{"10.0.0.0/8", "192.168.0.0/16"},
+		},
+		{
+			name: "空要素が含まれるとき除外される",
+			env:  "10.0.0.0/8,,192.168.0.0/16,",
+			want: []string{"10.0.0.0/8", "192.168.0.0/16"},
+		},
+		{
+			name: "不正なCIDR文字列でもパース段階では除外せず保持する",
+			env:  "not-a-cidr,10.0.0.0/8",
+			want: []string{"not-a-cidr", "10.0.0.0/8"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			setRequiredEnvVars(t)
+			t.Setenv("METRICS_TRUSTED_CIDRS", tc.env)
+
+			// Act
+			cfg, err := Load()
+
+			// Assert
+			if err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+			if len(cfg.TrustedCIDRs) != len(tc.want) {
+				t.Fatalf("TrustedCIDRs length = %d (%v), want %d (%v)",
+					len(cfg.TrustedCIDRs), cfg.TrustedCIDRs, len(tc.want), tc.want)
+			}
+			for i, w := range tc.want {
+				if cfg.TrustedCIDRs[i] != w {
+					t.Errorf("TrustedCIDRs[%d] = %q, want %q", i, cfg.TrustedCIDRs[i], w)
+				}
+			}
+		})
+	}
+
+	t.Run("未設定（空文字）のとき空スライスを保持する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("METRICS_TRUSTED_CIDRS", "")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if len(cfg.TrustedCIDRs) != 0 {
+			t.Errorf("TrustedCIDRs = %v, want empty", cfg.TrustedCIDRs)
+		}
+	})
+
+	t.Run("空白のみのとき空スライスを保持する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("METRICS_TRUSTED_CIDRS", "   ")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if len(cfg.TrustedCIDRs) != 0 {
+			t.Errorf("TrustedCIDRs = %v, want empty", cfg.TrustedCIDRs)
+		}
+	})
+}
+
+// TestLoad_MetricsPort は METRICS_PORT の読み込みと既定値を検証する。
+// Requirement 4.1 に対応。
+func TestLoad_MetricsPort(t *testing.T) {
+	t.Run("METRICS_PORTが設定されているとき値を採用する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("METRICS_PORT", "9999")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if cfg.MetricsPort != "9999" {
+			t.Errorf("MetricsPort = %q, want %q", cfg.MetricsPort, "9999")
+		}
+	})
+
+	t.Run("METRICS_PORTが未設定のとき既定値9090を採用する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("METRICS_PORT", "")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if cfg.MetricsPort != "9090" {
+			t.Errorf("MetricsPort = %q, want %q (default)", cfg.MetricsPort, "9090")
+		}
+	})
 }
 
 // TestLoad_HSTSEnabled は HSTS_ENABLED 環境変数の読み込みを検証する。
