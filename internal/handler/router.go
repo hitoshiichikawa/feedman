@@ -43,6 +43,11 @@ type RouterDeps struct {
 	CORSAllowedOrigin string
 	RateLimiter       *middleware.RateLimiter
 
+	// UnauthIPRateLimiter は未認証エンドポイント（/auth/google/login・
+	// /auth/google/callback・/health）に適用する IP 単位レート制限。
+	// nil の場合は IP レート制限を適用せず、既存ルーティングを完全に不変に保つ（後方互換）。
+	UnauthIPRateLimiter *middleware.IPRateLimiter
+
 	// HSTSEnabled は HSTS（Strict-Transport-Security）ヘッダーの出力可否。
 	// false（既定）の場合は HTTPS 配信でも HSTS を付与しない。
 	HSTSEnabled bool
@@ -83,6 +88,9 @@ type RouterDeps struct {
 // ミドルウェアスタックの実行順序:
 //   - 全ルート共通（最上位）: Recovery → SecurityHeaders → CORS
 //   - 認証不要ルート（/health, /auth/*）: 上記共通 → Logging
+//   - うち /health・/auth/google/login・/auth/google/callback の 3 ルートのみ
+//     Logging の内側に IP 単位レート制限（UnauthIPRateLimiter）を重ねる。
+//     /auth/logout・/auth/me には適用しない（セッションを持つため）。
 //   - 認証必須ルート（/api/*）: 上記共通 → Session → RateLimit(General) → Logging
 //
 // Logging を Session の内側（後ろ）に置くことで、認証済みリクエストの user_id を
@@ -115,32 +123,45 @@ func NewRouter(deps *RouterDeps) http.Handler {
 	subHandler := NewSubscriptionHandler(deps.SubscriptionService)
 	userHandler := NewUserHandler(deps.UserService)
 
+	// 未認証エンドポイント向け IP 単位レート制限ミドルウェア。
+	// UnauthIPRateLimiter が nil の場合は素通し（制限なし）として扱い、既存ルーティングを
+	// 完全に不変に保つ（後方互換）。login・callback・health の 3 ルートにのみ適用し、
+	// セッションを持つ logout・me には適用しない（Requirement 1, 4）。
+	unauthIPMW := func(next http.Handler) http.Handler { return next }
+	if deps.UnauthIPRateLimiter != nil {
+		unauthIPMW = deps.UnauthIPRateLimiter.Middleware()
+	}
+
+	healthHandler := func(w http.ResponseWriter, r *http.Request) {
+		status := "ok"
+		httpStatus := http.StatusOK
+
+		if deps.HealthChecker != nil {
+			if err := deps.HealthChecker.PingContext(r.Context()); err != nil {
+				status = "unhealthy"
+				httpStatus = http.StatusServiceUnavailable
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(httpStatus)
+		json.NewEncoder(w).Encode(map[string]string{"status": status})
+	}
+
 	// --- 認証不要のルート ---
 	// アクセスログのみ適用（Session を通らないため user_id は付与されない）。
 	r.Group(func(r chi.Router) {
 		r.Use(logging)
 
-		// ヘルスチェック
-		r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-			status := "ok"
-			httpStatus := http.StatusOK
-
-			if deps.HealthChecker != nil {
-				if err := deps.HealthChecker.PingContext(r.Context()); err != nil {
-					status = "unhealthy"
-					httpStatus = http.StatusServiceUnavailable
-				}
-			}
-
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(httpStatus)
-			json.NewEncoder(w).Encode(map[string]string{"status": status})
-		})
+		// ヘルスチェック（IP 単位レート制限を適用）
+		r.With(unauthIPMW).Get("/health", healthHandler)
 
 		// 認証ルート（OAuthフロー）
 		r.Route("/auth", func(r chi.Router) {
-			r.Get("/google/login", authHandler.Login)
-			r.Get("/google/callback", authHandler.Callback)
+			// OAuth フローの入口は IP 単位レート制限を適用する（OAuth フラッディング対策）。
+			r.With(unauthIPMW).Get("/google/login", authHandler.Login)
+			r.With(unauthIPMW).Get("/google/callback", authHandler.Callback)
+			// logout・me はセッションを持つ実質認証エンドポイントのため IP 制限の対象外。
 			r.Post("/logout", authHandler.Logout)
 			r.Get("/me", authHandler.Me)
 		})

@@ -18,17 +18,19 @@ import (
 // 経路が重複して起動され得る状況でも panic を発生させない（RateLimiter 本体の公開
 // シグネチャ・挙動は変更しない方針）。
 type shutdownCoordinator struct {
-	server      *http.Server
-	rateLimiter *middleware.RateLimiter
-	stopOnce    sync.Once
+	server              *http.Server
+	rateLimiter         *middleware.RateLimiter
+	unauthIPRateLimiter *middleware.IPRateLimiter
+	stopOnce            sync.Once
 }
 
 // newShutdownCoordinator はシャットダウン手続きを束ねる coordinator を生成する。
-// rateLimiter が nil の場合は RateLimiter の停止処理を行わない。
-func newShutdownCoordinator(server *http.Server, rateLimiter *middleware.RateLimiter) *shutdownCoordinator {
+// rateLimiter / unauthIPRateLimiter が nil の場合は当該リミッターの停止処理を行わない。
+func newShutdownCoordinator(server *http.Server, rateLimiter *middleware.RateLimiter, unauthIPRateLimiter *middleware.IPRateLimiter) *shutdownCoordinator {
 	return &shutdownCoordinator{
-		server:      server,
-		rateLimiter: rateLimiter,
+		server:              server,
+		rateLimiter:         rateLimiter,
+		unauthIPRateLimiter: unauthIPRateLimiter,
 	}
 }
 
@@ -52,12 +54,16 @@ func (sc *shutdownCoordinator) shutdown(ctx context.Context) error {
 	return nil
 }
 
-// stopRateLimiter は RateLimiter の停止処理を高々 1 回だけ実行する。
+// stopRateLimiter は RateLimiter / IPRateLimiter の停止処理を高々 1 回だけ実行する。
+// いずれも内部で stopCh を close するため、複数回呼び出すと panic する。sync.Once で
+// 高々 1 回だけ実行することを保証する。nil のリミッターは停止対象から除外する。
 func (sc *shutdownCoordinator) stopRateLimiter() {
-	if sc.rateLimiter == nil {
-		return
-	}
 	sc.stopOnce.Do(func() {
-		sc.rateLimiter.Stop()
+		if sc.rateLimiter != nil {
+			sc.rateLimiter.Stop()
+		}
+		if sc.unauthIPRateLimiter != nil {
+			sc.unauthIPRateLimiter.Stop()
+		}
 	})
 }
