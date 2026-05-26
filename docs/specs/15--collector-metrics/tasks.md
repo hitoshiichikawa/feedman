@@ -26,7 +26,7 @@
   - _Boundary: TrustedCIDRMiddleware_
 
 - [ ] 3. フェッチャー層へのメトリクス記録の組み込み
-- [ ] 3.1 Fetcher に WithMetrics option とメトリクス記録を追加する
+- [x] 3.1 Fetcher に WithMetrics option とメトリクス記録を追加する
   - `internal/worker/fetch/fetcher.go` の `Fetcher` に `metrics metrics.MetricsCollector` フィールドを追加
   - `FetcherOption` 型と `WithMetrics(c)` を定義し、`NewFetcher(...)` の末尾に `opts ...FetcherOption` を追加（既存 7 引数 call site は不変）
   - option 未指定時は `NopCollector{}` を既定値にする（nil 安全）
