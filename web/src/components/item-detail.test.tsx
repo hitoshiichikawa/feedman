@@ -243,4 +243,70 @@ describe("ItemDetail コンポーネント", () => {
 
     expect(screen.getByText("テスト著者")).toBeInTheDocument();
   });
+
+  // Req 1.1 / 2.1: 危険な要素を含む記事本文はサニタイズ後の結果が描画されること
+  it("記事本文にscript要素が含まれるときサニタイズされて描画されること", () => {
+    const dangerousItem: ItemDetailType = {
+      ...mockItem,
+      content:
+        "<p>安全な本文</p><script>window.__xss = true;</script>",
+    };
+
+    render(
+      <ItemDetail
+        item={dangerousItem}
+        onMarkAsRead={() => {}}
+        onToggleStar={() => {}}
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    const contentArea = screen.getByTestId("item-content");
+    // 許可タグは保持される
+    expect(contentArea.innerHTML).toContain("安全な本文");
+    // script 要素は除去される
+    expect(contentArea.innerHTML).not.toContain("<script");
+    expect(contentArea.innerHTML).not.toContain("window.__xss");
+  });
+
+  // Req 1.1 / 2.3: on* インラインイベントハンドラ属性が除去されること
+  it("記事本文にonerror属性が含まれるときサニタイズされて描画されること", () => {
+    const dangerousItem: ItemDetailType = {
+      ...mockItem,
+      content:
+        '<img src="https://example.com/a.png" alt="画像" onerror="window.__xss = true;">',
+    };
+
+    render(
+      <ItemDetail
+        item={dangerousItem}
+        onMarkAsRead={() => {}}
+        onToggleStar={() => {}}
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    const contentArea = screen.getByTestId("item-content");
+    expect(contentArea.innerHTML).not.toContain("onerror");
+    // 許可された画像属性は保持される
+    expect(contentArea.innerHTML).toContain("https://example.com/a.png");
+  });
+
+  // Req 1.3: 空文字列の記事本文は空のコンテンツ領域を表示すること
+  it("記事本文が空文字列のとき空のコンテンツ領域を表示すること", () => {
+    const emptyItem: ItemDetailType = { ...mockItem, content: "" };
+
+    render(
+      <ItemDetail
+        item={emptyItem}
+        onMarkAsRead={() => {}}
+        onToggleStar={() => {}}
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    const contentArea = screen.getByTestId("item-content");
+    expect(contentArea).toBeInTheDocument();
+    expect(contentArea.innerHTML).toBe("");
+  });
 });
