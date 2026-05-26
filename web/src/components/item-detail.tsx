@@ -53,7 +53,16 @@ export function ItemDetail({
     <div className="border-t bg-background px-4 py-4 space-y-4">
       {/* ヘッダー: タイトル + メタ情報 */}
       <div className="space-y-2">
-        <h3 className="text-lg font-semibold leading-tight">{item.title}</h3>
+        <h3 className="text-lg font-semibold leading-tight">
+          <a
+            href={item.link}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hover:underline"
+          >
+            {item.title}
+          </a>
+        </h3>
         {item.author && (
           <p className="text-sm text-muted-foreground">{item.author}</p>
         )}
