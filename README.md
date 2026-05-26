@@ -121,6 +121,7 @@ vi .env.production
 | `BASE_URL` | api | ブラウザ可視オリジン（例: `https://<host>`）。callback 後のリダイレクト先・Cookie の Secure 自動判定に利用 |
 | `API_INTERNAL_URL` | web | 内部 API 接続先（例: `http://api:8080`）。**実行時**に web が rewrites の転送先として参照。ブラウザ非公開。未設定なら web は起動時に fail-fast |
 | `POSTGRES_PASSWORD` | db | PostgreSQL パスワード（本番では必ずデフォルトから変更） |
+| `DATABASE_URL` | api / worker | DB 接続 URL。未設定ならコンテナ内 DB（`db` ホスト, `sslmode=disable`）向けデフォルトが適用される。**外部 PostgreSQL 接続時は `sslmode` に `require` 以上を明示すること**（[本番デプロイ時の注意事項](#本番デプロイ時の注意事項)参照） |
 | `CORS_ALLOWED_ORIGIN` | api | CORS 許可オリジン（単一オリジン化で CORS プリフライトは発生しなくなるが、設定撤去は #23 の領分のため残置） |
 
 > **`NEXT_PUBLIC_API_URL` は廃止しました。** 単一オリジン化によりブラウザは常に同一オリジンの
@@ -180,6 +181,17 @@ docker compose --env-file .env.production exec api /feedman migrate
   `web`（:3000）へルーティング**する。`api`（:8080）はブラウザに公開せず内部ネットワークに留める
 - PostgreSQL のパスワードをデフォルト（`feedman`）から変更する
 - DB ポートはデフォルトで非公開。開発時に直接接続が必要な場合のみ `DB_PORT=5432` を設定する
+- **DB 接続の TLS（`sslmode`）設定**:
+  - コンテナ内 DB（`db` ホスト）を利用する場合のみ `sslmode=disable` が許容される（コンテナ間の
+    `internal` ネットワークは外部公開されず、PostgreSQL コンテナも TLS 無効構成のため）
+  - **外部 PostgreSQL へ接続する場合は `DATABASE_URL` の `sslmode` に `require` 以上
+    （`require` / `verify-ca` / `verify-full`）を必須とする**。`sslmode=disable` のまま外部 DB へ
+    接続すると平文通信となり、DB 認証情報・ユーザーデータが中間者攻撃（MITM）で漏洩する導線になる
+  - 接続先に応じて `DATABASE_URL` を環境別に差し替える。外部 DB の例:
+    `DATABASE_URL=postgres://<user>:<password>@<external-host>:5432/<dbname>?sslmode=require`
+  - `.env.sample` の `DATABASE_URL` はデフォルトでコメントアウトしてあり、未設定時は
+    docker-compose がコンテナ内 DB 向けデフォルト（`sslmode=disable`）を適用する。外部 DB を
+    使う場合は `.env.production` で `DATABASE_URL` を `require` 以上の `sslmode` 付きで明示すること
 
 ## ネットワークセキュリティ
 
@@ -322,6 +334,9 @@ npm test
 
 ```bash
 # PostgreSQL を別途起動し、DATABASE_URL を設定
+# ローカル PostgreSQL（localhost, TLS 無効）への接続のみ sslmode=disable を許容する。
+# 外部 PostgreSQL へ接続する場合は sslmode に require 以上（require / verify-ca / verify-full）を
+# 明示すること（平文通信防止）。
 export DATABASE_URL=postgres://feedman:feedman@localhost:5432/feedman?sslmode=disable
 export GOOGLE_CLIENT_ID=...
 export GOOGLE_CLIENT_SECRET=...
