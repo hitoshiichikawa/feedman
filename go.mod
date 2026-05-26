@@ -1,6 +1,7 @@
 module github.com/hitoshi/feedman
 
-go 1.25
+go 1.25.0
+toolchain go1.25.10
 
 require (
 	github.com/go-chi/chi/v5 v5.2.5
@@ -15,7 +16,7 @@ require (
 	github.com/microcosm-cc/bluemonday v1.0.27
 	github.com/mmcdole/gofeed v1.3.0
 	github.com/prometheus/client_golang v1.23.2
-	golang.org/x/net v0.47.0
+	golang.org/x/net v0.55.0
 )
 
 require (
@@ -35,7 +36,7 @@ require (
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
-	golang.org/x/sys v0.38.0 // indirect
-	golang.org/x/text v0.31.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
 )
