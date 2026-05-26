@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/hitoshi/feedman/internal/model"
@@ -19,11 +20,20 @@ type mockFeedRepo struct {
 	feedByURL   map[string]*model.Feed
 	createCalls int
 	updateCalls int
+	// mu は faviconCall への並行アクセス（バックグラウンドgoroutineからの書き込み）を保護する。
+	mu          sync.Mutex
 	faviconCall struct {
 		feedID      string
 		faviconData []byte
 		faviconMime string
 	}
+}
+
+// getFaviconCall は faviconCall をロック越しに読み出すテスト用ヘルパー。
+func (m *mockFeedRepo) getFaviconCall() (feedID string, data []byte, mime string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.faviconCall.feedID, m.faviconCall.faviconData, m.faviconCall.faviconMime
 }
 
 func newMockFeedRepo() *mockFeedRepo {
@@ -64,13 +74,16 @@ func (m *mockFeedRepo) Update(_ context.Context, feed *model.Feed) error {
 }
 
 func (m *mockFeedRepo) UpdateFavicon(_ context.Context, feedID string, data []byte, mime string) error {
+	// favicon取得はバックグラウンドgoroutineから呼ばれるため、faviconCall への記録は
+	// mu で保護する（テストは svc.waitFaviconFetch() 後にロック越しで参照する）。
+	// 返却済み feed ポインタ（m.feeds[feedID]）への書き戻しは行わない。本番の
+	// fetchAndSaveFavicon が返却済みポインタへ書き戻さなくなったため、それに合わせて
+	// 共有ポインタへの並行書き込み（データ競合）を避ける。
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.faviconCall.feedID = feedID
 	m.faviconCall.faviconData = data
 	m.faviconCall.faviconMime = mime
-	if f, ok := m.feeds[feedID]; ok {
-		f.FaviconData = data
-		f.FaviconMime = mime
-	}
 	return nil
 }
 
@@ -364,9 +377,17 @@ func TestFeedService_RegisterFeed_FaviconFetchFailure(t *testing.T) {
 	if feed == nil {
 		t.Fatal("expected non-nil feed")
 	}
+
+	// favicon取得はバックグラウンドで非同期に実行されるため、完了を待ってから検証する。
+	svc.waitFaviconFetch()
+
 	// favicon取得失敗時はnullとして保存される
 	if feed.FaviconData != nil {
 		t.Error("favicon取得失敗時はfavicon_dataがnilであるべき")
+	}
+	// DB（UpdateFavicon）が呼ばれていないこと（null保持）。
+	if gotFeedID, _, _ := feedRepo.getFaviconCall(); gotFeedID != "" {
+		t.Errorf("favicon未取得時はUpdateFaviconが呼ばれるべきでない。feedID = %q", gotFeedID)
 	}
 }
 
@@ -387,12 +408,16 @@ func TestFeedService_RegisterFeed_FaviconSavedOnSuccess(t *testing.T) {
 		t.Fatalf("RegisterFeed returned error: %v", err)
 	}
 
+	// favicon取得はバックグラウンドで非同期に実行されるため、完了を待ってから検証する。
+	svc.waitFaviconFetch()
+
 	// faviconデータが保存されていることを確認
-	if feedRepo.faviconCall.feedID != feed.ID {
-		t.Errorf("UpdateFaviconのfeedID = %q, want %q", feedRepo.faviconCall.feedID, feed.ID)
+	gotFeedID, _, gotMime := feedRepo.getFaviconCall()
+	if gotFeedID != feed.ID {
+		t.Errorf("UpdateFaviconのfeedID = %q, want %q", gotFeedID, feed.ID)
 	}
-	if feedRepo.faviconCall.faviconMime != "image/png" {
-		t.Errorf("faviconMime = %q, want %q", feedRepo.faviconCall.faviconMime, "image/png")
+	if gotMime != "image/png" {
+		t.Errorf("faviconMime = %q, want %q", gotMime, "image/png")
 	}
 }
 
@@ -642,6 +667,10 @@ func TestFeedService_RegisterFeed_Integration_WithHTTPServer(t *testing.T) {
 	if feed.FeedURL != server.URL+"/feed.xml" {
 		t.Errorf("feed.FeedURL = %q, want %q", feed.FeedURL, server.URL+"/feed.xml")
 	}
+
+	// バックグラウンドの favicon 取得 goroutine がテストサーバーを参照し続けないよう、
+	// 完了を待ってからテストを終える（defer server.Close() より前に完了させる）。
+	svc.waitFaviconFetch()
 }
 
 // feedDetectorAdapter はFeedDetectorをDetectorインターフェースに適合させるアダプター。
@@ -710,4 +739,3 @@ func TestFeedService_RegisterFeed_SubscriptionLimitExact100(t *testing.T) {
 		t.Errorf("エラーコード = %q, want %q", apiErr.Code, model.ErrCodeSubscriptionLimit)
 	}
 }
-
