@@ -163,6 +163,11 @@ docker compose --env-file .env.production exec api /feedman migrate
 - フィード登録ダイアログで RSS/Atom フィードの URL を入力
 - ワーカーが 5 分間隔でフィードをフェッチし、記事が表示される
 
+### 6. DB バックアップ・リストア
+
+本番運用では DB のバックアップ取得・リストア手順を整備しておくこと。手順・運用方針・トラブルシュートは
+[`docs/operations/backup-restore.md`](docs/operations/backup-restore.md) を参照。
+
 ## 本番デプロイ時の注意事項
 
 - `.env.sample` を `.env.production` にコピーし、本番用の値を設定する
