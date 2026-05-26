@@ -48,7 +48,7 @@
   - _Boundary: ItemUpsertService_
 
 - [ ] 5. serve プロセスへの /metrics 条件登録
-- [ ] 5.1 RouterDeps に MetricsHandler/MetricsMiddleware を追加し /metrics を条件登録する
+- [x] 5.1 RouterDeps に MetricsHandler/MetricsMiddleware を追加し /metrics を条件登録する
   - `internal/handler/router.go` の `RouterDeps` に `MetricsHandler http.Handler`（nil 可）と `MetricsMiddleware func(http.Handler) http.Handler`（nil 可）を追加
   - `MetricsHandler` が非 nil のとき、認証不要グループに `r.With(deps.MetricsMiddleware).Handle("/metrics", deps.MetricsHandler)` を登録
   - `MetricsHandler` が nil の場合は登録せず既存ルーティングを完全に不変に保つ（後方互換）
