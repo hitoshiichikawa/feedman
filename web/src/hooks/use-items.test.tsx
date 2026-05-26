@@ -1,8 +1,8 @@
 import { renderHook, waitFor, act } from "@testing-library/react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useItems } from "./use-items";
-import type { ItemListResponse } from "@/types/item";
+import { useItems, useItemDetail } from "./use-items";
+import type { ItemDetail, ItemListResponse } from "@/types/item";
 import type { ReactNode } from "react";
 
 // グローバルfetchのモック
@@ -219,6 +219,97 @@ describe("useItems", () => {
     });
 
     const { result } = renderHook(() => useItems("feed-1", "all"), {
+      wrapper: createWrapper(),
+    });
+
+    await waitFor(() => {
+      expect(result.current.isError).toBe(true);
+    });
+  });
+});
+
+/** テスト用の記事詳細レスポンス */
+const mockItemDetail: ItemDetail = {
+  id: "item-1",
+  feed_id: "feed-1",
+  title: "詳細記事タイトル",
+  link: "https://example.com/article-1",
+  published_at: "2026-02-27T10:00:00Z",
+  is_date_estimated: false,
+  is_read: false,
+  is_starred: false,
+  hatebu_count: 10,
+  hatebu_fetched_at: "2026-02-27T09:00:00Z",
+  content: "<p>記事本文</p>",
+  summary: "記事の要約",
+  author: "著者名",
+};
+
+describe("useItemDetail", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("itemIdが指定された場合に記事詳細を取得できること", async () => {
+    setupMockFetch((url: string) => {
+      if (url === "/api/items/item-1") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => mockItemDetail,
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({}),
+      });
+    });
+
+    const { result } = renderHook(() => useItemDetail("item-1"), {
+      wrapper: createWrapper(),
+    });
+
+    await waitFor(() => {
+      expect(result.current.isSuccess).toBe(true);
+    });
+
+    expect(result.current.data?.title).toBe("詳細記事タイトル");
+    expect(result.current.data?.content).toBe("<p>記事本文</p>");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/items/item-1",
+      expect.any(Object)
+    );
+  });
+
+  it("itemIdがnullの場合はクエリを無効化しfetchしないこと", () => {
+    setupMockFetch(() =>
+      Promise.resolve({ ok: true, json: async () => ({}) })
+    );
+
+    const { result } = renderHook(() => useItemDetail(null), {
+      wrapper: createWrapper(),
+    });
+
+    // クエリが無効化されているため、fetchは呼ばれず取得も行われない
+    expect(result.current.isFetching).toBe(false);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("APIエラー時はエラー状態になること", async () => {
+    setupMockFetch((url: string) => {
+      if (url === "/api/items/item-1") {
+        return Promise.resolve({
+          ok: false,
+          status: 500,
+          json: async () => ({ message: "Internal Server Error" }),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({}),
+      });
+    });
+
+    const { result } = renderHook(() => useItemDetail("item-1"), {
       wrapper: createWrapper(),
     });
 
