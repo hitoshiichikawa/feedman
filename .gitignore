@@ -1,5 +1,8 @@
 # Binaries
-feedman
+# ビルド成果物バイナリのみを対象とする（リポジトリルートに出力される /feedman）。
+# 先頭スラッシュを付けないと cmd/feedman/ ディレクトリにもマッチし、
+# エントリポイントのソースがコミットできなくなるため /feedman と限定する。
+/feedman
 *.exe
 *.dll
 *.so
