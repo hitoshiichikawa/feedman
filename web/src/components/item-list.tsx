@@ -4,8 +4,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Star } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useItems } from "@/hooks/use-items";
-import type { ItemFilter, ItemSummary } from "@/types/item";
+import { useItems, useItemDetail } from "@/hooks/use-items";
+import { useMarkAsRead, useToggleStar } from "@/hooks/use-item-state";
+import { ItemDetail } from "@/components/item-detail";
+import type {
+  ItemDetail as ItemDetailType,
+  ItemFilter,
+  ItemSummary,
+} from "@/types/item";
 
 /** ItemList コンポーネントのプロパティ */
 interface ItemListProps {
@@ -35,6 +41,31 @@ export function ItemList({ feedId, onSelectItem, expandedItemId }: ItemListProps
     fetchNextPage,
     isFetchingNextPage,
   } = useItems(feedId, filter);
+
+  // 展開中の記事詳細（本文を含む）を取得する。expandedItemId が null の間は無効化される。
+  const {
+    data: detail,
+    isLoading: isDetailLoading,
+    isError: isDetailError,
+  } = useItemDetail(expandedItemId);
+
+  // 記事詳細から既読化・スター切替を行うための mutation を配線する。
+  const markAsRead = useMarkAsRead();
+  const toggleStar = useToggleStar();
+
+  const handleMarkAsRead = useCallback(
+    (itemId: string) => {
+      markAsRead.mutate(itemId);
+    },
+    [markAsRead]
+  );
+
+  const handleToggleStar = useCallback(
+    (itemId: string, isStarred: boolean) => {
+      toggleStar.mutate({ itemId, isStarred });
+    },
+    [toggleStar]
+  );
 
   // フィード切替時にフィルタをリセット
   useEffect(() => {
@@ -119,14 +150,29 @@ export function ItemList({ feedId, onSelectItem, expandedItemId }: ItemListProps
           </div>
         ) : (
           <div className="flex flex-col">
-            {allItems.map((item) => (
-              <ItemRow
-                key={item.id}
-                item={item}
-                isExpanded={item.id === expandedItemId}
-                onClick={() => onSelectItem(item.id)}
-              />
-            ))}
+            {allItems.map((item) => {
+              const isExpanded = item.id === expandedItemId;
+              return (
+                <div key={item.id} className="flex flex-col">
+                  <ItemRow
+                    item={item}
+                    isExpanded={isExpanded}
+                    onClick={() => onSelectItem(item.id)}
+                  />
+                  {/* 選択記事行の直下に記事詳細を展開する（button の外側に兄弟要素として描画） */}
+                  {isExpanded && (
+                    <ItemDetailArea
+                      isLoading={isDetailLoading}
+                      isError={isDetailError}
+                      detail={detail ?? null}
+                      detailItemId={expandedItemId}
+                      onMarkAsRead={handleMarkAsRead}
+                      onToggleStar={handleToggleStar}
+                    />
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -141,6 +187,71 @@ export function ItemList({ feedId, onSelectItem, expandedItemId }: ItemListProps
         )}
       </div>
     </div>
+  );
+}
+
+/** ItemDetailArea コンポーネントのプロパティ */
+interface ItemDetailAreaProps {
+  /** 記事詳細の取得中フラグ */
+  isLoading: boolean;
+  /** 記事詳細の取得失敗フラグ */
+  isError: boolean;
+  /** 取得済みの記事詳細データ（未取得時は null） */
+  detail: ItemDetailType | null;
+  /** 現在展開中の記事ID（取得結果と一致するか判定するため） */
+  detailItemId: string | null;
+  /** 既読化コールバック */
+  onMarkAsRead: (itemId: string) => void;
+  /** スター切替コールバック */
+  onToggleStar: (itemId: string, isStarred: boolean) => void;
+}
+
+/**
+ * 記事詳細展開エリア
+ *
+ * 記事行クリック直後に枠を表示し、取得状態に応じてローディング表示／エラー表示／
+ * ItemDetail（本文）を出し分ける。詳細データの取得完了を待たずに同期的に枠を描画する
+ * ことで、クリックから 200ms 以内に展開表示を開始する（NFR 2.1）。
+ */
+function ItemDetailArea({
+  isLoading,
+  isError,
+  detail,
+  detailItemId,
+  onMarkAsRead,
+  onToggleStar,
+}: ItemDetailAreaProps) {
+  // 取得失敗時はエラー表示を提示する（AC 2.3）
+  if (isError) {
+    return (
+      <div
+        data-testid="item-detail-error"
+        className="border-t bg-background px-4 py-4 text-sm text-destructive"
+      >
+        記事の詳細を読み込めませんでした
+      </div>
+    );
+  }
+
+  // 取得完了かつ展開中の記事IDと一致する詳細データがあれば本文を表示する（AC 1.2, 2.4）。
+  // 取得中、または別記事の古い詳細が残っている場合はローディング表示を出す（AC 2.2）。
+  if (isLoading || detail === null || detail.id !== detailItemId) {
+    return (
+      <div
+        data-testid="item-detail-loading"
+        className="border-t bg-background px-4 py-4 text-sm text-muted-foreground"
+      >
+        読み込み中...
+      </div>
+    );
+  }
+
+  return (
+    <ItemDetail
+      item={detail}
+      onMarkAsRead={onMarkAsRead}
+      onToggleStar={onToggleStar}
+    />
   );
 }
 
