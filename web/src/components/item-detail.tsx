@@ -1,11 +1,17 @@
 "use client";
 
-import { useEffect, useMemo } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ExternalLink, Star, Bookmark } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { sanitizeContentHtml } from "@/lib/sanitize";
 import type { ItemDetail as ItemDetailType } from "@/types/item";
+
+/**
+ * 本文表示エリアの初期折りたたみ時の最大高さ（px）。
+ * これを超える本文は折りたたんでクリップし「続きを読む」トグルを表示する。
+ */
+const COLLAPSED_MAX_HEIGHT_PX = 300;
 
 /** ItemDetail コンポーネントのプロパティ */
 interface ItemDetailProps {
@@ -48,6 +54,29 @@ export function ItemDetail({
     () => sanitizeContentHtml(item.content),
     [item.content]
   );
+
+  // 本文コンテナの参照。レンダリング後に実コンテンツ高さ（scrollHeight）を測定する。
+  const contentRef = useRef<HTMLDivElement>(null);
+  // 本文の実高さが閾値（300px）を超えるか（= 折りたたみ対象か）。
+  const [isOverflowing, setIsOverflowing] = useState(false);
+  // 利用者が「続きを読む」で全文表示へ展開したか。
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  // 本文の実コンテンツ高さを測定し、閾値超過かどうかを判定する。
+  // 文字列で切り取らず DOM ツリーを維持したまま CSS でクリップするため、
+  // 高さ判定は描画後の scrollHeight を用いる（Req 1.4 / NFR 1.1）。
+  // item.content が変わったら再測定し、展開状態も初期（折りたたみ）に戻す。
+  useLayoutEffect(() => {
+    const el = contentRef.current;
+    if (el === null) {
+      return;
+    }
+    setIsOverflowing(el.scrollHeight > COLLAPSED_MAX_HEIGHT_PX);
+    setIsExpanded(false);
+  }, [sanitizedContent]);
+
+  // 折りたたみ中（閾値超過かつ未展開）はクリップとフェードアウトを表示する。
+  const isCollapsed = isOverflowing && !isExpanded;
 
   return (
     <div className="border-t bg-background px-4 py-4 space-y-4">
@@ -116,12 +145,38 @@ export function ItemDetail({
         </Button>
       </div>
 
-      {/* コンテンツ表示エリア */}
-      <div
-        data-testid="item-content"
-        className="prose prose-sm dark:prose-invert max-w-none"
-        dangerouslySetInnerHTML={{ __html: sanitizedContent }}
-      />
+      {/* コンテンツ表示エリア（本文 HTML の DOM を維持したまま CSS でクリップする） */}
+      <div className="relative">
+        <div
+          ref={contentRef}
+          data-testid="item-content"
+          className={cn(
+            "prose prose-sm dark:prose-invert max-w-none",
+            isCollapsed && "max-h-[300px] overflow-hidden"
+          )}
+          dangerouslySetInnerHTML={{ __html: sanitizedContent }}
+        />
+        {/* 折りたたみ時のフェードアウト（下から上へのグラデーション） */}
+        {isCollapsed && (
+          <div
+            data-testid="content-fade"
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-background to-transparent"
+          />
+        )}
+      </div>
+
+      {/* 「続きを読む」/「折りたたむ」トグル（閾値超過時のみ表示） */}
+      {isOverflowing && (
+        <Button
+          variant="ghost"
+          size="sm"
+          data-testid="content-toggle"
+          onClick={() => setIsExpanded((prev) => !prev)}
+        >
+          {isExpanded ? "折りたたむ" : "続きを読む"}
+        </Button>
+      )}
     </div>
   );
 }
