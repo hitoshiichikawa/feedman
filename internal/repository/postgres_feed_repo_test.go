@@ -320,3 +320,140 @@ func TestPostgresFeedRepo_ListDueForFetch(t *testing.T) {
 		}
 	})
 }
+
+// insertTestFeedWithTitle はテスト用フィードを任意の title / site_url で挿入し、
+// 生成された ID を返す。初期タイトルが URL のままのフィード（不具合 #113 の再現）を
+// 作るために title 列を明示指定できる。site_url が空のときは NULL を挿入する。
+func insertTestFeedWithTitle(t *testing.T, db *sql.DB, feedURL, title, siteURL string, status model.FetchStatus) string {
+	t.Helper()
+	var feedID string
+	var siteURLArg interface{}
+	if siteURL == "" {
+		siteURLArg = nil
+	} else {
+		siteURLArg = siteURL
+	}
+	err := db.QueryRow(
+		`INSERT INTO feeds (feed_url, title, site_url, fetch_status, next_fetch_at)
+		 VALUES ($1, $2, $3, $4, now()) RETURNING id`,
+		feedURL, title, siteURLArg, string(status),
+	).Scan(&feedID)
+	if err != nil {
+		t.Fatalf("フィード挿入に失敗: %v", err)
+	}
+	return feedID
+}
+
+// TestPostgresFeedRepo_UpdateFetchState は UpdateFetchState が
+// title / site_url を含むパース結果を永続化し、かつ従来どおりフェッチ状態項目も
+// 更新することを検証する DB 結合テスト（Issue #113 の不具合再発防止）。
+// テスト用 PostgreSQL に接続できない場合はスキップする。
+func TestPostgresFeedRepo_UpdateFetchState(t *testing.T) {
+	ctx := context.Background()
+
+	// Requirement 1.1 / 1.2 / 1.3 / 2.3 / 4.1:
+	// 初期タイトルが URL のフィードについて、パース済みタイトル・サイト URL を
+	// 設定して UpdateFetchState すると、DB へ永続化され FindByID で再読込できる。
+	// 同時に従来のフェッチ状態項目（fetch_status 等）も更新される（Requirement 1.4）。
+	t.Run("パース済みタイトル・サイトURLと状態項目を永続化する", func(t *testing.T) {
+		db := setupListDueTestDB(t)
+		repo := NewPostgresFeedRepo(db)
+
+		feedURL := "https://news.example.com/rss.xml"
+		// Arrange: 初期タイトルが URL のままのフィード（不具合再現状態）
+		feedID := insertTestFeedWithTitle(t, db, feedURL, feedURL, "", model.FetchStatusActive)
+
+		original, err := repo.FindByID(ctx, feedID)
+		if err != nil {
+			t.Fatalf("FindByID returned error: %v", err)
+		}
+		if original == nil {
+			t.Fatal("挿入したフィードが取得できなかった")
+		}
+		if original.Title != feedURL {
+			t.Fatalf("前提: 初期タイトル = %q, want %q", original.Title, feedURL)
+		}
+
+		// Act: パース済みタイトル・サイト URL と状態項目を設定して更新
+		original.Title = "Example News"
+		original.SiteURL = "https://news.example.com"
+		original.FetchStatus = model.FetchStatusActive
+		original.ConsecutiveErrors = 0
+		original.ErrorMessage = ""
+		original.ETag = `"etag-xyz"`
+		original.LastModified = "Wed, 01 Jan 2025 00:00:00 GMT"
+		original.NextFetchAt = time.Now().Add(60 * time.Minute)
+		if err := repo.UpdateFetchState(ctx, original); err != nil {
+			t.Fatalf("UpdateFetchState returned error: %v", err)
+		}
+
+		// Assert: 再読込して永続化を確認
+		reloaded, err := repo.FindByID(ctx, feedID)
+		if err != nil {
+			t.Fatalf("再読込の FindByID returned error: %v", err)
+		}
+		if reloaded.Title != "Example News" {
+			t.Errorf("永続化後の Title = %q, want %q", reloaded.Title, "Example News")
+		}
+		if reloaded.SiteURL != "https://news.example.com" {
+			t.Errorf("永続化後の SiteURL = %q, want %q", reloaded.SiteURL, "https://news.example.com")
+		}
+		// 従来のフェッチ状態項目も更新される（Requirement 1.4 / NFR 1.1）
+		if reloaded.ETag != `"etag-xyz"` {
+			t.Errorf("永続化後の ETag = %q, want %q", reloaded.ETag, `"etag-xyz"`)
+		}
+		if reloaded.LastModified != "Wed, 01 Jan 2025 00:00:00 GMT" {
+			t.Errorf("永続化後の LastModified = %q, want %q", reloaded.LastModified, "Wed, 01 Jan 2025 00:00:00 GMT")
+		}
+		if reloaded.FetchStatus != model.FetchStatusActive {
+			t.Errorf("永続化後の FetchStatus = %q, want %q", reloaded.FetchStatus, model.FetchStatusActive)
+		}
+	})
+
+	// Requirement 3.1 / 3.2 / NFR 1.1:
+	// フェッチ失敗・未変更パスでは Fetcher が title / site_url を上書きしないため、
+	// 既存値のまま UpdateFetchState が呼ばれる。このとき DB 上の既存タイトル・
+	// サイト URL が破壊されない（状態項目だけが更新される）ことを検証する。
+	t.Run("既存タイトル・サイトURLを保持したまま状態のみ更新しても破壊しない", func(t *testing.T) {
+		db := setupListDueTestDB(t)
+		repo := NewPostgresFeedRepo(db)
+
+		feedURL := "https://blog.example.com/feed.xml"
+		// Arrange: 既に正しいタイトル・サイト URL が保存済みのフィード
+		feedID := insertTestFeedWithTitle(t, db, feedURL, "Example Blog", "https://blog.example.com", model.FetchStatusActive)
+
+		feed, err := repo.FindByID(ctx, feedID)
+		if err != nil {
+			t.Fatalf("FindByID returned error: %v", err)
+		}
+
+		// Act: フェッチ失敗（バックオフ）を模して状態項目のみ変更し、
+		// title / site_url は既存値のまま UpdateFetchState を呼ぶ
+		feed.FetchStatus = model.FetchStatusActive
+		feed.ConsecutiveErrors = 1
+		feed.ErrorMessage = "一時的な取得失敗"
+		feed.NextFetchAt = time.Now().Add(120 * time.Minute)
+		if err := repo.UpdateFetchState(ctx, feed); err != nil {
+			t.Fatalf("UpdateFetchState returned error: %v", err)
+		}
+
+		// Assert: タイトル・サイト URL は既存値のまま維持される
+		reloaded, err := repo.FindByID(ctx, feedID)
+		if err != nil {
+			t.Fatalf("再読込の FindByID returned error: %v", err)
+		}
+		if reloaded.Title != "Example Blog" {
+			t.Errorf("更新後の Title = %q, want %q（破壊されてはならない）", reloaded.Title, "Example Blog")
+		}
+		if reloaded.SiteURL != "https://blog.example.com" {
+			t.Errorf("更新後の SiteURL = %q, want %q（破壊されてはならない）", reloaded.SiteURL, "https://blog.example.com")
+		}
+		// 状態項目は更新される
+		if reloaded.ConsecutiveErrors != 1 {
+			t.Errorf("更新後の ConsecutiveErrors = %d, want 1", reloaded.ConsecutiveErrors)
+		}
+		if reloaded.ErrorMessage != "一時的な取得失敗" {
+			t.Errorf("更新後の ErrorMessage = %q, want %q", reloaded.ErrorMessage, "一時的な取得失敗")
+		}
+	})
+}
