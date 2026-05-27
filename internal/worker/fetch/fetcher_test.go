@@ -821,6 +821,130 @@ func TestFetcher_Fetch_UpdatesFeedTitle(t *testing.T) {
 	}
 }
 
+// TestFetcher_Fetch_PersistsTitleAndSiteURL は、フェッチ成功時に
+// パース済みタイトル・サイト URL が UpdateFetchState（永続化処理）へ
+// 渡されることを検証する（Requirement 1.1 / 1.2 / 1.3 / 2.3）。
+// mock repo が in-memory の feed をそのまま受け取るため、永続化処理に
+// 正しい値が引き渡されることを直接捕捉できる。
+func TestFetcher_Fetch_PersistsTitleAndSiteURL(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		fmt.Fprint(w, `<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <title>Parsed Site Title</title>
+    <link>https://site.example.com</link>
+  </channel>
+</rss>`)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	var persistedTitle, persistedSiteURL string
+	feedRepo := &mockFeedRepo{
+		updateFetchStateFunc: func(_ context.Context, feed *model.Feed) error {
+			persistedTitle = feed.Title
+			persistedSiteURL = feed.SiteURL
+			return nil
+		},
+	}
+
+	f := NewFetcher(
+		feedRepo,
+		&mockSubRepo{minInterval: 60},
+		&mockUpsertService{},
+		&mockSSRFGuard{},
+		newTestLogger(&buf),
+		10*time.Second,
+		5*1024*1024,
+	)
+
+	feed := &model.Feed{
+		ID:      "feed-1",
+		FeedURL: server.URL,
+		// 初期タイトルが URL のまま（不具合 #113 の状態）
+		Title: server.URL,
+	}
+
+	// Act
+	if err := f.Fetch(context.Background(), feed); err != nil {
+		t.Fatalf("Fetch() がエラーを返した: %v", err)
+	}
+
+	// Assert: 永続化処理にパース済みタイトル・サイト URL が渡される
+	if persistedTitle != "Parsed Site Title" {
+		t.Errorf("UpdateFetchState に渡された Title = %q, want %q", persistedTitle, "Parsed Site Title")
+	}
+	if persistedSiteURL != "https://site.example.com" {
+		t.Errorf("UpdateFetchState に渡された SiteURL = %q, want %q", persistedSiteURL, "https://site.example.com")
+	}
+}
+
+// TestFetcher_Fetch_EmptyParsedTitleDoesNotOverwrite は、パース済みタイトル・
+// サイト URL が空のとき、既存のタイトル・サイト URL が空値で上書きされず、
+// 永続化処理にも既存値が引き渡されることを検証する（Requirement 2.1 / 2.2）。
+func TestFetcher_Fetch_EmptyParsedTitleDoesNotOverwrite(t *testing.T) {
+	// Arrange: title / link を持たないフィードを返すサーバー
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		fmt.Fprint(w, `<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <description>タイトル・リンクなしのフィード</description>
+    <item><title>記事</title><guid>g1</guid></item>
+  </channel>
+</rss>`)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	var persistedTitle, persistedSiteURL string
+	feedRepo := &mockFeedRepo{
+		updateFetchStateFunc: func(_ context.Context, feed *model.Feed) error {
+			persistedTitle = feed.Title
+			persistedSiteURL = feed.SiteURL
+			return nil
+		},
+	}
+
+	f := NewFetcher(
+		feedRepo,
+		&mockSubRepo{minInterval: 60},
+		&mockUpsertService{insertCount: 1},
+		&mockSSRFGuard{},
+		newTestLogger(&buf),
+		10*time.Second,
+		5*1024*1024,
+	)
+
+	feed := &model.Feed{
+		ID:      "feed-1",
+		FeedURL: server.URL,
+		Title:   "既存タイトル",
+		SiteURL: "https://existing.example.com",
+	}
+
+	// Act
+	if err := f.Fetch(context.Background(), feed); err != nil {
+		t.Fatalf("Fetch() がエラーを返した: %v", err)
+	}
+
+	// Assert: 既存値が空で上書きされない & 永続化処理にも既存値が渡される
+	if feed.Title != "既存タイトル" {
+		t.Errorf("Feed.Title = %q, want %q（空で上書きしてはならない）", feed.Title, "既存タイトル")
+	}
+	if feed.SiteURL != "https://existing.example.com" {
+		t.Errorf("Feed.SiteURL = %q, want %q（空で上書きしてはならない）", feed.SiteURL, "https://existing.example.com")
+	}
+	if persistedTitle != "既存タイトル" {
+		t.Errorf("UpdateFetchState に渡された Title = %q, want %q", persistedTitle, "既存タイトル")
+	}
+	if persistedSiteURL != "https://existing.example.com" {
+		t.Errorf("UpdateFetchState に渡された SiteURL = %q, want %q", persistedSiteURL, "https://existing.example.com")
+	}
+}
+
 // --- Task 3.1: WithMetrics によるメトリクス記録のテスト ---
 
 func TestFetcher_Fetch_Metrics_Success200(t *testing.T) {
