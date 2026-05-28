@@ -212,8 +212,11 @@ interface ItemDetailAreaProps {
  * 記事行クリック直後に枠を表示し、取得状態に応じてローディング表示／エラー表示／
  * ItemDetail（本文）を出し分ける。詳細データの取得完了を待たずに同期的に枠を描画する
  * ことで、クリックから 200ms 以内に展開表示を開始する（NFR 2.1）。
+ *
+ * 横断スター記事一覧 `StarredItemList` でも同じ展開挙動が必要なため、本コンポーネントを
+ * export して再利用する（既存挙動を変えない非破壊的変更 / Req 2.8）。
  */
-function ItemDetailArea({
+export function ItemDetailArea({
   isLoading,
   isError,
   detail,
@@ -267,8 +270,11 @@ interface ItemRowProps {
  *
  * 記事タイトル、概要、日付（推定フラグ付き）、既読/スター状態を表示する。
  * 公開日時はタイトルと同一行の右側に、概要はタイトル直下に表示する。
+ *
+ * 横断スター記事一覧 `StarredItemList` でも同じ行レイアウトを再利用するため、
+ * 本コンポーネントを export する（既存挙動を変えない非破壊的変更 / Req 2.3）。
  */
-function ItemRow({ item, isExpanded, onClick }: ItemRowProps) {
+export function ItemRow({ item, isExpanded, onClick }: ItemRowProps) {
   const date = new Date(item.published_at);
   const formattedDate = formatDate(date);
   const hasSummary = item.summary.trim().length > 0;

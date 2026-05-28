@@ -20,9 +20,79 @@ describe("AppStateContext", () => {
       wrapper: createWrapper(),
     });
 
+    expect(result.current.selectedView).toBe("feed");
     expect(result.current.selectedFeedId).toBeNull();
     expect(result.current.expandedItemId).toBeNull();
     expect(result.current.filter).toBe("all");
+  });
+
+  it("SELECT_STARRED アクションで selectedView が 'starred' に遷移し、他フィールドがリセットされること", () => {
+    const wrapper = createWrapper();
+
+    const { result } = renderHook(
+      () => {
+        const state = useAppState();
+        const dispatch = useAppDispatch();
+        return { state, dispatch };
+      },
+      { wrapper }
+    );
+
+    // 事前にフィード選択 / 展開 / フィルタ変更を行う
+    act(() => {
+      result.current.dispatch({ type: "SELECT_FEED", feedId: "feed-1" });
+    });
+    act(() => {
+      result.current.dispatch({ type: "EXPAND_ITEM", itemId: "item-1" });
+    });
+    act(() => {
+      result.current.dispatch({ type: "SET_FILTER", filter: "unread" });
+    });
+
+    expect(result.current.state.selectedView).toBe("feed");
+    expect(result.current.state.selectedFeedId).toBe("feed-1");
+    expect(result.current.state.expandedItemId).toBe("item-1");
+    expect(result.current.state.filter).toBe("unread");
+
+    // お気に入り選択で他フィールドがリセットされる
+    act(() => {
+      result.current.dispatch({ type: "SELECT_STARRED" });
+    });
+
+    expect(result.current.state.selectedView).toBe("starred");
+    expect(result.current.state.selectedFeedId).toBeNull();
+    expect(result.current.state.expandedItemId).toBeNull();
+    expect(result.current.state.filter).toBe("all");
+  });
+
+  it("SELECT_STARRED の後に SELECT_FEED を dispatch すると selectedView が 'feed' に戻ること", () => {
+    const wrapper = createWrapper();
+
+    const { result } = renderHook(
+      () => {
+        const state = useAppState();
+        const dispatch = useAppDispatch();
+        return { state, dispatch };
+      },
+      { wrapper }
+    );
+
+    // お気に入り選択状態に遷移
+    act(() => {
+      result.current.dispatch({ type: "SELECT_STARRED" });
+    });
+    expect(result.current.state.selectedView).toBe("starred");
+    expect(result.current.state.selectedFeedId).toBeNull();
+
+    // フィード選択で selectedView が "feed" に戻る
+    act(() => {
+      result.current.dispatch({ type: "SELECT_FEED", feedId: "feed-2" });
+    });
+
+    expect(result.current.state.selectedView).toBe("feed");
+    expect(result.current.state.selectedFeedId).toBe("feed-2");
+    expect(result.current.state.expandedItemId).toBeNull();
+    expect(result.current.state.filter).toBe("all");
   });
 
   it("SELECT_FEED アクションでフィードが選択されること", () => {

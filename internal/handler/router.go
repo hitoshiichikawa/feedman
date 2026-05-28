@@ -192,6 +192,12 @@ func NewRouter(deps *RouterDeps) http.Handler {
 			// POST /api/feeds - フィード登録（登録専用レート制限を追加）
 			r.With(deps.RateLimiter.FeedRegistrationMiddleware()).Post("/", feedHandler.RegisterFeed)
 
+			// GET /api/feeds/starred/items - 全フィード横断スター記事一覧（Issue #117）
+			// chi v5 のトライ木は静的セグメント `starred` を動的パラメータ `{id}` より優先するため、
+			// 登録順を問わず `/api/feeds/{id}/items` と衝突しない。可読性のため `/{id}` ブロックの
+			// 直前に置く。
+			r.Get("/starred/items", itemHandler.ListStarredItems)
+
 			r.Route("/{id}", func(r chi.Router) {
 				r.Get("/", feedHandler.GetFeed)
 				r.Patch("/", feedHandler.UpdateFeedURL)

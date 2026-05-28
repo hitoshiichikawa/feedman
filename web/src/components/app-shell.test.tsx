@@ -14,13 +14,21 @@ const mockFetch = vi.fn();
 global.fetch = mockFetch;
 
 // IntersectionObserverのモック
-const mockIntersectionObserver = vi.fn();
-mockIntersectionObserver.mockImplementation(() => ({
-  observe: vi.fn(),
-  unobserve: vi.fn(),
-  disconnect: vi.fn(),
-}));
-global.IntersectionObserver = mockIntersectionObserver;
+// new で呼ばれる前提のため class として実装する（vi.fn().mockImplementation だと
+// "is not a constructor" になるため）。StarredItemList / ItemList が IntersectionObserver
+// を new で生成するので両者に共通の mock を提供する。
+class MockIntersectionObserver {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  constructor(_callback: IntersectionObserverCallback) {}
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+  takeRecords() {
+    return [];
+  }
+}
+global.IntersectionObserver =
+  MockIntersectionObserver as unknown as typeof IntersectionObserver;
 
 /** テスト用の購読データ */
 const mockSubscriptions: Subscription[] = [
@@ -78,6 +86,7 @@ function setupMockFetch() {
         json: async () => mockSubscriptions,
       });
     }
+    // 横断スター / 単一フィード両方の記事一覧 API を空配列で返す
     if (typeof url === "string" && url.includes("/api/feeds/")) {
       return Promise.resolve({
         ok: true,
@@ -156,5 +165,56 @@ describe("AppShell コンポーネント", () => {
     await waitFor(() => {
       expect(screen.getByText("Feedman")).toBeInTheDocument();
     });
+  });
+
+  it("左ペイン先頭に StarredNavItem「お気に入り」項目が表示されること（Req 1.1 / 1.3）", async () => {
+    render(<AppShell />, { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("starred-nav-item")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("starred-nav-item")).toHaveTextContent(
+      "お気に入り"
+    );
+  });
+
+  it("「お気に入り」項目クリック → 右ペインが StarredItemList に切替 → フィード行クリック → 右ペインが ItemList に戻ること（Req 1.3 / 1.4 / 2.1 / 5.3）", async () => {
+    const user = userEvent.setup();
+
+    render(<AppShell />, { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("starred-nav-item")).toBeInTheDocument();
+    });
+
+    // 初期状態: 右ペインは「フィードを選択してください」（ItemList の feedId=null パス）
+    expect(
+      screen.getByText("フィードを選択してください")
+    ).toBeInTheDocument();
+
+    // 「お気に入り」項目をクリック → 右ペインが StarredItemList に切替
+    await user.click(screen.getByTestId("starred-nav-item"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("starred-item-list")).toBeInTheDocument();
+    });
+    // コンテキストタイトル「お気に入り」が右ペインに表示される（Req 2.1）
+    expect(screen.getByTestId("starred-item-list-title")).toHaveTextContent(
+      "お気に入り"
+    );
+    // 「フィードを選択してください」の案内（ItemList feedId=null）は消える
+    expect(
+      screen.queryByText("フィードを選択してください")
+    ).not.toBeInTheDocument();
+
+    // フィード行（Tech Blog）をクリック → 右ペインが ItemList に戻る（Req 1.4 / 5.3）
+    await user.click(screen.getByText("Tech Blog"));
+
+    await waitFor(() => {
+      // フィルタタブ（全て）が表示される = ItemList が描画されている
+      expect(screen.getByRole("tab", { name: "全て" })).toBeInTheDocument();
+    });
+    // StarredItemList は描画されていない
+    expect(screen.queryByTestId("starred-item-list")).not.toBeInTheDocument();
   });
 });

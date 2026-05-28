@@ -44,3 +44,22 @@ export interface ItemStateRequest {
   is_read?: boolean | null;
   is_starred?: boolean | null;
 }
+
+/**
+ * スター記事サマリー（フィード横断スター一覧用）
+ *
+ * GET /api/feeds/starred/items の応答に含まれる記事行。横断一覧では記事が属する
+ * フィードを識別する必要があるため、`ItemSummary` に `feed_title` を追加した拡張型。
+ * 既存 `ItemSummary` / `ItemListResponse` の応答スキーマは変更しない（NFR 3.1）。
+ */
+export interface StarredItemSummary extends ItemSummary {
+  /** 記事が属するフィードのタイトル（横断一覧でフィード識別表示に使用） */
+  feed_title: string;
+}
+
+/** スター記事一覧APIレスポンス（GET /api/feeds/starred/items） */
+export interface StarredItemListResponse {
+  items: StarredItemSummary[];
+  next_cursor: string | null;
+  has_more: boolean;
+}
