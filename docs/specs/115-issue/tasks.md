@@ -39,7 +39,7 @@
   - _Boundary: fetch.Fetcher_
   - _Depends: 2.1_
 
-- [ ] 4. Service 層: subscription.Service に ManualFetch メソッド追加
+- [x] 4. Service 層: subscription.Service に ManualFetch メソッド追加
 - [x] 4.1 ManualFetch のオーケストレーション実装（認可 / 行ロック / クールダウン判定 / fetcher 呼び出し / メトリクス）
   - `internal/model/errors.go` に `ErrCodeFeedFetchInProgress = "FEED_FETCH_IN_PROGRESS"` /
     `ErrCodeFeedCooldown = "FEED_COOLDOWN"` 定数と、`NewFeedFetchInProgressError()` /
