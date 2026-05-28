@@ -93,7 +93,7 @@
     feed_id UUID パース失敗） / 403（未購読 feed_id） / 空クエリ → 200 OK 空配列を検証する。
     既存 `item_handler_test.go` の `mockItemService` パターンを踏襲し、mock service を差し替える
   - _Requirements: 1.3, 1.4, 1.5, 3.3, 3.5_
-- [ ] 5.5 `internal/app/app.go` に `itemsearch.SearchService` の wiring を追加する
+- [x] 5.5 `internal/app/app.go` に `itemsearch.SearchService` の wiring を追加する
   - `itemsearch.NewSearchService(itemRepo, subRepo)` を生成し、`handler.NewItemSearchServiceAdapter` で
     アダプタを構築、`RouterDeps.ItemSearchService` にセットする
   - _Requirements: 1.3, 1.4_
