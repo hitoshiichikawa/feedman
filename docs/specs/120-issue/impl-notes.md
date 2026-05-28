@@ -80,3 +80,64 @@ learning は改変しない。
     が担うのが既存パターンと整合する。
   - Task 4 / 5 / 5.4 が、本 task で追加した `model.NewInvalidSearchQueryError` /
     `model.NewFeedNotSubscribedError` をサービス層・ハンドラ層で使用する前提で実装される。
+
+### Task 3
+
+- 採用方針: `ItemSearchRepository` インターフェースを `interfaces.go` に新規定義し、
+  `PostgresItemRepo.SearchByUserAndKeyword` で design.md 参照 SQL（`items JOIN
+  subscriptions JOIN feeds LEFT JOIN item_states` + `$3::uuid IS NULL` ガード +
+  タプル比較ページング）どおりに 1 クエリで横断 / フィード内検索を表現した。
+  Skip ガード付き DB 結合テスト 10 ケースで AC 2.2/2.3/2.4/2.5/2.6/3.1/3.2/3.4/4.1/5.3
+  を網羅する。
+- 重要な判断:
+  - **null 引数は動的 WHERE 文字列再構築ではなく SQL ガード（`$3::uuid IS NULL`,
+    `$4::timestamptz IS NULL`）で処理する**。`ListByFeed` は WHERE を文字列連結で
+    動的に組み立てる方式（cursor 有無で `argIndex` を変える）だが、本 method は
+    design.md がガード式での表現を明示しており、PostgreSQL のプランナが `IS NULL`
+    ガードを定数畳み込みするため横断検索時の index 利用に追加コストが生じない
+    という設計判断に従った。Go 側は `interface{}` 変数 1 つを `nil` / 値で
+    分岐するだけで済み、SQL 本体は静的文字列にできる。
+  - **scanner は inline 実装で `scanItem` を再利用しない**。本 method の SELECT 列
+    （`i.id, i.feed_id, i.title, i.link, i.summary, i.published_at,
+    i.is_date_estimated, i.hatebu_count, f.title, f.favicon_data, f.favicon_mime,
+    is_read, is_starred`）は `itemSelectColumns`（16 列 / Item 全体）とは
+    異なる射影（13 列 / `ItemSearchHit`）であり、`scanItem` を流用しても恩恵が
+    なく、むしろ別構造体（`Item` vs `ItemSearchHit`）への詰め替えコードが増える。
+    検索専用の射影モデルとして inline scanner を選択した（Task 2 の決定と整合）。
+  - **`PublishedAt` の NULL マッピング**は `time.Time{}` ゼロ値に倒した
+    （`model.ItemSearchHit.PublishedAt` が非ポインタ `time.Time` で定義されている
+    Task 2 の決定に従う）。ORDER BY 側は `NULLS LAST` で NULL 行が末尾に来る
+    ため、ゼロ値が他の値と混ざってもページネーション順序の不変性は保たれる。
+  - **クロスユーザー隔離は SQL レベルで強制する**。design.md 参照 SQL の
+    `JOIN subscriptions s ON s.feed_id = i.feed_id AND s.user_id = $1` により、
+    呼び出し側で追加チェックなしに「未購読フィード」「他ユーザーの購読」を
+    結果集合から除外できる（Req 3.1 / 3.2 / 3.4 を SQL の JOIN 述語のみで担保）。
+  - **テストの `cleanupSQL` を再利用するが helper 名は collision 回避のため新規**。
+    既存 `postgres_subscription_repo_db_test.go` の `setupSubscriptionTestDB` /
+    `insertTestUserForSub` を直接 export せず、本ファイル専用の
+    `setupItemSearchTestDB` / `insertTestUserForSearch` 等として複製した。
+    将来両ファイルで共通化したい場合は別 task で `_test_helpers.go` 等の
+    名前で集約する余地を残す。
+  - **不変条件テストは `item_states` と `items` の両方をスナップショット**する
+    (Req 5.3)。検索前後で `is_read` / `is_starred` / `updated_at` / `hatebu_count`
+    すべてが等価であることを assert する。`updated_at` の `Equal` 比較は
+    timezone を考慮するため `time.Time.Equal` を使用する。
+- 残存課題（次 task に影響する事項）:
+  - **cursor 形式 `<RFC3339Nano>|<uuid>` のパースは Service 層の責務**。Task 4 の
+    `itemsearch.SearchService` で `cursorStr` を `(time.Time, string)` に分解し、
+    本 method の `cursorPublishedAt` / `cursorID` 引数に渡す形になる。形式不正は
+    `model.NewInvalidSearchQueryError` で `400` を返す（Task 2 で追加済み）。
+  - **`feed_id` の購読確認も Service 層の責務**。本 repository method は
+    `feed_id` の有無に関わらず SQL の JOIN で隔離するため、未購読 feed_id を
+    渡されても空配列が返るだけで `403 FEED_NOT_SUBSCRIBED` にはならない。Task 4 で
+    `SubscriptionRepository.Exists`（または `FindByUserAndFeed` の nil 判定）を
+    呼び出してから本 method を呼ぶ実装が必要。
+  - **`ItemSearchHit.PublishedAt` が非ポインタ `time.Time`** であるため、Service 層
+    で `ItemSearchSummary` へ変換する際は、ゼロ値判定（`IsZero()`）が必要なら
+    そのまま行う。design.md 行 295-309 の `ItemSearchSummary` 仕様で
+    `PublishedAt` をポインタ型として扱うか非ポインタとするかは Task 4 の判断
+    範囲。本 repository 層は zero `time.Time{}` を返すことだけ保証する。
+  - **Task 4 / 5 で `HasMore` 判定**には `limit+1` を本 method に渡し、
+    `len(hits) > limit` で判定して `hits = hits[:limit]` に切り詰める設計
+    （design.md と tasks.md Task 4 で明示）。本 method 自体は LIMIT を
+    そのまま適用するだけで HasMore ロジックを持たない。
