@@ -26,7 +26,7 @@
   - _Requirements: 3.3, 3.5, 4.5_
 
 - [ ] 3. Repository 層で検索 SQL を実装する
-- [ ] 3.1 `internal/repository/interfaces.go` に `ItemSearchRepository` インターフェースを追加する
+- [x] 3.1 `internal/repository/interfaces.go` に `ItemSearchRepository` インターフェースを追加する
   - design.md の `SearchByUserAndKeyword(ctx, userID, pattern string, feedID *string, cursorID string, cursorPublishedAt time.Time, limit int)` シグネチャに従う
   - `PostgresItemRepo` が当該インターフェースを満たすことを compile-time check に追加する
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.6, 3.1, 3.2, 3.4, 4.1, 4.2_
