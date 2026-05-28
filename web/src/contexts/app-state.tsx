@@ -9,6 +9,11 @@ import {
 } from "react";
 import type { ItemFilter } from "@/types/item";
 
+// --- Search scope ---
+
+/** 検索スコープ: 'global' = 横断検索 / 'feed' = フィード内検索 */
+export type SearchScope = "global" | "feed";
+
 // --- State ---
 
 /**
@@ -28,6 +33,14 @@ export interface AppState {
   expandedItemId: string | null;
   /** 現在のフィルタ */
   filter: ItemFilter;
+  /** 検索キーワード（空文字 = 検索オフ） */
+  searchQuery: string;
+  /** 検索モード中か否か（searchQuery !== '' と等価のキャッシュ） */
+  isSearching: boolean;
+  /** 検索スコープ（'global' = 横断検索 / 'feed' = フィード内検索） */
+  searchScope: SearchScope;
+  /** フィード内検索の対象フィードID（searchScope === 'feed' のときのみ非 null） */
+  searchFeedId: string | null;
 }
 
 /** 初期状態 */
@@ -36,11 +49,15 @@ const initialState: AppState = {
   selectedFeedId: null,
   expandedItemId: null,
   filter: "all",
+  searchQuery: "",
+  isSearching: false,
+  searchScope: "global",
+  searchFeedId: null,
 };
 
 // --- Actions ---
 
-/** フィード選択アクション: 展開記事IDとフィルタをリセットし、selectedView を "feed" に戻す */
+/** フィード選択アクション: 展開記事ID、フィルタ、および検索状態をリセットし、selectedView を "feed" に戻す */
 type SelectFeedAction = { type: "SELECT_FEED"; feedId: string };
 
 /**
@@ -56,12 +73,30 @@ type ExpandItemAction = { type: "EXPAND_ITEM"; itemId: string };
 /** フィルタ変更アクション */
 type SetFilterAction = { type: "SET_FILTER"; filter: ItemFilter };
 
+/**
+ * 検索キーワード設定アクション。
+ *
+ * - scope='global' のとき: 横断検索を開始する（feedId は無視され searchFeedId は null になる）
+ * - scope='feed' のとき: フィード内検索を開始する（feedId 指定値、未指定なら null）
+ */
+type SetSearchQueryAction = {
+  type: "SET_SEARCH_QUERY";
+  query: string;
+  scope: SearchScope;
+  feedId?: string | null;
+};
+
+/** 検索解除アクション: 検索状態のみリセットし、selectedFeedId と filter は保持する */
+type ClearSearchAction = { type: "CLEAR_SEARCH" };
+
 /** 全アクションのユニオン型 */
 export type AppAction =
   | SelectFeedAction
   | SelectStarredAction
   | ExpandItemAction
-  | SetFilterAction;
+  | SetFilterAction
+  | SetSearchQueryAction
+  | ClearSearchAction;
 
 // --- Reducer ---
 
@@ -75,6 +110,10 @@ function appReducer(state: AppState, action: AppAction): AppState {
         selectedFeedId: action.feedId,
         expandedItemId: null,
         filter: "all",
+        searchQuery: "",
+        isSearching: false,
+        searchScope: "global",
+        searchFeedId: null,
       };
     case "SELECT_STARRED":
       return {
@@ -83,6 +122,10 @@ function appReducer(state: AppState, action: AppAction): AppState {
         selectedFeedId: null,
         expandedItemId: null,
         filter: "all",
+        searchQuery: "",
+        isSearching: false,
+        searchScope: "global",
+        searchFeedId: null,
       };
     case "EXPAND_ITEM":
       return {
@@ -94,6 +137,23 @@ function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         filter: action.filter,
+      };
+    case "SET_SEARCH_QUERY":
+      return {
+        ...state,
+        searchQuery: action.query,
+        isSearching: true,
+        searchScope: action.scope,
+        searchFeedId:
+          action.scope === "feed" ? (action.feedId ?? null) : null,
+      };
+    case "CLEAR_SEARCH":
+      return {
+        ...state,
+        searchQuery: "",
+        isSearching: false,
+        searchScope: "global",
+        searchFeedId: null,
       };
     default:
       return state;

@@ -952,6 +952,8 @@ func TestMapAPIErrorToHTTPStatus_KnownCodes(t *testing.T) {
 		{"INVALID_FETCH_INTERVAL のとき 400", model.ErrCodeInvalidFetchInterval, http.StatusBadRequest},
 		{"FEED_NOT_STOPPED のとき 409", model.ErrCodeFeedNotStopped, http.StatusConflict},
 		{"USER_NOT_FOUND のとき 404", model.ErrCodeUserNotFound, http.StatusNotFound},
+		{"INVALID_SEARCH_QUERY のとき 400", model.ErrCodeInvalidSearchQuery, http.StatusBadRequest},
+		{"FEED_NOT_SUBSCRIBED のとき 403", model.ErrCodeFeedNotSubscribed, http.StatusForbidden},
 	}
 
 	for _, tt := range tests {

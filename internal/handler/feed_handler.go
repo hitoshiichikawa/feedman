@@ -282,12 +282,14 @@ func mapAPIErrorToHTTPStatus(apiErr *model.APIError) int {
 		return http.StatusConflict
 	case "FEED_NOT_FOUND", model.ErrCodeSubscriptionNotFound, model.ErrCodeItemNotFound:
 		return http.StatusNotFound
-	case model.ErrCodeInvalidFilter, model.ErrCodeInvalidFetchInterval:
+	case model.ErrCodeInvalidFilter, model.ErrCodeInvalidFetchInterval, model.ErrCodeInvalidSearchQuery:
 		return http.StatusBadRequest
 	case model.ErrCodeFeedNotStopped:
 		return http.StatusConflict
 	case model.ErrCodeUserNotFound:
 		return http.StatusNotFound
+	case model.ErrCodeFeedNotSubscribed:
+		return http.StatusForbidden
 	default:
 		return http.StatusInternalServerError
 	}

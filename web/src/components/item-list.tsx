@@ -6,6 +6,7 @@ import { Star } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useItems, useItemDetail } from "@/hooks/use-items";
 import { useMarkAsRead, useToggleStar } from "@/hooks/use-item-state";
+import { FeedSearchBar } from "@/components/feed-search-bar";
 import { ItemDetail } from "@/components/item-detail";
 import type {
   ItemDetail as ItemDetailType,
@@ -128,8 +129,10 @@ export function ItemList({ feedId, onSelectItem, expandedItemId }: ItemListProps
 
   return (
     <div className="flex flex-col h-full">
-      {/* フィルタタブ */}
-      <div className="flex-shrink-0 border-b px-4 py-2">
+      {/* フィルタタブ + フィード内検索バー（Req 1.2 / NFR 2.3）
+          FeedSearchBar は selectedFeedId === null のとき内部で null を返すため、
+          本領域に到達する時点（feedId !== null）では常に描画される */}
+      <div className="flex flex-shrink-0 flex-wrap items-center justify-between gap-2 border-b px-4 py-2">
         <Tabs
           value={filter}
           onValueChange={(value) => setFilter(value as ItemFilter)}
@@ -140,6 +143,7 @@ export function ItemList({ feedId, onSelectItem, expandedItemId }: ItemListProps
             <TabsTrigger value="starred">スター</TabsTrigger>
           </TabsList>
         </Tabs>
+        <FeedSearchBar />
       </div>
 
       {/* 記事一覧 */}

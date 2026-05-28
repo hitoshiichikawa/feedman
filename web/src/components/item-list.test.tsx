@@ -2,7 +2,13 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import { ItemList } from "./item-list";
+import {
+  AppStateProvider,
+  useAppDispatch,
+  type AppAction,
+} from "@/contexts/app-state";
 import type { ItemDetail, ItemListResponse } from "@/types/item";
 import type { ReactNode } from "react";
 
@@ -19,7 +25,11 @@ mockIntersectionObserver.mockImplementation((callback: IntersectionObserverCallb
 }));
 global.IntersectionObserver = mockIntersectionObserver;
 
-/** テスト用ラッパー */
+/** テスト用ラッパー
+ *
+ * ItemList は FeedSearchBar（useAppState 経由で AppState を参照）を内包するため、
+ * AppStateProvider 配下でレンダする必要がある。
+ */
 function createWrapper() {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -30,10 +40,52 @@ function createWrapper() {
   return function Wrapper({ children }: { children: ReactNode }) {
     return (
       <QueryClientProvider client={queryClient}>
-        {children}
+        <AppStateProvider>{children}</AppStateProvider>
       </QueryClientProvider>
     );
   };
+}
+
+/**
+ * AppStateProvider に初期 dispatch（例: SELECT_FEED）を流してから ItemList をマウントする
+ * ヘルパー。FeedSearchBar の selectedFeedId 連動を検証する場合に使用する。
+ */
+function renderWithInitialDispatch(
+  ui: ReactNode,
+  initialDispatch?: (dispatch: (action: AppAction) => void) => void
+) {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+  function Probe() {
+    const dispatch = useAppDispatch();
+    const ready = useDispatchOnce(() => {
+      if (initialDispatch) initialDispatch(dispatch);
+    });
+    return ready ? <>{ui}</> : null;
+  }
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <AppStateProvider>
+        <Probe />
+      </AppStateProvider>
+    </QueryClientProvider>
+  );
+}
+
+/** 初回 mount でのみ effect を 1 度発火するテスト専用ヘルパー */
+function useDispatchOnce(fn: () => void): boolean {
+  const [done, setDone] = useState(false);
+  useEffect(() => {
+    fn();
+    setDone(true);
+    // 初回 mount のみ発火 / deps は意図的に空配列
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return done;
 }
 
 /** テスト用の記事一覧レスポンス */
@@ -495,6 +547,39 @@ describe("ItemList コンポーネント", () => {
     const estimated = within(row).getByTestId("date-estimated");
     // 推定フラグはタイトル行（=日時のある行）に維持される
     expect(titleRow).toContainElement(estimated as HTMLElement);
+  });
+
+  // --- フィード内検索バーの表示制御 (Req 1.2 / NFR 2.3) ---
+
+  it("フィード選択時はフィルタ群と同列に FeedSearchBar が表示されること（Req 1.2）", async () => {
+    // Arrange: AppState で feed-1 を選択した状態にして ItemList を render
+    renderWithInitialDispatch(
+      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      (dispatch) => {
+        dispatch({ type: "SELECT_FEED", feedId: "feed-1" });
+      }
+    );
+
+    // Assert: FeedSearchBar が描画される（フィルタタブと同じ領域に併設）
+    await waitFor(() => {
+      expect(screen.getByTestId("feed-search-bar")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("feed-search-input")).toBeInTheDocument();
+    // フィルタタブも引き続き表示される（同列の隣接）
+    expect(screen.getByRole("tab", { name: "全て" })).toBeInTheDocument();
+  });
+
+  it("フィード未選択時（feedId === null）は FeedSearchBar が描画されないこと（NFR 2.3）", () => {
+    // Arrange / Act: feedId を null で render（AppState の selectedFeedId も初期値 null）
+    render(
+      <ItemList feedId={null} onSelectItem={() => {}} expandedItemId={null} />,
+      { wrapper: createWrapper() }
+    );
+
+    // Assert: ItemList 自体が案内メッセージのみで FeedSearchBar に到達しない
+    expect(screen.getByText("フィードを選択してください")).toBeInTheDocument();
+    expect(screen.queryByTestId("feed-search-bar")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("feed-search-input")).not.toBeInTheDocument();
   });
 });
 

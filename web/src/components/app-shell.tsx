@@ -4,10 +4,12 @@ import { useAppState, useAppDispatch } from "@/contexts/app-state";
 import { useFeeds } from "@/hooks/use-feeds";
 import { FeedList } from "@/components/feed-list";
 import { FeedRegisterDialog } from "@/components/feed-register-dialog";
+import { HeaderSearchBar } from "@/components/header-search-bar";
 import { ItemList } from "@/components/item-list";
 import { StarredItemList } from "@/components/starred-item-list";
 import { StarredNavItem } from "@/components/starred-nav-item";
 import { LogoutButton } from "@/components/logout-button";
+import { SearchResults } from "@/components/search-results";
 import { useTheme } from "@/components/theme-provider";
 import { Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -44,8 +46,10 @@ export function AppShell() {
   return (
     <div data-testid="app-shell" className="flex flex-col h-screen">
       {/* ヘッダー */}
-      <header className="flex items-center justify-between border-b px-4 py-2 flex-shrink-0">
+      <header className="flex items-center justify-between gap-3 border-b px-4 py-2 flex-shrink-0">
         <h1 className="text-lg font-bold">Feedman</h1>
+        {/* Req 1.1: 横断検索バーをヘッダー領域に常設する */}
+        <HeaderSearchBar />
         <div className="flex items-center gap-2">
           <ThemeToggle />
           <LogoutButton />
@@ -85,12 +89,12 @@ export function AppShell() {
           )}
         </aside>
 
-        {/* 右ペイン: 記事一覧 + 記事詳細
-            state.selectedView で ItemList（単一フィード）と StarredItemList
-            （横断スター）を切替える（Req 1.3 / 2.x）。 */}
+        {/* 右ペイン: 記事一覧 + 記事詳細（検索モード時は SearchResults に切り替わり、通常時は selectedView で切替 / Req 1.3 / 2.x / 4.7） */}
         <main data-testid="right-pane" className="flex-1 overflow-hidden">
           <div className="flex flex-col h-full">
-            {state.selectedView === "starred" ? (
+            {state.isSearching ? (
+              <SearchResults />
+            ) : state.selectedView === "starred" ? (
               <StarredItemList />
             ) : (
               <ItemList
@@ -99,7 +103,7 @@ export function AppShell() {
                 expandedItemId={state.expandedItemId}
               />
             )}
-            {/* 記事詳細は ItemList / StarredItemList 内の展開で表示する。
+            {/* 記事詳細は ItemList / StarredItemList / SearchResults 内の展開で表示する。
                 展開記事の詳細表示はItemDetailコンポーネントとして
                 各リスト配下で統合されるため、ここでは別途表示しない */}
           </div>
