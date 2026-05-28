@@ -24,19 +24,18 @@ interface FeedRegisterDialogProps {
   onRegistered: (feed: FeedRegistrationResponse) => void;
 }
 
-/** ダイアログの状態 */
+/** ダイアログの状態（登録成功時は即座にダイアログを閉じるため success phase は持たない） */
 type DialogState =
   | { phase: "input" }
   | { phase: "loading" }
-  | { phase: "success"; feed: FeedRegistrationResponse }
   | { phase: "error"; error: ApiErrorResponse };
 
 /**
  * フィード登録ダイアログ
  *
  * URL入力欄1つでフィード登録を行うダイアログ。
- * 登録成功時にフィードURLを表示しユーザーが変更可能とする。
- * エラー表示（フィード未検出、購読上限到達）を原因カテゴリと対処方法付きで表示する。
+ * 登録成功時はダイアログを自動で閉じ、左ペインのフィード一覧キャッシュを無効化する。
+ * エラー表示（フィード未検出、購読上限到達、想定外エラー）を原因カテゴリと対処方法付きで表示する。
  */
 export function FeedRegisterDialog({ onRegistered }: FeedRegisterDialogProps) {
   const [open, setOpen] = useState(false);
@@ -54,9 +53,11 @@ export function FeedRegisterDialog({ onRegistered }: FeedRegisterDialogProps) {
       });
     },
     onSuccess: (data) => {
-      setDialogState({ phase: "success", feed: data });
-      // フィード一覧のキャッシュを無効化
+      // 登録成功時はダイアログを即座に閉じる（要件 1.1 / 2.1〜2.3）
+      setOpen(false);
+      // フィード一覧のキャッシュを無効化（要件 1.2）
       queryClient.invalidateQueries({ queryKey: ["feeds"] });
+      // 呼び出し元コンポーネントへの登録完了通知（要件 1.3）
       onRegistered(data);
     },
     onError: (error: Error) => {
@@ -80,7 +81,7 @@ export function FeedRegisterDialog({ onRegistered }: FeedRegisterDialogProps) {
     },
   });
 
-  /** ダイアログを開いた時の初期化 */
+  /** ダイアログを開いた時の初期化（要件 1.4 / 4.2） */
   const handleOpenChange = (isOpen: boolean) => {
     setOpen(isOpen);
     if (isOpen) {
@@ -111,13 +112,9 @@ export function FeedRegisterDialog({ onRegistered }: FeedRegisterDialogProps) {
 
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>
-            {dialogState.phase === "success" ? "登録完了" : "フィードを登録"}
-          </DialogTitle>
+          <DialogTitle>フィードを登録</DialogTitle>
           <DialogDescription>
-            {dialogState.phase === "success"
-              ? "フィードが正常に登録されました"
-              : "WebサイトまたはフィードのURLを入力してください"}
+            WebサイトまたはフィードのURLを入力してください
           </DialogDescription>
         </DialogHeader>
 
@@ -136,48 +133,24 @@ export function FeedRegisterDialog({ onRegistered }: FeedRegisterDialogProps) {
           </div>
         )}
 
-        {/* 入力フォーム（input / loading / error 時） */}
-        {dialogState.phase !== "success" && (
-          <form onSubmit={handleSubmit}>
-            <div className="space-y-4">
-              <Input
-                type="url"
-                placeholder="https://example.com"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                disabled={isSubmitting}
-                autoFocus
-              />
-            </div>
-            <DialogFooter className="mt-4">
-              <Button type="submit" disabled={!url.trim() || isSubmitting}>
-                {isSubmitting ? "登録中..." : "登録"}
-              </Button>
-            </DialogFooter>
-          </form>
-        )}
-
-        {/* 成功時のフィードURL表示・変更 */}
-        {dialogState.phase === "success" && (
+        {/* 入力フォーム（input / loading / error 時に表示。success phase は廃止済み） */}
+        <form onSubmit={handleSubmit}>
           <div className="space-y-4">
-            <div className="space-y-2">
-              <label className="text-sm font-medium">フィードURL</label>
-              <Input
-                type="url"
-                defaultValue={dialogState.feed.feed_url}
-                readOnly={false}
-              />
-            </div>
-            <DialogFooter>
-              <Button
-                variant="outline"
-                onClick={() => handleOpenChange(false)}
-              >
-                閉じる
-              </Button>
-            </DialogFooter>
+            <Input
+              type="url"
+              placeholder="https://example.com"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              disabled={isSubmitting}
+              autoFocus
+            />
           </div>
-        )}
+          <DialogFooter className="mt-4">
+            <Button type="submit" disabled={!url.trim() || isSubmitting}>
+              {isSubmitting ? "登録中..." : "登録"}
+            </Button>
+          </DialogFooter>
+        </form>
       </DialogContent>
     </Dialog>
   );
