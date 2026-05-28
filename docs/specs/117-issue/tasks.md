@@ -48,7 +48,7 @@
   - _Boundary: useStarredItems_
   - _Depends: 3_
 
-- [ ] 6. Web: AppState 拡張と StarredNavItem コンポーネント (P)
+- [x] 6. Web: AppState 拡張と StarredNavItem コンポーネント (P)
   - `web/src/contexts/app-state.tsx` の `AppState` に `selectedView: "feed" | "starred"` を追加する（初期値 `"feed"`）
   - 新規アクション `SELECT_STARRED` を追加。reducer は `selectedView="starred"`, `selectedFeedId=null`, `expandedItemId=null`, `filter="all"` に遷移する。既存 `SELECT_FEED` も `selectedView="feed"` を設定するよう修正する
   - `web/src/contexts/app-state.test.tsx` に reducer 遷移テストを追加する: (a) 初期 view が `"feed"`、(b) `SELECT_STARRED` で `selectedView` が遷移し他フィールドがリセット、(c) `SELECT_FEED` で `selectedView` が `"feed"` に戻る
