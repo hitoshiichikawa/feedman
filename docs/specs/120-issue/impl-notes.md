@@ -428,6 +428,64 @@ learning は改変しない。
     満たすが、NFR 1.2 の体感応答性は Task 9 の `EXPLAIN ANALYZE` 計測タスクで別途
     検証する（本 task のスコープ外、deferrable `- [ ]*`）。
 
+### Task 8
+
+- 採用方針: `AppShell` のヘッダーに `HeaderSearchBar` を常設し、右ペインを
+  `state.isSearching ? <SearchResults /> : <ItemList .../>` で排他切替する。
+  `ItemList` のフィルタタブと同列の上部領域に `<FeedSearchBar />` を追加し、
+  既存の早期 return（`feedId === null` でフィルタ領域に到達しない経路）と
+  `FeedSearchBar` 自身の `selectedFeedId === null` ガード（NFR 2.3）が二重に
+  作用する形にした。統合テストは AppShell 側 4 件 / ItemList 側 2 件を追加。
+- 重要な判断:
+  - **`item-list.test.tsx` wrapper の `AppStateProvider` 追加**: `ItemList` が
+    `FeedSearchBar` 経由で `useAppState` を間接利用するようになったため、既存
+    `createWrapper` の `QueryClientProvider` だけでは `useAppState` が
+    Provider 不在エラーで throw する。`createWrapper` を `AppStateProvider`
+    込みに昇格させることで既存 29 ケース（`item-row-*` / フィルタ / 詳細展開
+    系すべて）を破壊せず通過させた。AppState は **未 dispatch のまま** 初期
+    state（`selectedFeedId: null`）で動作するため、既存テストは引き続き
+    `feedId` props を直接渡す扱いで安定する。
+  - **`renderWithInitialDispatch` ヘルパーを `item-list.test.tsx` 内に新設**:
+    `feed-search-bar.test.tsx` / `search-results.test.tsx` と同じ `useDispatchOnce`
+    パターンを `item-list.test.tsx` にも複製した。共通化（`web/src/__tests__/`
+    配下に括り出す等）は設計指針「投機的抽象化を避ける」に従い、3 ファイル目に
+    同パターンが出現してから検討する余地を残す。
+  - **`AppShell` 統合テストでの `/api/items/search` モック追加**: `SearchResults`
+    が `useItemSearch` 経由で `apiClient.get('/api/items/search?...')` を呼ぶため、
+    既存 `setupMockFetch` を拡張して `/api/items/search` を `{items:[], next_cursor:
+    null, has_more: false}` で応答するように追加した。テストの観点（検索モード
+    切替の確認）に対し空結果が最も低ノイズで、`SearchResults` の `search-results-empty`
+    testid 露出により切替判定が機械的に確認できる。
+  - **検索モード切替の testid 観測**: 「ItemList ではなく SearchResults が
+    レンダされる」「CLEAR_SEARCH で ItemList に戻る」を、testid（`search-results-empty`
+    / `フィードを選択してください` テキスト / `screen.queryByRole("tab", {name:
+    "全て"})`）の有無で観測する。`screen.queryByTestId(...).not.toBeInTheDocument()`
+    パターンで否定確認も行い、状態切替の往復が確実に取れることを保証した。
+  - **`item-list.tsx` のレイアウト調整**: 既存「`flex-shrink-0 border-b px-4 py-2`」
+    に対して `FeedSearchBar` を併設するため `flex flex-wrap items-center
+    justify-between gap-2` を追加し、横並びレイアウトに昇格させた。`flex-wrap`
+    により狭幅環境では検索バーが下段に折り返す。フィルタタブの既存テスト
+    （`screen.getByRole("tab", {...})` で取得）はクラス変更の影響を受けない。
+  - **`app-shell.tsx` のヘッダー調整**: 既存「`flex items-center
+    justify-between`」を `gap-3` 付きに昇格させ、`HeaderSearchBar` を中央に
+    挟む 3 カラム配置（Feedman タイトル / 検索バー / テーマ + ログアウト）と
+    した。`screen.getByText("Feedman")` / `screen.getByTestId("theme-toggle")`
+    等の既存テストは要素クエリで取得しているためレイアウト変更の影響を受けない。
+- 残存課題（次 task に影響する事項）:
+  - **Task 9（deferrable）**: NFR 1.2 のパフォーマンス計測 / `EXPLAIN ANALYZE`
+    スクリプトは未実装。数値目標（200ms 以内）の確認は別 PR / 別 Issue で扱う。
+  - **検索結果の `expandedItemId` 引継ぎ挙動**: `CLEAR_SEARCH` で `expandedItemId`
+    が保持される現状の reducer（impl-notes Task 6 判断）により、
+    検索 → 記事展開 → クリアの流れで「ItemList に戻った直後、対応する記事が
+    `expandedItemId` 一致なら自動展開されうる」UX が発生する。本 task の統合
+    テストでは検索結果が空のため当該ケースを再現していない。実環境で違和感が
+    出る場合は別 PR で `CLEAR_SEARCH` の reducer に `expandedItemId = null` を
+    追加する判断もありうる（design.md 行 690 への揃え戻し）。
+  - **既存 ESLint warning（`callback` 未使用）**: `item-list.test.tsx:21`
+    `IntersectionObserverCallback` の引数 `callback` 未使用 warning は本 task
+    の変更前から存在しており、本 task では触れずに残置した。warning は CI を
+    block しないため scope 外。
+
 ## 確認事項
 
 - **`SET_SEARCH_QUERY` の `searchFeedId` 計算**: 本 task では `action.feedId ?? null`
