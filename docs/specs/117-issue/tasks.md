@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. Repository 層: `ListStarredByUser` メソッドの追加と DB 結合テスト
+- [x] 1. Repository 層: `ListStarredByUser` メソッドの追加と DB 結合テスト
   - `internal/repository/interfaces.go` の `ItemRepository` インターフェースに `ListStarredByUser(ctx, userID, cursor, limit)` メソッドを追加する
   - `internal/repository/postgres_item_repo.go` に同メソッドの実装を追加する。SQL は `items i INNER JOIN item_states s ON i.id = s.item_id INNER JOIN feeds f ON i.feed_id = f.id WHERE s.user_id = $1 AND s.is_starred = true [AND i.published_at < $cursor] ORDER BY i.published_at DESC LIMIT $limit` とし、`f.title AS feed_title` を SELECT に含める
   - 戻り値の型は `[]repository.StarredItemRow`（または `[]model.ItemWithStateAndFeed`）として feed_title を保持する構造体を新設する
