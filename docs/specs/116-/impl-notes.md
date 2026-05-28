@@ -144,3 +144,5 @@ ItemDetail コンポーネントのヘッダーを再構成し、はてブ数と
 - 本リポジトリの CI は Node.js 20 を使用。ローカル検証は Node.js 24.11.1（vitest@4.0.18 +
   vite@7.3.3 の組み合わせで Node 22.11.0 では `ERR_REQUIRE_ESM` が出るため）で実施し全件 pass
 - 本変更はランタイム依存を追加していないため、CI（Node 20）でも同様に pass する想定
+
+STATUS: complete
