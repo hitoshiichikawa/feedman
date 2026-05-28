@@ -20,7 +20,7 @@
   - _Boundary: ItemService_
   - _Depends: 1_
 
-- [ ] 3. Handler 層: `ListStarredItems` ハンドラ + アダプタ + ルート登録
+- [x] 3. Handler 層: `ListStarredItems` ハンドラ + アダプタ + ルート登録
   - `internal/handler/item_handler.go` の `ItemServiceInterface` に `ListStarredItems(ctx, userID, cursorStr, limit) (*starredItemListResult, error)` を追加する
   - `starredItemSummaryResponse` 型（`itemSummaryResponse` の全フィールド + `FeedTitle string \`json:"feed_title"\``）と `starredItemListResult` 型を新設する
   - `(h *ItemHandler).ListStarredItems` を実装する。`UserIDFromContext` 失敗で 401、`cursor` / `limit` クエリパラメータをパース、`handleServiceError` で `model.APIError` を HTTP status にマップ
