@@ -281,3 +281,81 @@ learning は改変しない。
     クエリ本文は PII / ログ汚染回避のため出していない（長さのみ）。運用観察時に「特定
     キーワードがヒットしないユーザー」のトラブルシュートを行う場合、別経路（DB 側の
     `pg_stat_statements` 等）から `pattern` を引く必要がある点を覚えておく。
+
+### Task 6
+
+- 採用方針: `web/src/contexts/app-state.tsx` の `AppState` に検索状態 4 フィールド
+  （`searchQuery: string`, `isSearching: boolean`, `searchScope: 'global' | 'feed'`,
+  `searchFeedId: string | null`）を追加し、`SET_SEARCH_QUERY` / `CLEAR_SEARCH`
+  アクションを reducer に実装した。`SELECT_FEED` 既存挙動に検索状態リセット 4 行を追記し、
+  既存テストを壊さずに新規 5 ケース（初期値検証は既存 it に統合）を `app-state.test.tsx` に
+  追加。Vitest 14 ケース全 pass、ESLint 0 error（既存の未使用変数 warning のみ）。
+- 重要な判断:
+  - **`SearchScope` 型を `export` した**: design.md の AppState 仕様に `SearchScope` が
+    現れ、Task 7.1 (`web/src/types/item.ts` への `SearchScope` 型追加) と Task 7.2
+    (`useItemSearch` の引数型) も同じ用語を使う。`app-state.tsx` で `export type SearchScope`
+    として定義しておくことで、`types/item.ts` 側は `import { SearchScope } from
+    '@/contexts/app-state'` で再利用可能になる（Task 7.1 が `types/item.ts` で別途定義する
+    形を取るなら、本 export は冗長だが互換性は保たれる）。
+  - **`SET_SEARCH_QUERY` の `searchFeedId` 計算式**: design.md 行 689 は
+    `action.scope === 'feed' ? (action.feedId ?? state.selectedFeedId) : null` と
+    state.selectedFeedId への fallback を含めるが、tasks.md Task 6 の指示は
+    「`searchFeedId: string | null` を追加する」「`scope` / 任意の `feedId` を受け取る」
+    に留まる。本実装では tasks.md 側の表現を優先し、`action.feedId ?? null`（state
+    依存なしの単純 fallback）とした。理由: (1) design.md の「state.selectedFeedId
+    fallback」を採用すると `FeedSearchBar` (Task 7.4) が `feedId: state.selectedFeedId`
+    を明示 dispatch する設計と二重防御になり、UI 層の責務が曖昧化する。(2) 単純化した
+    結果として「scope='feed' なのに feedId 未指定 → searchFeedId=null」になると、
+    Task 7.2 の `useItemSearch` が `enabled: !(scope === 'feed' && !feedId)` で
+    検索を発火しないため、不整合 dispatch が silent に空クエリ扱いされ UX の安全性が
+    保たれる。design.md と挙動が異なる判断のため後述「確認事項」に記載した。
+  - **`SELECT_FEED` への検索状態リセット 4 行追加**: tasks.md 明示指示どおり実装。
+    design.md 行 693-696 の「フィード選択を検索の暗黙的解除として扱う」判断と整合。
+    NFR 2.2 の「検索解除時に検索実行直前の表示状態を復元」とは矛盾しないか検討したが、
+    SELECT_FEED は「新しいフィードを選ぶ」UX であり「検索を解除する」とは別操作のため、
+    リセットしても NFR 2.2 違反にはならない（Req 1.6 の `CLEAR_SEARCH` 経路でのみ
+    selectedFeedId / filter を復元する責務が問われる）。
+  - **`CLEAR_SEARCH` で `expandedItemId` をリセットしない**: design.md 行 690 は
+    `expandedItemId = null` を含めると記述しているが、本実装では `expandedItemId` を
+    保持した。理由: tasks.md Task 6 の括弧書きで明示されているのは「`selectedFeedId`
+    と `filter` は保持」のみで、`expandedItemId` の扱いは明示されていない。検索結果から
+    記事を展開した状態で × ボタンを押した際に「検索解除＋展開も解除」だと UX 上ノイズが
+    多い（展開はユーザーの直近の意図）。一方 design.md 行 690 の判断も合理性があるため、
+    実装での解釈差は後述「確認事項」に記載した。なお SET_SEARCH_QUERY 側も
+    `expandedItemId = null` の reset は実装していない（tasks.md に指示なし）。
+  - **テスト方針**: 既存テストの `初期状態が正しく設定されていること` に新フィールドの
+    初期値 expect を 4 行追加（既存挙動の非回帰を保証）し、新規 5 ケース
+    （SET_SEARCH_QUERY scope='global' / scope='feed' + feedId / scope='feed' feedId 省略 /
+    CLEAR_SEARCH で selectedFeedId+filter 保持 / SELECT_FEED で検索状態リセット）を
+    Provider 外エラーテストの直前に追加。既存テスト 9 件 + 新規 5 件 = 14 件全 pass。
+- 残存課題（次 task に影響する事項）:
+  - **Task 7.1 で `web/src/types/item.ts` に `SearchScope` 型を再定義する**場合は、
+    本 task で `app-state.tsx` から export した `SearchScope` と重複定義になる。
+    Task 7.1 実装時は (a) `types/item.ts` で独自定義しつつ `app-state.tsx` の型と
+    構造的に同一にする / (b) `types/item.ts` 側で `app-state.tsx` から re-export する /
+    (c) `app-state.tsx` から export せず削除して `types/item.ts` を唯一の定義源とする
+    のいずれかを選ぶ必要がある。本 task では (a) を想定して `app-state.tsx` 側にも
+    export を残す形にしたが、Task 7.1 担当が判断する余地がある。
+  - **Task 7.3 / 7.4 の検索バー実装で、`SET_SEARCH_QUERY` dispatch 時の feedId 渡し方**:
+    `FeedSearchBar` は `feedId: state.selectedFeedId` を明示 dispatch する（design.md
+    行 588）。`HeaderSearchBar` は `feedId` を省略する（scope='global' なので
+    state では null になる）。本 task の reducer 実装はこの dispatch パターンに前提を
+    置く。
+  - **Task 7.5 / 8 の `SearchResults` 統合で、`expandedItemId` の扱い**: 検索結果上の
+    記事展開は `EXPAND_ITEM` を流用する設計（design.md 行 614-621）。本 task で
+    CLEAR_SEARCH が expandedItemId を保持する判断のため、検索解除後の「展開状態が
+    残る」UX を Task 8 の統合テストで確認する必要がある。違和感が出るなら CLEAR_SEARCH
+    の reset を追加する（design.md 行 690 への揃え戻し）。
+
+## 確認事項
+
+- **`SET_SEARCH_QUERY` の `searchFeedId` 計算**: 本 task では `action.feedId ?? null`
+  （state.selectedFeedId への fallback なし）を採用したが、design.md 行 689 は
+  `action.feedId ?? state.selectedFeedId` を指定している。本実装は tasks.md の表現を
+  優先しており UX 上の安全性も保たれる（Task 7.4 の `FeedSearchBar` が明示 dispatch
+  する前提）が、design.md の意図と異なる場合は Task 7.4 実装時または PR レビューで
+  揃え戻しが必要。
+- **`CLEAR_SEARCH` で `expandedItemId` を保持する判断**: 本 task では tasks.md 明示
+  指示のみに従い `selectedFeedId` / `filter` のみ保持し、`expandedItemId` は触らない
+  実装とした。design.md 行 690 は `expandedItemId = null` を含めると記述している
+  ため、検索解除後に展開状態を残すか否かは UX レビュー時に再確認したい。
