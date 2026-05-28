@@ -143,7 +143,7 @@
   - _Requirements: 1.2, 1.4, 1.5, 1.6, NFR 2.3_
   - _Boundary: FeedSearchBar_
   - _Depends: 6_
-- [ ] 7.5 `web/src/components/search-results.tsx` と `search-results.test.tsx` を新規作成する (P)
+- [x] 7.5 `web/src/components/search-results.tsx` と `search-results.test.tsx` を新規作成する (P)
   - `useItemSearch(state.searchQuery, state.searchScope, state.searchFeedId)` の結果に対し、
     ローディング / エラー / 空状態 / 結果リストの 4 状態を出し分ける（TanStack Query の `isLoading`
     即時 true により NFR 1.1 の「1 秒以内のローディング表示」を満たす）
