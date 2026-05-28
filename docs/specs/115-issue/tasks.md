@@ -40,7 +40,7 @@
   - _Depends: 2.1_
 
 - [ ] 4. Service 層: subscription.Service に ManualFetch メソッド追加
-- [ ] 4.1 ManualFetch のオーケストレーション実装（認可 / 行ロック / クールダウン判定 / fetcher 呼び出し / メトリクス）
+- [x] 4.1 ManualFetch のオーケストレーション実装（認可 / 行ロック / クールダウン判定 / fetcher 呼び出し / メトリクス）
   - `internal/model/errors.go` に `ErrCodeFeedFetchInProgress = "FEED_FETCH_IN_PROGRESS"` /
     `ErrCodeFeedCooldown = "FEED_COOLDOWN"` 定数と、`NewFeedFetchInProgressError()` /
     `NewFeedCooldownError(retryAfterSeconds int)` 生成関数を追加。後者は `Details["retry_after_seconds"] = int` をセット

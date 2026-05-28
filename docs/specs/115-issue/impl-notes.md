@@ -42,7 +42,18 @@
 
 残存課題: なし。Task 4（`subscription.Service.ManualFetch` から手動経路でも `UpdateLastSuccessfulFetchAt` を呼ぶ）が後続。本タスクで自動経路の成功時刻記録は確立されたので、手動経路は同じ feedRepo メソッドを再利用するだけで Req 2.4「自動と手動の成功時刻を同等扱い」が成立する。
 
+### Task 4
+
+採用方針: `subscription.Service` に `ManualFetch` メソッドを追加し、手動フェッチのオーケストレーション（認可・行ロック・クールダウン判定・Fetcher呼び出し・メトリクス記録・結果分類）を実装。また、テストコードを追加して各境界条件やエラーケースを徹底検証。
+
+重要な判断:
+- **自己デッドロックの回避 (重要)**: 既存 `Fetcher` は `*sql.DB`（非トランザクション）経由で `UpdateFetchState` を発行するため、`LockFeedForUpdateNowait` でトランザクション（`FOR UPDATE` ロック）を保持したまま `fetcher.Fetch` を呼び出すと、行更新クエリがロックを待機して自己デッドロックを引き起こす。このため、クールダウン判定が終わった段階で `tx.Commit()` を呼び出して行ロックを事前に解放した上で `fetcher.Fetch` を実行する設計とした。
+- **クールダウンの判定とトランザクション解放**: クールダウン中（10分以内）の場合は外部HTTPリクエストを行わず `FEED_COOLDOWN` を返すが、トランザクションの未コミット状態を防ぐため、エラーを返す前に `tx.Commit()` または `tx.Rollback()` を安全に行うようにした。
+- **結果分類のロバスト性**: `Fetcher` 自体は `nil` を返しても、既存の `ApplyParseFailure` などの仕組みでフィード内部のエラーメッセージに失敗内容が記録される場合がある。そのため、`Fetch` 呼び出し後のフィード状態（`ConsecutiveErrors == 0 && FetchStatus == model.FetchStatusActive` 等）やエラーメッセージの文言（"UPSERT" や "パース" などの文字列検知）に基づいて適切に APIError (FEED_COOLDOWN, FETCH_FAILED, PARSE_FAILED) に変換し、対応するメトリクス（metrics package 実装予定）の Nop stub を定義・呼び出しした。
+- **単体テストの網羅**: `mockManualFetchTx` や `mockManualFetchMetricsRecorder` 等の専用モックを定義し、正常系成功、認可失敗（他ユーザーまたは存在しない購読ID）、ロック競合（`ErrFeedLocked` 発生時）、クールダウンによる拒否、およびSSRF / パース失敗 / 一般HTTPエラーなど各種フェッチエラー時のハンドリングとメトリクス記録が正しく行われることを検証した。
+
 ## 補足
+
 
 - 本実装で追加した依存ライブラリはなし。標準 `database/sql` の `sql.NullTime` のみを利用
 - DB 結合テスト `TestPostgresFeedRepo_LastSuccessfulFetchAt_Scan` はテスト用 PostgreSQL に接続できない CI 環境では既存テスト同様に skip される
