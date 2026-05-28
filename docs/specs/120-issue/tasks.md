@@ -133,7 +133,7 @@
   - _Requirements: 1.1, 1.3, 1.5, 1.6_
   - _Boundary: HeaderSearchBar_
   - _Depends: 6_
-- [ ] 7.4 `web/src/components/feed-search-bar.tsx` と `feed-search-bar.test.tsx` を新規作成する (P)
+- [x] 7.4 `web/src/components/feed-search-bar.tsx` と `feed-search-bar.test.tsx` を新規作成する (P)
   - design.md の `FeedSearchBar` 疑似シグネチャに従い、`selectedFeedId === null` のとき `null` を返す
     （NFR 2.3）
   - 入力欄 / Enter ハンドラ / クリアボタンを実装し、submit 時は `scope: 'feed'`,
