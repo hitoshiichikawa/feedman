@@ -72,8 +72,12 @@ func (m *mockItemStateRepo) DeleteByUserID(ctx context.Context, userID string) e
 }
 
 type mockFeedRepo struct {
-	findByIDFn         func(ctx context.Context, id string) (*model.Feed, error)
-	updateFetchStateFn func(ctx context.Context, feed *model.Feed) error
+	findByIDFn                  func(ctx context.Context, id string) (*model.Feed, error)
+	updateFetchStateFn          func(ctx context.Context, feed *model.Feed) error
+	lockFeedFn                  func(ctx context.Context, tx *sql.Tx, feedID string) (*model.Feed, error)
+	updateLastSuccessfulFetchFn func(ctx context.Context, feedID string, at time.Time) error
+	updateLastSuccessfulFetchAt []time.Time
+	updateLastSuccessfulFeedIDs []string
 }
 
 func (m *mockFeedRepo) FindByID(ctx context.Context, id string) (*model.Feed, error) {
@@ -101,13 +105,91 @@ func (m *mockFeedRepo) UpdateFetchState(ctx context.Context, feed *model.Feed) e
 	return nil
 }
 func (m *mockFeedRepo) LockFeedForUpdateNowait(ctx context.Context, tx *sql.Tx, feedID string) (*model.Feed, error) {
+	if m.lockFeedFn != nil {
+		return m.lockFeedFn(ctx, tx, feedID)
+	}
 	return nil, nil
 }
 func (m *mockFeedRepo) UpdateLastSuccessfulFetchAt(ctx context.Context, feedID string, at time.Time) error {
+	m.updateLastSuccessfulFetchAt = append(m.updateLastSuccessfulFetchAt, at)
+	m.updateLastSuccessfulFeedIDs = append(m.updateLastSuccessfulFeedIDs, feedID)
+	if m.updateLastSuccessfulFetchFn != nil {
+		return m.updateLastSuccessfulFetchFn(ctx, feedID, at)
+	}
 	return nil
 }
 
+
+type mockFeedFetcher struct {
+	fetchFn func(ctx context.Context, feed *model.Feed) error
+}
+
+func (m *mockFeedFetcher) Fetch(ctx context.Context, feed *model.Feed) error {
+	if m.fetchFn != nil {
+		return m.fetchFn(ctx, feed)
+	}
+	return nil
+}
+
+type mockManualFetchTx struct {
+	tx         *sql.Tx
+	commitFn   func() error
+	rollbackFn func() error
+	committed  bool
+	rolledBack bool
+}
+
+func (m *mockManualFetchTx) Tx() *sql.Tx { return m.tx }
+func (m *mockManualFetchTx) Commit() error {
+	m.committed = true
+	if m.commitFn != nil {
+		return m.commitFn()
+	}
+	return nil
+}
+func (m *mockManualFetchTx) Rollback() error {
+	m.rolledBack = true
+	if m.rollbackFn != nil {
+		return m.rollbackFn()
+	}
+	return nil
+}
+
+type mockManualFetchTxBeginner struct {
+	beginFn func(ctx context.Context) (ManualFetchTx, error)
+}
+
+func (m *mockManualFetchTxBeginner) BeginManualFetchTx(ctx context.Context) (ManualFetchTx, error) {
+	if m.beginFn != nil {
+		return m.beginFn(ctx)
+	}
+	return &mockManualFetchTx{}, nil
+}
+
+type mockManualFetchMetricsRecorder struct {
+	successCount      int
+	failureCount      int
+	failureReasons    []string
+	cooldownCount     int
+	lockConflictCount int
+}
+
+func (m *mockManualFetchMetricsRecorder) RecordManualFetchSuccess() {
+	m.successCount++
+}
+func (m *mockManualFetchMetricsRecorder) RecordManualFetchFailure(reason string) {
+	m.failureCount++
+	m.failureReasons = append(m.failureReasons, reason)
+}
+func (m *mockManualFetchMetricsRecorder) RecordManualFetchCooldownRejected() {
+	m.cooldownCount++
+}
+func (m *mockManualFetchMetricsRecorder) RecordManualFetchLockConflict() {
+	m.lockConflictCount++
+}
+
 // --- テスト ---
+
 
 // TestService_ListSubscriptions は購読一覧取得を検証する。
 func TestService_ListSubscriptions(t *testing.T) {
@@ -132,7 +214,7 @@ func TestService_ListSubscriptions(t *testing.T) {
 		},
 	}
 
-	svc := NewService(subRepo, nil, nil)
+	svc := NewService(subRepo, nil, nil, nil, nil, nil)
 
 	results, err := svc.ListSubscriptions(context.Background(), "user-1")
 	if err != nil {
@@ -201,7 +283,7 @@ func TestService_UpdateSettings_BoundaryValues(t *testing.T) {
 				},
 			}
 
-			svc := NewService(subRepo, nil, nil)
+			svc := NewService(subRepo, nil, nil, nil, nil, nil)
 
 			// Act
 			result, err := svc.UpdateSettings(context.Background(), "user-1", "sub-1", tt.minutes)
@@ -266,7 +348,7 @@ func TestService_Unsubscribe(t *testing.T) {
 		},
 	}
 
-	svc := NewService(subRepo, itemStateRepo, nil)
+	svc := NewService(subRepo, itemStateRepo, nil, nil, nil, nil)
 
 	err := svc.Unsubscribe(context.Background(), "user-1", "sub-1")
 	if err != nil {
@@ -288,7 +370,7 @@ func TestService_Unsubscribe_WrongUser_ReturnsError(t *testing.T) {
 		},
 	}
 
-	svc := NewService(subRepo, nil, nil)
+	svc := NewService(subRepo, nil, nil, nil, nil, nil)
 
 	err := svc.Unsubscribe(context.Background(), "user-1", "sub-1")
 	if err == nil {
@@ -328,7 +410,7 @@ func TestService_ResumeFetch(t *testing.T) {
 		},
 	}
 
-	svc := NewService(subRepo, nil, feedRepo)
+	svc := NewService(subRepo, nil, feedRepo, nil, nil, nil)
 
 	result, err := svc.ResumeFetch(context.Background(), "user-1", "sub-1")
 	if err != nil {
@@ -358,7 +440,7 @@ func TestService_ResumeFetch_NotStopped_ReturnsError(t *testing.T) {
 		},
 	}
 
-	svc := NewService(subRepo, nil, feedRepo)
+	svc := NewService(subRepo, nil, feedRepo, nil, nil, nil)
 
 	_, err := svc.ResumeFetch(context.Background(), "user-1", "sub-1")
 	if err == nil {
@@ -382,7 +464,7 @@ func TestService_Unsubscribe_NilItemStateRepo_SkipsItemStateDelete(t *testing.T)
 		},
 	}
 
-	svc := NewService(subRepo, nil, nil)
+	svc := NewService(subRepo, nil, nil, nil, nil, nil)
 
 	// Act
 	err := svc.Unsubscribe(context.Background(), "user-1", "sub-1")
@@ -418,7 +500,7 @@ func TestService_Unsubscribe_ItemStateDeleteError_PropagatesError(t *testing.T) 
 		},
 	}
 
-	svc := NewService(subRepo, itemStateRepo, nil)
+	svc := NewService(subRepo, itemStateRepo, nil, nil, nil, nil)
 
 	// Act
 	err := svc.Unsubscribe(context.Background(), "user-1", "sub-1")
@@ -457,7 +539,7 @@ func TestService_ResumeFetch_NotStopped_ReturnsFeedNotStoppedAndDoesNotUpdate(t 
 		},
 	}
 
-	svc := NewService(subRepo, nil, feedRepo)
+	svc := NewService(subRepo, nil, feedRepo, nil, nil, nil)
 
 	// Act
 	result, err := svc.ResumeFetch(context.Background(), "user-1", "sub-1")
@@ -515,7 +597,7 @@ func TestService_UpdateSettings_Success(t *testing.T) {
 		},
 	}
 
-	svc := NewService(subRepo, nil, nil)
+	svc := NewService(subRepo, nil, nil, nil, nil, nil)
 
 	// Act
 	result, err := svc.UpdateSettings(context.Background(), "user-1", "sub-1", wantMinutes)
@@ -563,7 +645,7 @@ func TestService_UpdateSettings_WrongUser_ReturnsSubscriptionNotFound(t *testing
 		},
 	}
 
-	svc := NewService(subRepo, nil, nil)
+	svc := NewService(subRepo, nil, nil, nil, nil, nil)
 
 	// Act
 	result, err := svc.UpdateSettings(context.Background(), "user-1", "sub-1", 60)
@@ -606,7 +688,7 @@ func TestService_UpdateSettings_SubscriptionNotFound(t *testing.T) {
 		},
 	}
 
-	svc := NewService(subRepo, nil, nil)
+	svc := NewService(subRepo, nil, nil, nil, nil, nil)
 
 	// Act
 	result, err := svc.UpdateSettings(context.Background(), "user-1", "sub-1", 60)
@@ -650,7 +732,7 @@ func TestService_UpdateSettings_FindByIDError(t *testing.T) {
 		},
 	}
 
-	svc := NewService(subRepo, nil, nil)
+	svc := NewService(subRepo, nil, nil, nil, nil, nil)
 
 	// Act
 	result, err := svc.UpdateSettings(context.Background(), "user-1", "sub-1", 60)
@@ -688,7 +770,7 @@ func TestService_UpdateSettings_UpdateFetchIntervalError(t *testing.T) {
 		},
 	}
 
-	svc := NewService(subRepo, nil, nil)
+	svc := NewService(subRepo, nil, nil, nil, nil, nil)
 
 	// Act
 	result, err := svc.UpdateSettings(context.Background(), "user-1", "sub-1", 60)
@@ -723,7 +805,7 @@ func TestService_UpdateSettings_ListByUserIDWithFeedInfoError(t *testing.T) {
 		},
 	}
 
-	svc := NewService(subRepo, nil, nil)
+	svc := NewService(subRepo, nil, nil, nil, nil, nil)
 
 	// Act
 	result, err := svc.UpdateSettings(context.Background(), "user-1", "sub-1", 60)
@@ -772,7 +854,7 @@ func TestService_UpdateSettings_NotFoundAfterUpdate(t *testing.T) {
 		},
 	}
 
-	svc := NewService(subRepo, nil, nil)
+	svc := NewService(subRepo, nil, nil, nil, nil, nil)
 
 	// Act
 	result, err := svc.UpdateSettings(context.Background(), "user-1", "sub-1", 60)
@@ -792,3 +874,286 @@ func TestService_UpdateSettings_NotFoundAfterUpdate(t *testing.T) {
 		t.Errorf("expected nil result, got %+v", result)
 	}
 }
+
+// TestService_ManualFetch_Success は手動フェッチが正常に成功し、
+// 最新の購読情報を返すこと、クールダウンが更新されることを検証する。
+func TestService_ManualFetch_Success(t *testing.T) {
+	sub := &model.Subscription{ID: "sub-1", UserID: "user-1", FeedID: "feed-1"}
+	feed := &model.Feed{
+		ID:          "feed-1",
+		FetchStatus: model.FetchStatusActive,
+	}
+
+	subRepo := &mockSubRepo{
+		findByIDFn: func(ctx context.Context, id string) (*model.Subscription, error) {
+			return sub, nil
+		},
+		listByUserIDWithFeedFn: func(ctx context.Context, userID string) ([]repository.SubscriptionWithFeedInfo, error) {
+			return []repository.SubscriptionWithFeedInfo{
+				{
+					Subscription: *sub,
+					FeedTitle:    "Test Feed",
+					FeedURL:      "https://example.com/feed.xml",
+					FetchStatus:  model.FetchStatusActive,
+				},
+			}, nil
+		},
+	}
+
+	feedRepo := &mockFeedRepo{
+		lockFeedFn: func(ctx context.Context, tx *sql.Tx, feedID string) (*model.Feed, error) {
+			return feed, nil
+		},
+	}
+
+	fetcher := &mockFeedFetcher{
+		fetchFn: func(ctx context.Context, f *model.Feed) error {
+			// フェッチャーの中で成功したと仮定して状態を更新
+			f.ConsecutiveErrors = 0
+			f.FetchStatus = model.FetchStatusActive
+			return nil
+		},
+	}
+
+	txBeginner := &mockManualFetchTxBeginner{}
+	metrics := &mockManualFetchMetricsRecorder{}
+
+	svc := NewService(subRepo, nil, feedRepo, fetcher, txBeginner, metrics)
+
+	// Act
+	result, err := svc.ManualFetch(context.Background(), "user-1", "sub-1")
+
+	// Assert
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.ID != "sub-1" {
+		t.Errorf("expected subscription ID sub-1, got %q", result.ID)
+	}
+	if metrics.successCount != 1 {
+		t.Errorf("expected successCount to be 1, got %d", metrics.successCount)
+	}
+	if len(feedRepo.updateLastSuccessfulFetchAt) != 1 {
+		t.Errorf("expected UpdateLastSuccessfulFetchAt to be called once, got %d", len(feedRepo.updateLastSuccessfulFetchAt))
+	}
+}
+
+// TestService_ManualFetch_SubscriptionNotFound は購読情報が存在しないか、
+// 他ユーザーのものである場合に SUBSCRIPTION_NOT_FOUND を返すことを検証する。
+func TestService_ManualFetch_SubscriptionNotFound(t *testing.T) {
+	subRepo := &mockSubRepo{
+		findByIDFn: func(ctx context.Context, id string) (*model.Subscription, error) {
+			// 他ユーザーの購読
+			return &model.Subscription{ID: "sub-1", UserID: "user-other", FeedID: "feed-1"}, nil
+		},
+	}
+
+	svc := NewService(subRepo, nil, nil, nil, nil, nil)
+
+	// Act
+	_, err := svc.ManualFetch(context.Background(), "user-1", "sub-1")
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	apiErr, ok := err.(*model.APIError)
+	if !ok {
+		t.Fatalf("error type = %T, want *model.APIError", err)
+	}
+	if apiErr.Code != model.ErrCodeSubscriptionNotFound {
+		t.Errorf("error code = %q, want %q", apiErr.Code, model.ErrCodeSubscriptionNotFound)
+	}
+}
+
+// TestService_ManualFetch_LockConflict は行ロック競合時に
+// FEED_FETCH_IN_PROGRESS を返すことを検証する。
+func TestService_ManualFetch_LockConflict(t *testing.T) {
+	sub := &model.Subscription{ID: "sub-1", UserID: "user-1", FeedID: "feed-1"}
+	subRepo := &mockSubRepo{
+		findByIDFn: func(ctx context.Context, id string) (*model.Subscription, error) {
+			return sub, nil
+		},
+	}
+
+	feedRepo := &mockFeedRepo{
+		lockFeedFn: func(ctx context.Context, tx *sql.Tx, feedID string) (*model.Feed, error) {
+			return nil, repository.ErrFeedLocked
+		},
+	}
+
+	txBeginner := &mockManualFetchTxBeginner{}
+	metrics := &mockManualFetchMetricsRecorder{}
+
+	svc := NewService(subRepo, nil, feedRepo, nil, txBeginner, metrics)
+
+	// Act
+	_, err := svc.ManualFetch(context.Background(), "user-1", "sub-1")
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	apiErr, ok := err.(*model.APIError)
+	if !ok {
+		t.Fatalf("error type = %T, want *model.APIError", err)
+	}
+	if apiErr.Code != model.ErrCodeFeedFetchInProgress {
+		t.Errorf("error code = %q, want %q", apiErr.Code, model.ErrCodeFeedFetchInProgress)
+	}
+	if metrics.lockConflictCount != 1 {
+		t.Errorf("expected lockConflictCount to be 1, got %d", metrics.lockConflictCount)
+	}
+}
+
+// TestService_ManualFetch_Cooldown はクールダウン判定（10分以内）により、
+// FEED_COOLDOWN を返すことを検証する。
+func TestService_ManualFetch_Cooldown(t *testing.T) {
+	sub := &model.Subscription{ID: "sub-1", UserID: "user-1", FeedID: "feed-1"}
+	// 5分前に成功した履歴がある
+	lastFetch := time.Now().Add(-5 * time.Minute)
+	feed := &model.Feed{
+		ID:                    "feed-1",
+		FetchStatus:           model.FetchStatusActive,
+		LastSuccessfulFetchAt: &lastFetch,
+	}
+
+	subRepo := &mockSubRepo{
+		findByIDFn: func(ctx context.Context, id string) (*model.Subscription, error) {
+			return sub, nil
+		},
+	}
+
+	feedRepo := &mockFeedRepo{
+		lockFeedFn: func(ctx context.Context, tx *sql.Tx, feedID string) (*model.Feed, error) {
+			return feed, nil
+		},
+	}
+
+	txBeginner := &mockManualFetchTxBeginner{}
+	metrics := &mockManualFetchMetricsRecorder{}
+
+	svc := NewService(subRepo, nil, feedRepo, nil, txBeginner, metrics)
+
+	// Act
+	_, err := svc.ManualFetch(context.Background(), "user-1", "sub-1")
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	apiErr, ok := err.(*model.APIError)
+	if !ok {
+		t.Fatalf("error type = %T, want *model.APIError", err)
+	}
+	if apiErr.Code != model.ErrCodeFeedCooldown {
+		t.Errorf("error code = %q, want %q", apiErr.Code, model.ErrCodeFeedCooldown)
+	}
+	if metrics.cooldownCount != 1 {
+		t.Errorf("expected cooldownCount to be 1, got %d", metrics.cooldownCount)
+	}
+}
+
+// TestService_ManualFetch_FetchError はフェッチ失敗時に、
+// 適切な API エラーを返すこと、メトリクスが記録されることを検証する。
+func TestService_ManualFetch_FetchError(t *testing.T) {
+	sub := &model.Subscription{ID: "sub-1", UserID: "user-1", FeedID: "feed-1"}
+	feed := &model.Feed{
+		ID:          "feed-1",
+		FetchStatus: model.FetchStatusActive,
+	}
+
+	subRepo := &mockSubRepo{
+		findByIDFn: func(ctx context.Context, id string) (*model.Subscription, error) {
+			return sub, nil
+		},
+	}
+
+	feedRepo := &mockFeedRepo{
+		lockFeedFn: func(ctx context.Context, tx *sql.Tx, feedID string) (*model.Feed, error) {
+			return feed, nil
+		},
+	}
+
+	tests := []struct {
+		name       string
+		fetchErr   error
+		feedErrMsg string
+		feedStatus model.FetchStatus
+		wantCode   string
+		wantReason string
+	}{
+		{
+			name:       "SSRF error",
+			fetchErr:   errors.New("SSRF detected"),
+			wantCode:   model.ErrCodeFetchFailed,
+			wantReason: "ssrf_blocked",
+		},
+		{
+			name:       "Parse error in fetch",
+			fetchErr:   errors.New("parse failed"),
+			wantCode:   model.ErrCodeFetchFailed,
+			wantReason: "parse_error",
+		},
+		{
+			name:       "Normal fetch error",
+			fetchErr:   errors.New("http 500"),
+			wantCode:   model.ErrCodeFetchFailed,
+			wantReason: "fetch_error",
+		},
+		{
+			name:       "Parse failed in feed message status",
+			fetchErr:   nil,
+			feedErrMsg: "パース失敗しました",
+			feedStatus: model.FetchStatusError,
+			wantCode:   model.ErrCodeParseFailed,
+			wantReason: "parse_error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			feed.ErrorMessage = tt.feedErrMsg
+			feed.FetchStatus = tt.feedStatus
+			if tt.feedStatus == "" {
+				feed.FetchStatus = model.FetchStatusActive
+			}
+
+			fetcher := &mockFeedFetcher{
+				fetchFn: func(ctx context.Context, f *model.Feed) error {
+					return tt.fetchErr
+				},
+			}
+
+			txBeginner := &mockManualFetchTxBeginner{}
+			metrics := &mockManualFetchMetricsRecorder{}
+
+			svc := NewService(subRepo, nil, feedRepo, fetcher, txBeginner, metrics)
+
+			// Act
+			_, err := svc.ManualFetch(context.Background(), "user-1", "sub-1")
+
+			// Assert
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			apiErr, ok := err.(*model.APIError)
+			if !ok {
+				t.Fatalf("error type = %T, want *model.APIError", err)
+			}
+			if apiErr.Code != tt.wantCode {
+				t.Errorf("error code = %q, want %q", apiErr.Code, tt.wantCode)
+			}
+			if metrics.failureCount != 1 {
+				t.Errorf("expected failureCount to be 1, got %d", metrics.failureCount)
+			}
+			if metrics.failureReasons[0] != tt.wantReason {
+				t.Errorf("expected failure reason %q, got %q", tt.wantReason, metrics.failureReasons[0])
+			}
+		})
+	}
+}
+
