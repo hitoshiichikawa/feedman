@@ -59,6 +59,13 @@ func (m *mockItemRepo) ListByFeed(_ context.Context, feedID, userID string, filt
 	return nil, nil
 }
 
+// ListStarredByUser はインターフェース充足のための最小スタブ。
+// 本 task では Repository 層の実装と DB 結合テストのみがスコープであり、
+// service 層への組み込みは task 2 で行うため、サービス層テストでは未使用。
+func (m *mockItemRepo) ListStarredByUser(_ context.Context, _ string, _ time.Time, _ int) ([]repository.StarredItemRow, error) {
+	return nil, nil
+}
+
 func (m *mockItemRepo) FindByFeedAndGUID(_ context.Context, feedID, guid string) (*model.Item, error) {
 	key := feedID + "|" + guid
 	item, ok := m.byFeedGUID[key]

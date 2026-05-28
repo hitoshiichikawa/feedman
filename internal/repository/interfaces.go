@@ -126,6 +126,13 @@ type ItemRepository interface {
 	// filter: "all"=全件, "unread"=未読のみ, "starred"=スターのみ
 	ListByFeed(ctx context.Context, feedID, userID string, filter model.ItemFilter, cursor time.Time, limit int) ([]model.ItemWithState, error)
 
+	// ListStarredByUser は指定ユーザーがスター付与した記事を全フィード横断・published_at降順で取得する。
+	// items と item_states と feeds を INNER JOIN し、feed_title を付与する。
+	// cursor がゼロ値の場合は先頭から取得する。
+	// 返却スライス内の全行は s.user_id = userID AND s.is_starred = true を満たし、
+	// 他ユーザーのスター記事は一切含まれない（NFR 2.1）。
+	ListStarredByUser(ctx context.Context, userID string, cursor time.Time, limit int) ([]StarredItemRow, error)
+
 	// Create は新規記事を作成する。
 	Create(ctx context.Context, item *model.Item) error
 
@@ -143,6 +150,16 @@ type ItemRepository interface {
 	// 途中でエラーが発生した場合は当該バッチを全件ロールバックし、1 件も永続化しない。
 	// toCreate / toUpdate のいずれかが空でも安全に動作する。
 	BulkUpsert(ctx context.Context, toCreate, toUpdate []*model.Item) error
+}
+
+// StarredItemRow は全フィード横断スター記事一覧の 1 行分のデータを表す。
+// model.ItemWithState（記事 + ユーザー状態）にフィードタイトルを併記する。
+// Requirement 2.4 / 4.10 によりフロントエンドで「どのフィードの記事か」を表示するため、
+// items と feeds の INNER JOIN で feed_title を 1 段で取得する。
+type StarredItemRow struct {
+	model.ItemWithState
+	// FeedTitle は当該記事が所属するフィードのタイトル（feeds.title）。
+	FeedTitle string
 }
 
 // ExistingItems は同一性判定のための既存記事を guid_or_id / link / content_hash 別に索引した結果。
