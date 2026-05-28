@@ -20,13 +20,16 @@ import (
 
 // mockFeedRepo はFeedRepositoryのテスト用モック。
 type mockFeedRepo struct {
-	listDueForFetchFunc   func(ctx context.Context) ([]*model.Feed, error)
-	updateFetchStateFunc  func(ctx context.Context, feed *model.Feed) error
-	findByIDFunc          func(ctx context.Context, id string) (*model.Feed, error)
-	findByFeedURLFunc     func(ctx context.Context, feedURL string) (*model.Feed, error)
-	createFunc            func(ctx context.Context, feed *model.Feed) error
-	updateFunc            func(ctx context.Context, feed *model.Feed) error
-	updateFaviconFunc     func(ctx context.Context, feedID string, faviconData []byte, faviconMime string) error
+	listDueForFetchFunc           func(ctx context.Context) ([]*model.Feed, error)
+	updateFetchStateFunc          func(ctx context.Context, feed *model.Feed) error
+	findByIDFunc                  func(ctx context.Context, id string) (*model.Feed, error)
+	findByFeedURLFunc             func(ctx context.Context, feedURL string) (*model.Feed, error)
+	createFunc                    func(ctx context.Context, feed *model.Feed) error
+	updateFunc                    func(ctx context.Context, feed *model.Feed) error
+	updateFaviconFunc             func(ctx context.Context, feedID string, faviconData []byte, faviconMime string) error
+	updateLastSuccessfulFetchAtFn func(ctx context.Context, feedID string, at time.Time) error
+	lastSuccessfulFetchAtCalls    int
+	lastSuccessfulFetchAtFeedIDs  []string
 }
 
 func (m *mockFeedRepo) FindByID(ctx context.Context, id string) (*model.Feed, error) {
@@ -83,6 +86,11 @@ func (m *mockFeedRepo) LockFeedForUpdateNowait(ctx context.Context, tx *sql.Tx, 
 }
 
 func (m *mockFeedRepo) UpdateLastSuccessfulFetchAt(ctx context.Context, feedID string, at time.Time) error {
+	m.lastSuccessfulFetchAtCalls++
+	m.lastSuccessfulFetchAtFeedIDs = append(m.lastSuccessfulFetchAtFeedIDs, feedID)
+	if m.updateLastSuccessfulFetchAtFn != nil {
+		return m.updateLastSuccessfulFetchAtFn(ctx, feedID, at)
+	}
 	return nil
 }
 
