@@ -66,7 +66,7 @@
   - _Requirements: 1.5, 2.4, 2.6, 3.5, 4.1, 4.4_
 
 - [ ] 5. Handler `/api/items/search` を実装しルーターに登録する
-- [ ] 5.1 `internal/handler/item_search_handler.go` を新規作成する
+- [x] 5.1 `internal/handler/item_search_handler.go` を新規作成する
   - `ItemSearchServiceInterface` を定義し、`Search(ctx, userID, rawQuery string, feedID *string, cursorStr string, limit int) (*itemSearchResponse, error)` を持たせる
   - HTTP ハンドラは既存 `feed_handler.go` / `item_handler.go` の `UserIDFromContext` パターンを
     踏襲し、401/400/403/500 を `handleServiceError` で返す
