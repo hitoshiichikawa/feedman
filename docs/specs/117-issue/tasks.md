@@ -10,7 +10,7 @@
   - _Requirements: 2.2, 2.4, 4.1, 4.2, 4.9, 4.10, NFR 1.1, NFR 1.2, NFR 2.1_
   - _Boundary: ItemRepository, PostgresItemRepo_
 
-- [ ] 2. Service 層: `ListStarredItems` メソッドの追加と単体テスト
+- [x] 2. Service 層: `ListStarredItems` メソッドの追加と単体テスト
   - `internal/item/service.go` の `ItemService` に `ListStarredItems(ctx, userID, cursorStr, limit)` メソッドを追加する
   - 既存 `ListItems` のカーソルパース・`limit+1` 取得・`has_more` 判定・`next_cursor` 算出・サマリー変換のロジックを**ヘルパー関数として抽出**して再利用する（`parseItemCursor` / `buildItemListResult` 等）。既存 `ListItems` の挙動は変えないこと
   - 横断スター用の `StarredItemSummary`（既存 `ItemSummary` に `FeedTitle string` を追加）を新設し、サービス層レスポンス `StarredItemListResult` を返す
