@@ -98,7 +98,7 @@
     アダプタを構築、`RouterDeps.ItemSearchService` にセットする
   - _Requirements: 1.3, 1.4_
 
-- [ ] 6. Web フロントエンドの状態管理に検索モード（横断 / フィード内）を追加する
+- [x] 6. Web フロントエンドの状態管理に検索モード（横断 / フィード内）を追加する
   - `web/src/contexts/app-state.tsx` の `AppState` に `searchQuery: string`, `isSearching: boolean`,
     `searchScope: 'global' | 'feed'`, `searchFeedId: string | null` を追加する
   - アクション型 `SET_SEARCH_QUERY`（`query` / `scope` / 任意の `feedId` を受け取る）と
