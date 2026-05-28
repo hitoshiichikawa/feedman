@@ -2,7 +2,8 @@
 
 import { cn } from "@/lib/utils";
 import type { Subscription } from "@/types/feed";
-import { CircleAlert, CirclePause } from "lucide-react";
+import { CircleAlert, CirclePause, Rss } from "lucide-react";
+import { useState } from "react";
 
 /** FeedList コンポーネントのプロパティ */
 interface FeedListProps {
@@ -47,18 +48,11 @@ export function FeedList({ feeds, selectedFeedId, onSelectFeed }: FeedListProps)
             )}
             onClick={() => onSelectFeed(feed.feed_id)}
           >
-            {/* favicon */}
-            <div className="flex-shrink-0 w-4 h-4">
-              {feed.favicon_url ? (
-                <img
-                  src={feed.favicon_url}
-                  alt={`${feed.feed_title} のアイコン`}
-                  className="w-4 h-4 rounded-sm object-contain"
-                />
-              ) : (
-                <div className="w-4 h-4" />
-              )}
-            </div>
+            <FeedFavicon
+              feedId={feed.id}
+              faviconURL={feed.favicon_url ?? null}
+              feedTitle={feed.feed_title}
+            />
 
             {/* タイトル */}
             <span className="flex-1 truncate">{feed.feed_title}</span>
@@ -98,5 +92,52 @@ export function FeedList({ feeds, selectedFeedId, onSelectFeed }: FeedListProps)
         );
       })}
     </nav>
+  );
+}
+
+/** FeedFavicon のプロパティ */
+interface FeedFaviconProps {
+  /** 購読 ID（test-id 用） */
+  feedId: string;
+  /** favicon の URL（null/空文字なら代替アイコン表示） */
+  faviconURL: string | null;
+  /** フィードタイトル（alt 属性用） */
+  feedTitle: string;
+}
+
+/**
+ * フィード行先頭の favicon 表示コンポーネント。
+ *
+ * favicon URL が設定されていない場合、および <img> の onError が発火した場合は
+ * lucide-react の Rss アイコンをデフォルトアイコンとして表示する。
+ * 表示サイズは w-4 h-4 で実 favicon と同じ。レイアウトは変化しない（要件 3.3, 3.4）。
+ */
+function FeedFavicon({ feedId, faviconURL, feedTitle }: FeedFaviconProps) {
+  const [imgFailed, setImgFailed] = useState(false);
+
+  const hasURL = faviconURL !== null && faviconURL !== "";
+  const showImage = hasURL && !imgFailed;
+
+  return (
+    <div className="flex-shrink-0 w-4 h-4">
+      {showImage ? (
+        <img
+          data-testid={`feed-favicon-${feedId}`}
+          src={faviconURL}
+          alt={`${feedTitle} のアイコン`}
+          className="w-4 h-4 rounded-sm object-contain"
+          onError={() => setImgFailed(true)}
+        />
+      ) : (
+        <span
+          data-testid={`feed-favicon-fallback-${feedId}`}
+          aria-label={`${feedTitle} のアイコン`}
+          role="img"
+          className="inline-flex items-center justify-center w-4 h-4 text-muted-foreground"
+        >
+          <Rss className="w-4 h-4" aria-hidden="true" />
+        </span>
+      )}
+    </div>
   );
 }

@@ -74,6 +74,63 @@ describe("FeedList コンポーネント", () => {
     expect(screen.queryByAltText("News Feed のアイコン")).not.toBeInTheDocument();
   });
 
+  it("faviconがnullの場合に代替アイコン（fallback）を表示すること（要件 3.1）", () => {
+    // Arrange: favicon_url が null の sub-2 (News Feed) を含む mockFeeds を使う
+
+    // Act
+    render(
+      <FeedList feeds={mockFeeds} selectedFeedId={null} onSelectFeed={() => {}} />
+    );
+
+    // Assert: News Feed (sub-2) の代替アイコンが表示される
+    const fallback = screen.getByTestId("feed-favicon-fallback-sub-2");
+    expect(fallback).toBeInTheDocument();
+    expect(fallback).toHaveAttribute("aria-label", "News Feed のアイコン");
+  });
+
+  it("faviconが存在するフィードには代替アイコンを表示しないこと", () => {
+    // Arrange & Act
+    render(
+      <FeedList feeds={mockFeeds} selectedFeedId={null} onSelectFeed={() => {}} />
+    );
+
+    // Assert: Tech Blog (sub-1, favicon_url あり) は fallback を持たない
+    expect(screen.queryByTestId("feed-favicon-fallback-sub-1")).not.toBeInTheDocument();
+  });
+
+  it("favicon画像の読み込みに失敗した場合に代替アイコンに切り替わること（要件 3.2）", () => {
+    // Arrange
+    render(
+      <FeedList feeds={mockFeeds} selectedFeedId={null} onSelectFeed={() => {}} />
+    );
+
+    const img = screen.getByTestId("feed-favicon-sub-1");
+    expect(img).toBeInTheDocument();
+    // 初期状態では fallback は表示されない
+    expect(screen.queryByTestId("feed-favicon-fallback-sub-1")).not.toBeInTheDocument();
+
+    // Act: img の onError を発火させる
+    fireEvent.error(img);
+
+    // Assert: img が消え fallback が表示される
+    expect(screen.queryByTestId("feed-favicon-sub-1")).not.toBeInTheDocument();
+    const fallback = screen.getByTestId("feed-favicon-fallback-sub-1");
+    expect(fallback).toBeInTheDocument();
+    expect(fallback).toHaveAttribute("aria-label", "Tech Blog のアイコン");
+  });
+
+  it("代替アイコン表示時もフィードタイトル・未読数バッジ・ステータスアイコンのレイアウトを維持すること（要件 3.4）", () => {
+    // Arrange & Act: sub-2 (favicon_url null, stopped, unread 0)
+    render(
+      <FeedList feeds={mockFeeds} selectedFeedId={null} onSelectFeed={() => {}} />
+    );
+
+    // Assert: 同じ行に fallback / タイトル / ステータス が全て存在
+    expect(screen.getByTestId("feed-favicon-fallback-sub-2")).toBeInTheDocument();
+    expect(screen.getByText("News Feed")).toBeInTheDocument();
+    expect(screen.getByTestId("feed-status-sub-2")).toBeInTheDocument();
+  });
+
   it("fetch_statusがstoppedの場合に停止アイコンを表示すること", () => {
     render(
       <FeedList feeds={mockFeeds} selectedFeedId={null} onSelectFeed={() => {}} />
