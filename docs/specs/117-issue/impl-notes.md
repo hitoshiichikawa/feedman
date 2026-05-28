@@ -276,6 +276,62 @@ Handler 層の結合テスト追加（既存挙動の非干渉確認込み）。
   fixture 構築パターン）は Web 側 task では再利用されない（フロントエンドは fetch mock
   ベースで完結する想定）。
 
+### Task 5
+
+Web フロントエンド: `StarredItemSummary` / `StarredItemListResponse` 型定義と
+`useStarredItems` フックの新規追加。
+
+#### 採用方針
+
+- `StarredItemSummary` は `ItemSummary` を `extends` で拡張し `feed_title: string` を
+  追加。`ItemListResponse` と `StarredItemListResponse` は **並列型** として共存させ、
+  既存の `ItemSummary` / `ItemListResponse` には一切手を加えない（NFR 3.1 を型レベルで
+  担保 = 既存 API スキーマを汚染しない）。Backend 側 Task 3 で採用した
+  `starredItemSummaryResponse` の Go 構造体 embed パターンと意図が並列している。
+- `useStarredItems` は `useItems` の構造をほぼそのまま流用し、相違点は
+  (a) queryKey が `["items", "starred"]` 固定（引数なし）、(b) URL が
+  `/api/feeds/starred/items` 固定、(c) `filter` 引数がない、(d) `enabled` 制御がない
+  （フックを呼ぶ条件はコンポーネント側で判定する design.md §useStarredItems 方針）の 4 点。
+- queryKey の前置キーを `"items"` で共有することで、既存 `useToggleStar` の
+  `onSettled` 内 `queryClient.invalidateQueries({ queryKey: ["items"] })` が prefix match
+  により横断キャッシュを **自動的に invalidate** する。Req 3.2 / 3.3 / 3.4 を
+  追加コードなしで構造的に充足する設計（design.md §useStarredItems 実装方針通り）。
+
+#### 重要な判断
+
+- **queryKey 前置キー共有による invalidate 追従**: TanStack Query の `invalidateQueries`
+  は queryKey を **prefix で部分一致** するため、`["items"]` を渡すと `["items", feedId, filter]`
+  も `["items", "starred"]` も両方 invalidate される。これにより `useToggleStar` 側に
+  横断キャッシュ専用の invalidate 呼び出しを追加する必要がなく、Task 5 の変更で
+  既存 hook ファイル (`use-item-state.ts`) を一切触らずに Req 3 系を満たせる。
+- **`useToggleStar` 楽観的更新の互換性**: `useToggleStar.onMutate` は
+  `getQueriesData<InfiniteData<ItemListResponse>>({ queryKey: ["items"] })` で
+  横断キャッシュも拾うが、TypeScript 型は `ItemListResponse` を期待する。runtime では
+  `StarredItemListResponse` も同形（`items` / `next_cursor` / `has_more` の同じ
+  フィールド構成 + items 要素も `ItemSummary` の super-set である `StarredItemSummary`）
+  であり、楽観的更新で `item.id === itemId ? { ...item, is_starred: isStarred } : item`
+  の spread copy を行っても `feed_title` プロパティは保持される（spread が source の
+  全プロパティを inherit するため）。Task 7 の `StarredItemList` 側で
+  `feed_title` を表示する際にも、楽観的更新後の cache 上で `feed_title` が消えていない
+  ことを期待できる。
+- **テストの URL マッチング戦略**: 2 回目リクエスト URL に `cursor=2026-02-26T10:00:00Z` が
+  含まれることを検証する際、`URLSearchParams.set("cursor", ":")` は `:` を `%3A` に
+  encode するため、生・encoded の両方を OR 条件で許容する形にした。実装側の encoding
+  挙動 (`URLSearchParams.toString()`) に依存しない、より頑健な assertion。
+- **node 環境のバージョン依存**: 開発 worktree の標準 PATH には node 22.11.0
+  (`.local/node/bin/node`) しか出ておらず vite/vitest の engine 要件
+  (`>=22.12.0` / `>=24.0.0`) を満たさず ERR_REQUIRE_ESM で起動失敗。`/tmp/node24-bin/node`
+  (v24.11.1) を PATH に追加することで build/test/lint いずれも成功。CI (GitHub Actions
+  `.github/workflows/ci.yml`) は node 24 を使う設定であることが既存挙動と整合。
+
+#### 残存課題
+
+- なし。Task 6 (`StarredNavItem` + AppState 拡張) は本タスクと依存関係なし (P) で並列実装
+  可能。Task 7 (`StarredItemList` + AppShell 統合) は本タスクの `useStarredItems` を
+  消費する。Task 7 が `useToggleStar` の楽観的更新を経由した invalidate / 楽観的反映の
+  end-to-end 挙動を確認することになるため、本タスクではフック単体 (`useInfiniteQuery`
+  の挙動) のみ責任を持つ。
+
 ## 確認事項
 
 なし（design.md / requirements.md と本実装に矛盾は確認されていない）。
