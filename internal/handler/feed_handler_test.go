@@ -753,6 +753,75 @@ func TestFeedHandler_ErrorResponse_ContainsAllFields(t *testing.T) {
 	}
 }
 
+// TestFeedHandler_ErrorResponse_ExactJSONBody は統一エラーレスポンスの JSON ボディ・
+// フィールド順序・HTTP ステータス・Content-Type が既知の固定値と完全一致することを検証する。
+// エラーレスポンス書き込みを middleware へ集約するリファクタ（issue #26）前後で
+// 外部から観測可能なレスポンスが差分等価であることを担保する回帰テスト。
+func TestFeedHandler_ErrorResponse_ExactJSONBody(t *testing.T) {
+	// Arrange: 未認証アクセスで 401 UNAUTHORIZED を返すケースを用いる。
+	h := NewFeedHandler(&mockFeedService{}, &mockSubscriptionDeleter{})
+
+	body := `{"url": "https://example.com/feed.xml"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/feeds", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	// ユーザーIDを注入しない（未認証）
+	w := httptest.NewRecorder()
+
+	// Act
+	h.RegisterFeed(w, req)
+
+	// Assert: ステータス・Content-Type・JSON ボディが固定値と完全一致する。
+	resp := w.Result()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want %q", ct, "application/json")
+	}
+
+	// json.Encoder は末尾に改行を付与する。フィールド順序は struct 定義順（code/message/category/action）。
+	wantBody := `{"code":"UNAUTHORIZED","message":"認証が必要です。","category":"auth","action":"ログインしてください。"}` + "\n"
+	if gotBody := w.Body.String(); gotBody != wantBody {
+		t.Errorf("body = %q, want %q", gotBody, wantBody)
+	}
+}
+
+// TestFeedHandler_handleServiceError_InternalError_ExactJSONBody は API エラーでない
+// 内部エラーを handleServiceError が処理したとき、500 INTERNAL_ERROR の JSON ボディが
+// 固定値と完全一致することを検証する（issue #26 の差分等価担保）。
+func TestFeedHandler_handleServiceError_InternalError_ExactJSONBody(t *testing.T) {
+	// Arrange: サービス層が APIError でない素のエラーを返す。
+	svc := &mockFeedService{
+		registerFeedFn: func(ctx context.Context, userID, inputURL string) (*model.Feed, *model.Subscription, error) {
+			return nil, nil, errors.New("database connection failed")
+		},
+	}
+	h := NewFeedHandler(svc, &mockSubscriptionDeleter{})
+
+	body := `{"url": "https://example.com/feed.xml"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/feeds", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withUserID(req, "user-123")
+	w := httptest.NewRecorder()
+
+	// Act
+	h.RegisterFeed(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusInternalServerError)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want %q", ct, "application/json")
+	}
+
+	wantBody := `{"code":"INTERNAL_ERROR","message":"内部エラーが発生しました。","category":"system","action":"しばらく待ってから再度お試しください。"}` + "\n"
+	if gotBody := w.Body.String(); gotBody != wantBody {
+		t.Errorf("body = %q, want %q", gotBody, wantBody)
+	}
+}
+
 // --- ルーティングテスト ---
 
 func TestSetupFeedRoutes_RegisterEndpoint(t *testing.T) {
@@ -856,6 +925,79 @@ func TestSetupFeedRoutes_DeleteEndpoint(t *testing.T) {
 	resp := w.Result()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Errorf("DELETE /api/feeds/:id status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+}
+
+// --- mapAPIErrorToHTTPStatus（エラーコード→HTTPステータスマッピング）のテスト ---
+
+// TestMapAPIErrorToHTTPStatus_KnownCodes は既知のエラーコードがそれぞれ対応する
+// HTTPステータスへマッピングされる正常系を検証する（要件 1.2）。
+func TestMapAPIErrorToHTTPStatus_KnownCodes(t *testing.T) {
+	tests := []struct {
+		name       string
+		code       string
+		wantStatus int
+	}{
+		{"FEED_NOT_DETECTED のとき 422", model.ErrCodeFeedNotDetected, http.StatusUnprocessableEntity},
+		{"INVALID_URL のとき 400", model.ErrCodeInvalidURL, http.StatusBadRequest},
+		{"SSRF_BLOCKED のとき 403", model.ErrCodeSSRFBlocked, http.StatusForbidden},
+		{"FETCH_FAILED のとき 502", model.ErrCodeFetchFailed, http.StatusBadGateway},
+		{"PARSE_FAILED のとき 422", model.ErrCodeParseFailed, http.StatusUnprocessableEntity},
+		{"SUBSCRIPTION_LIMIT のとき 409", model.ErrCodeSubscriptionLimit, http.StatusConflict},
+		{"DUPLICATE_SUBSCRIPTION のとき 409", "DUPLICATE_SUBSCRIPTION", http.StatusConflict},
+		{"FEED_NOT_FOUND のとき 404", "FEED_NOT_FOUND", http.StatusNotFound},
+		{"SUBSCRIPTION_NOT_FOUND のとき 404", model.ErrCodeSubscriptionNotFound, http.StatusNotFound},
+		{"ITEM_NOT_FOUND のとき 404", model.ErrCodeItemNotFound, http.StatusNotFound},
+		{"INVALID_FILTER のとき 400", model.ErrCodeInvalidFilter, http.StatusBadRequest},
+		{"INVALID_FETCH_INTERVAL のとき 400", model.ErrCodeInvalidFetchInterval, http.StatusBadRequest},
+		{"FEED_NOT_STOPPED のとき 409", model.ErrCodeFeedNotStopped, http.StatusConflict},
+		{"USER_NOT_FOUND のとき 404", model.ErrCodeUserNotFound, http.StatusNotFound},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Arrange
+			apiErr := &model.APIError{Code: tt.code}
+
+			// Act
+			got := mapAPIErrorToHTTPStatus(apiErr)
+
+			// Assert
+			if got != tt.wantStatus {
+				t.Errorf("mapAPIErrorToHTTPStatus(code=%q) = %d, want %d", tt.code, got, tt.wantStatus)
+			}
+		})
+	}
+}
+
+// TestMapAPIErrorToHTTPStatus_UnknownCode_ReturnsInternalServerError は未マップの
+// エラーコードが default 分岐で HTTP 500（Internal Server Error）にフォールバックする
+// ことを検証する（要件 1.1）。
+func TestMapAPIErrorToHTTPStatus_UnknownCode_ReturnsInternalServerError(t *testing.T) {
+	// Arrange: マッピング表に存在しない未知のエラーコード。
+	apiErr := &model.APIError{Code: "SOME_UNMAPPED_ERROR_CODE"}
+
+	// Act
+	got := mapAPIErrorToHTTPStatus(apiErr)
+
+	// Assert
+	if got != http.StatusInternalServerError {
+		t.Errorf("未知コードの default 分岐 = %d, want %d", got, http.StatusInternalServerError)
+	}
+}
+
+// TestMapAPIErrorToHTTPStatus_EmptyCode_ReturnsInternalServerError は空のエラーコード
+// （境界値）も default 分岐で 500 にフォールバックすることを検証する（要件 1.1）。
+func TestMapAPIErrorToHTTPStatus_EmptyCode_ReturnsInternalServerError(t *testing.T) {
+	// Arrange: 空文字コードはどの case にも一致しない。
+	apiErr := &model.APIError{Code: ""}
+
+	// Act
+	got := mapAPIErrorToHTTPStatus(apiErr)
+
+	// Assert
+	if got != http.StatusInternalServerError {
+		t.Errorf("空コードの default 分岐 = %d, want %d", got, http.StatusInternalServerError)
 	}
 }
 

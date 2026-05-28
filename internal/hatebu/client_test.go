@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -341,5 +342,134 @@ func TestClient_GetBookmarkCounts_50URLsExactly(t *testing.T) {
 	_, err := c.GetBookmarkCounts(context.Background(), urls)
 	if err != nil {
 		t.Fatalf("50個のURLでエラーが返されるべきではない: %v", err)
+	}
+}
+
+// --- Issue #12: レスポンスボディ読み込みサイズ上限のテスト ---
+
+// buildJSONBodyOfExactSize は、指定URLのブックマーク数を含み、
+// 全体のバイト長がちょうど targetSize になる有効なJSONレスポンスボディ
+// （map[string]int としてパース可能）を生成する。
+// パディング用キー（値は固定の int）のキー名の長さを調整して正確なサイズに合わせる。
+// レスポンスは json.Marshal(map[string]int) と同形のため、本番のパースロジックで
+// そのままデコードできる。
+func buildJSONBodyOfExactSize(t *testing.T, reqURL string, count int, targetSize int) []byte {
+	t.Helper()
+
+	// JSON は手組みで構築し、バイト長を正確に制御する。
+	// 形式: {"<reqURL>":<count>,"<padKey>":0}
+	// padKey の文字数を調整して全体長を targetSize に合わせる。
+	prefix := fmt.Sprintf("{%q:%d,", reqURL, count)
+	suffix := `":0}`
+	openQuote := `"`
+
+	// padKey を空にした最小構成の長さ
+	minSize := len(prefix) + len(openQuote) + len(suffix)
+	if targetSize < minSize {
+		t.Fatalf("targetSize %d が最小サイズ %d より小さい", targetSize, minSize)
+	}
+
+	padKeyLen := targetSize - minSize
+	padKey := strings.Repeat("a", padKeyLen)
+
+	body := prefix + openQuote + padKey + suffix
+	if len(body) != targetSize {
+		t.Fatalf("生成したJSONのサイズ = %d, want %d", len(body), targetSize)
+	}
+
+	// map[string]int としてパース可能であることを検証する（テストの前提条件）
+	var sanity map[string]int
+	if err := json.Unmarshal([]byte(body), &sanity); err != nil {
+		t.Fatalf("生成したJSONが map[string]int にパースできない: %v", err)
+	}
+	return []byte(body)
+}
+
+func TestClient_GetBookmarkCounts_ExactlyMaxSize_ParsesSuccessfully(t *testing.T) {
+	// 境界値: ちょうど 1 MiB（1,048,576 バイト）の有効JSONはエラーにならずパースされる（Req 4.1）
+	const reqURL = "https://example.com/exact-boundary"
+	body := buildJSONBodyOfExactSize(t, reqURL, 7, maxResponseBodySize)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(body)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	logger := newTestLogger(&buf)
+
+	c := NewClient(server.Client(), logger)
+	c.endpoint = server.URL
+
+	counts, err := c.GetBookmarkCounts(context.Background(), []string{reqURL})
+	if err != nil {
+		t.Fatalf("上限ちょうど(%d バイト)のレスポンスでエラーが返された: %v", maxResponseBodySize, err)
+	}
+	if counts[reqURL] != 7 {
+		t.Errorf("ブックマーク数 = %d, want 7", counts[reqURL])
+	}
+}
+
+func TestClient_GetBookmarkCounts_OneByteOverMaxSize_ReturnsError(t *testing.T) {
+	// 境界値: 上限を1バイト超過（1,048,577 バイト）したらエラーになる（Req 4.2 / Req 3.1）
+	const reqURL = "https://example.com/one-byte-over"
+	body := buildJSONBodyOfExactSize(t, reqURL, 7, maxResponseBodySize+1)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(body)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	logger := newTestLogger(&buf)
+
+	c := NewClient(server.Client(), logger)
+	c.endpoint = server.URL
+
+	counts, err := c.GetBookmarkCounts(context.Background(), []string{reqURL})
+	if err == nil {
+		t.Fatal("上限を1バイト超過したレスポンスでエラーが返されるべき")
+	}
+	// 上限超過時はマップを返さない（nil）こと（Req 3.1 / Req 3.3）
+	if counts != nil {
+		t.Errorf("上限超過時はマップを返さず nil であるべき: got %v", counts)
+	}
+}
+
+func TestClient_GetBookmarkCounts_OversizedBody_ReturnsErrorAndLogs(t *testing.T) {
+	// 異常系: ボディが上限を大きく超えるとエラーが返り、ERRORログが出力される（Req 3.1 / 3.2 / 3.3）
+	const reqURL = "https://example.com/oversized"
+	body := buildJSONBodyOfExactSize(t, reqURL, 1, maxResponseBodySize*2)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(body)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	logger := newTestLogger(&buf)
+
+	c := NewClient(server.Client(), logger)
+	c.endpoint = server.URL
+
+	counts, err := c.GetBookmarkCounts(context.Background(), []string{reqURL})
+	if err == nil {
+		t.Fatal("上限を大きく超えるレスポンスでエラーが返されるべき")
+	}
+	// 不完全な切り詰めボディを正常結果として返さない（Req 3.3）
+	if counts != nil {
+		t.Errorf("上限超過時はマップを返さず nil であるべき: got %v", counts)
+	}
+
+	// 上限超過を示すERRORログが出力されていること（Req 3.2）
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "ERROR") {
+		t.Errorf("上限超過時にERRORレベルのログが記録されるべき: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, "上限") {
+		t.Errorf("上限超過を示すログメッセージが出力されるべき: %s", logOutput)
 	}
 }

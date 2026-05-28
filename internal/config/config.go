@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -32,6 +33,10 @@ type Config struct {
 	// Rate Limit
 	RateLimitGeneral int
 	RateLimitFeedReg int
+	// RateLimitUnauthIP は未認証エンドポイント（/auth/google/login・/auth/google/callback・
+	// /health）に適用する IP 単位レート制限の閾値（req/min/IP）。
+	// RATE_LIMIT_UNAUTH_IP から読み込む。既定値は 30。不正値時は既定値にフォールバックする。
+	RateLimitUnauthIP int
 
 	// Hatebu
 	HatebuTTL              time.Duration
@@ -52,6 +57,20 @@ type Config struct {
 
 	// CORS
 	CORSAllowedOrigin string
+
+	// Security
+	// HSTSEnabled は HSTS（Strict-Transport-Security）ヘッダーの出力可否を制御する。
+	// 既定値は false（HSTS 非出力 = 本機能導入前と等価）。
+	HSTSEnabled bool
+
+	// Metrics
+	// TrustedCIDRs は /metrics エンドポイントへのアクセスを許可する信頼ネットワーク範囲（CIDR 表記）。
+	// METRICS_TRUSTED_CIDRS（カンマ区切り）から読み込む。未設定時は空スライス。
+	// 各要素の検証（不正 CIDR の判定）はミドルウェア側に委譲する。
+	TrustedCIDRs []string
+	// MetricsPort は worker プロセスがメトリクスを公開する listener のポート。
+	// METRICS_PORT から読み込む。既定値は "9090"。
+	MetricsPort string
 }
 
 // Load は環境変数からConfigを読み込む。
@@ -104,6 +123,7 @@ func Load() (*Config, error) {
 	cfg.FetchInterval = getEnvDuration("FETCH_INTERVAL", 5*time.Minute)
 	cfg.RateLimitGeneral = getEnvInt("RATE_LIMIT_GENERAL", 120)
 	cfg.RateLimitFeedReg = getEnvInt("RATE_LIMIT_FEED_REG", 10)
+	cfg.RateLimitUnauthIP = getEnvInt("RATE_LIMIT_UNAUTH_IP", 30)
 	cfg.HatebuTTL = getEnvDuration("HATEBU_TTL", 24*time.Hour)
 	cfg.HatebuBatchInterval = getEnvDuration("HATEBU_BATCH_INTERVAL", 10*time.Minute)
 	cfg.HatebuAPIInterval = getEnvDuration("HATEBU_API_INTERVAL", 5*time.Second)
@@ -113,8 +133,28 @@ func Load() (*Config, error) {
 	cfg.CookieSecure = strings.HasPrefix(cfg.BaseURL, "https://")
 	cfg.CookieDomain = getEnvString("COOKIE_DOMAIN", "")
 	cfg.CORSAllowedOrigin = getEnvString("CORS_ALLOWED_ORIGIN", "http://localhost:3000")
+	cfg.HSTSEnabled = getEnvBool("HSTS_ENABLED", false)
+	cfg.TrustedCIDRs = parseCommaSeparated(os.Getenv("METRICS_TRUSTED_CIDRS"))
+	cfg.MetricsPort = getEnvString("METRICS_PORT", "9090")
 
 	return cfg, nil
+}
+
+// parseCommaSeparated はカンマ区切りの文字列を要素スライスに分解する。
+// 各要素は前後の空白を除去し、空要素は除外する。
+// 入力が空文字（未設定）の場合は空スライス（nil）を返す。
+func parseCommaSeparated(v string) []string {
+	if strings.TrimSpace(v) == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 func getEnvString(key, defaultVal string) string {
@@ -124,6 +164,26 @@ func getEnvString(key, defaultVal string) string {
 	return defaultVal
 }
 
+// getEnvBool は環境変数を bool として読み込む。
+// 未設定（空文字）の場合は defaultVal を返す。
+// 不正値（strconv.ParseBool が受け付けない値）の場合は Warn ログを出力し defaultVal を返して起動を継続する。
+func getEnvBool(key string, defaultVal bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return defaultVal
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		slog.Warn("環境変数のパースに失敗したためデフォルト値を採用します",
+			slog.String("key", key),
+			slog.String("value", v),
+			slog.Bool("default", defaultVal),
+		)
+		return defaultVal
+	}
+	return b
+}
+
 func getEnvInt(key string, defaultVal int) int {
 	v := os.Getenv(key)
 	if v == "" {
@@ -131,6 +191,11 @@ func getEnvInt(key string, defaultVal int) int {
 	}
 	i, err := strconv.Atoi(v)
 	if err != nil {
+		slog.Warn("環境変数のパースに失敗したためデフォルト値を採用します",
+			slog.String("key", key),
+			slog.String("value", v),
+			slog.Int("default", defaultVal),
+		)
 		return defaultVal
 	}
 	return i
@@ -143,6 +208,11 @@ func getEnvInt64(key string, defaultVal int64) int64 {
 	}
 	i, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
+		slog.Warn("環境変数のパースに失敗したためデフォルト値を採用します",
+			slog.String("key", key),
+			slog.String("value", v),
+			slog.Int64("default", defaultVal),
+		)
 		return defaultVal
 	}
 	return i
@@ -155,6 +225,11 @@ func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil {
+		slog.Warn("環境変数のパースに失敗したためデフォルト値を採用します",
+			slog.String("key", key),
+			slog.String("value", v),
+			slog.Duration("default", defaultVal),
+		)
 		return defaultVal
 	}
 	return d

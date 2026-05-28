@@ -169,7 +169,13 @@ func (r *PostgresItemStateRepo) DeleteByUserAndFeed(ctx context.Context, userID,
 
 // DeleteByUserID はユーザーIDに関連する全ての記事状態を削除する。
 func (r *PostgresItemStateRepo) DeleteByUserID(ctx context.Context, userID string) error {
-	_, err := r.db.ExecContext(ctx,
+	return r.DeleteByUserIDExec(ctx, r.db, userID)
+}
+
+// DeleteByUserIDExec は指定の DBTX（*sql.DB または共有トランザクション）上で
+// ユーザーIDに関連する全ての記事状態を削除する。
+func (r *PostgresItemStateRepo) DeleteByUserIDExec(ctx context.Context, q DBTX, userID string) error {
+	_, err := q.ExecContext(ctx,
 		`DELETE FROM item_states WHERE user_id = $1`,
 		userID,
 	)

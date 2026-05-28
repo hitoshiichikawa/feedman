@@ -162,7 +162,13 @@ func (r *PostgresSubscriptionRepo) Delete(ctx context.Context, id string) error 
 
 // DeleteByUserID はユーザーの全購読を削除する。
 func (r *PostgresSubscriptionRepo) DeleteByUserID(ctx context.Context, userID string) error {
-	_, err := r.db.ExecContext(ctx,
+	return r.DeleteByUserIDExec(ctx, r.db, userID)
+}
+
+// DeleteByUserIDExec は指定の DBTX（*sql.DB または共有トランザクション）上で
+// ユーザーの全購読を削除する。
+func (r *PostgresSubscriptionRepo) DeleteByUserIDExec(ctx context.Context, q DBTX, userID string) error {
+	_, err := q.ExecContext(ctx,
 		`DELETE FROM subscriptions WHERE user_id = $1`,
 		userID,
 	)
@@ -178,7 +184,7 @@ func (r *PostgresSubscriptionRepo) ListByUserIDWithFeedInfo(ctx context.Context,
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT
 			s.id, s.user_id, s.feed_id, s.fetch_interval_minutes, s.created_at, s.updated_at,
-			f.title, f.feed_url, f.favicon_data, f.favicon_mime, f.fetch_status, COALESCE(f.error_message, ''),
+			f.title, f.feed_url, f.favicon_data, COALESCE(f.favicon_mime, ''), f.fetch_status, COALESCE(f.error_message, ''),
 			COALESCE(unread.cnt, 0)
 		 FROM subscriptions s
 		 JOIN feeds f ON s.feed_id = f.id

@@ -153,9 +153,9 @@ func TestValidateURL_MetadataIP(t *testing.T) {
 	guard := NewSSRFGuard()
 
 	metadataURLs := []string{
-		"http://169.254.169.254/latest/meta-data/",             // AWS
+		"http://169.254.169.254/latest/meta-data/",                        // AWS
 		"http://169.254.169.254/metadata/instance?api-version=2021-02-01", // Azure
-		"http://169.254.169.254/computeMetadata/v1/",           // GCP
+		"http://169.254.169.254/computeMetadata/v1/",                      // GCP
 	}
 
 	for _, u := range metadataURLs {
@@ -165,6 +165,84 @@ func TestValidateURL_MetadataIP(t *testing.T) {
 				t.Errorf("ValidateURL(%q) should have returned error for metadata IP", u)
 			}
 		})
+	}
+}
+
+// TestValidateURL_BlockedHostnames は拡充したブロック対象ホスト名の拒否をテストする。
+// Requirement 1: ループバック別名・メタデータエンドポイントのホスト名表記を拒否する。
+func TestValidateURL_BlockedHostnames(t *testing.T) {
+	guard := NewSSRFGuard()
+
+	blockedURLs := []string{
+		"http://localhost/feed",
+		"http://localhost.localdomain/feed",
+		"http://ip6-localhost/feed",
+		"http://ip6-loopback/feed",
+		"http://metadata.google.internal/feed",
+		"http://metadata/feed",
+	}
+
+	for _, u := range blockedURLs {
+		t.Run(u, func(t *testing.T) {
+			err := guard.ValidateURL(u)
+			if err == nil {
+				t.Errorf("ValidateURL(%q) should have returned error for blocked hostname", u)
+			}
+		})
+	}
+}
+
+// TestValidateURL_BlockedHostnameSubstring はブロック対象ホスト名を部分文字列として
+// 含むだけの正当なホスト名が通過することをテストする。
+// Requirement 2: 過剰ブロック回避（部分文字列一致では拒否しない）。
+func TestValidateURL_BlockedHostnameSubstring(t *testing.T) {
+	guard := NewSSRFGuard()
+
+	allowedURLs := []string{
+		"http://localhost.example.com/feed",
+		"http://metadata.example.com/feed",
+	}
+
+	for _, u := range allowedURLs {
+		t.Run(u, func(t *testing.T) {
+			err := guard.ValidateURL(u)
+			if err != nil {
+				t.Errorf("ValidateURL(%q) returned error for legitimate hostname: %v", u, err)
+			}
+		})
+	}
+}
+
+// TestValidateURL_BlockedHostnameCaseInsensitive は大文字小文字混在・全大文字の
+// ブロック対象ホスト名が小文字化された上で拒否されることをテストする。
+// Requirement 3: 大文字小文字非依存のブロック判定。
+func TestValidateURL_BlockedHostnameCaseInsensitive(t *testing.T) {
+	guard := NewSSRFGuard()
+
+	blockedURLs := []string{
+		"http://LocalHost/feed",
+		"http://LOCALHOST/feed",
+	}
+
+	for _, u := range blockedURLs {
+		t.Run(u, func(t *testing.T) {
+			err := guard.ValidateURL(u)
+			if err == nil {
+				t.Errorf("ValidateURL(%q) should have returned error for case-variant blocked hostname", u)
+			}
+		})
+	}
+}
+
+// TestValidateURL_BlockedHostnameSuffix はブロック対象ホスト名を接尾辞として含むだけの
+// 正当なホスト名が通過することをテストする。
+// Requirement 4: 完全一致維持（接尾辞での誤ブロック回避）。
+func TestValidateURL_BlockedHostnameSuffix(t *testing.T) {
+	guard := NewSSRFGuard()
+
+	err := guard.ValidateURL("http://notlocalhost/feed")
+	if err != nil {
+		t.Errorf("ValidateURL(\"http://notlocalhost/feed\") returned error for legitimate hostname: %v", err)
 	}
 }
 

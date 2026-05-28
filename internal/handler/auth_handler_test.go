@@ -14,7 +14,7 @@ import (
 // --- モック定義 ---
 
 type mockAuthService struct {
-	getLoginURLFn   func(state string) string
+	getLoginURLFn    func(state string) string
 	handleCallbackFn func(ctx context.Context, code string) (*model.Session, error)
 	logoutFn         func(ctx context.Context, sessionID string) error
 	getCurrentUserFn func(ctx context.Context, sessionID string) (*model.User, error)
@@ -140,6 +140,216 @@ func TestAuthHandler_Callback_Success_SetsCookieAndRedirects(t *testing.T) {
 	}
 	if sessionCookie.SameSite != http.SameSiteLaxMode {
 		t.Errorf("session cookie SameSite = %v, want %v", sessionCookie.SameSite, http.SameSiteLaxMode)
+	}
+}
+
+func TestAuthHandler_Callback_RotatesOldSession_RevokesPreviousSessionID(t *testing.T) {
+	// Arrange: 旧 session_id Cookie を保持した状態でコールバックに成功する
+	var revokedSessionID string
+	logoutCalled := false
+	svc := &mockAuthService{
+		handleCallbackFn: func(ctx context.Context, code string) (*model.Session, error) {
+			return &model.Session{ID: "new-session-id", UserID: "user-id-123"}, nil
+		},
+		logoutFn: func(ctx context.Context, sessionID string) error {
+			logoutCalled = true
+			revokedSessionID = sessionID
+			return nil
+		},
+	}
+	h := NewAuthHandler(svc, AuthHandlerConfig{
+		BaseURL:       "http://localhost:3000",
+		SessionMaxAge: 86400,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/google/callback?code=test-code&state=test-state", nil)
+	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "test-state"})
+	req.AddCookie(&http.Cookie{Name: "session_id", Value: "old-session-id"})
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Callback(w, req)
+
+	// Assert: AC R1.1 旧 session_id に対応する保存済みセッションが無効化されること
+	if !logoutCalled {
+		t.Fatal("expected old session to be revoked via Logout")
+	}
+	if revokedSessionID != "old-session-id" {
+		t.Errorf("revoked session ID = %q, want %q", revokedSessionID, "old-session-id")
+	}
+}
+
+func TestAuthHandler_Callback_RotatesOldSession_NewCookieDiffersFromOld(t *testing.T) {
+	// Arrange: 旧 session_id を保持した状態でログインに成功する
+	svc := &mockAuthService{
+		handleCallbackFn: func(ctx context.Context, code string) (*model.Session, error) {
+			return &model.Session{ID: "new-session-id", UserID: "user-id-123"}, nil
+		},
+	}
+	h := NewAuthHandler(svc, AuthHandlerConfig{
+		BaseURL:       "http://localhost:3000",
+		SessionMaxAge: 86400,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/google/callback?code=test-code&state=test-state", nil)
+	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "test-state"})
+	req.AddCookie(&http.Cookie{Name: "session_id", Value: "old-session-id"})
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Callback(w, req)
+
+	// Assert: AC R1.3 / R2.2 ログイン後に有効な識別子が旧識別子と異なること
+	resp := w.Result()
+	var sessionCookie *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == "session_id" {
+			sessionCookie = c
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("expected session_id cookie to be set")
+	}
+	if sessionCookie.Value == "old-session-id" {
+		t.Error("new session cookie value must differ from old session_id")
+	}
+	if sessionCookie.Value != "new-session-id" {
+		t.Errorf("session cookie value = %q, want %q", sessionCookie.Value, "new-session-id")
+	}
+}
+
+func TestAuthHandler_Callback_NoOldSessionCookie_DoesNotRevokeAndCompletes(t *testing.T) {
+	// Arrange: session_id Cookie が存在しない状態でログインに成功する
+	logoutCalled := false
+	svc := &mockAuthService{
+		handleCallbackFn: func(ctx context.Context, code string) (*model.Session, error) {
+			return &model.Session{ID: "new-session-id", UserID: "user-id-123"}, nil
+		},
+		logoutFn: func(ctx context.Context, sessionID string) error {
+			logoutCalled = true
+			return nil
+		},
+	}
+	h := NewAuthHandler(svc, AuthHandlerConfig{
+		BaseURL:       "http://localhost:3000",
+		SessionMaxAge: 86400,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/google/callback?code=test-code&state=test-state", nil)
+	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "test-state"})
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Callback(w, req)
+
+	// Assert: AC R3.1 旧 Cookie 不在時は無効化を試みず正常完了すること
+	if logoutCalled {
+		t.Error("Logout should not be called when no old session_id cookie exists")
+	}
+	resp := w.Result()
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	}
+	var sessionCookie *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == "session_id" {
+			sessionCookie = c
+		}
+	}
+	if sessionCookie == nil || sessionCookie.Value != "new-session-id" {
+		t.Fatal("expected new session_id cookie to be set")
+	}
+}
+
+func TestAuthHandler_Callback_RevokeFails_StillCompletesLogin(t *testing.T) {
+	// Arrange: 旧セッション無効化が失敗するケース
+	svc := &mockAuthService{
+		handleCallbackFn: func(ctx context.Context, code string) (*model.Session, error) {
+			return &model.Session{ID: "new-session-id", UserID: "user-id-123"}, nil
+		},
+		logoutFn: func(ctx context.Context, sessionID string) error {
+			return errors.New("delete failed")
+		},
+	}
+	h := NewAuthHandler(svc, AuthHandlerConfig{
+		BaseURL:       "http://localhost:3000",
+		SessionMaxAge: 86400,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/google/callback?code=test-code&state=test-state", nil)
+	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "test-state"})
+	req.AddCookie(&http.Cookie{Name: "session_id", Value: "old-session-id"})
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Callback(w, req)
+
+	// Assert: AC R3.3 旧セッション無効化失敗でもログインはエラーにならず完了すること
+	resp := w.Result()
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Errorf("status = %d, want %d (login must not fail on revoke error)", resp.StatusCode, http.StatusTemporaryRedirect)
+	}
+	var sessionCookie *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == "session_id" {
+			sessionCookie = c
+		}
+	}
+	if sessionCookie == nil || sessionCookie.Value != "new-session-id" {
+		t.Fatal("expected new session_id cookie to be set even when revoke fails")
+	}
+}
+
+func TestAuthHandler_Callback_PreservesCookieAttributes(t *testing.T) {
+	// Arrange: Cookie 属性の後方互換（NFR 2）を検証する
+	svc := &mockAuthService{
+		handleCallbackFn: func(ctx context.Context, code string) (*model.Session, error) {
+			return &model.Session{ID: "new-session-id", UserID: "user-id-123"}, nil
+		},
+	}
+	h := NewAuthHandler(svc, AuthHandlerConfig{
+		BaseURL:       "http://localhost:3000",
+		CookieDomain:  "feedman.example.com",
+		CookieSecure:  true,
+		SessionMaxAge: 86400,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/google/callback?code=test-code&state=test-state", nil)
+	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "test-state"})
+	req.AddCookie(&http.Cookie{Name: "session_id", Value: "old-session-id"})
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Callback(w, req)
+
+	// Assert: NFR 2.1 Cookie 名・属性が維持されること / NFR 2.2 リダイレクト先が維持されること
+	resp := w.Result()
+	var sessionCookie *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == "session_id" {
+			sessionCookie = c
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("expected session_id cookie to be set")
+	}
+	if !sessionCookie.HttpOnly {
+		t.Error("session cookie should be HttpOnly")
+	}
+	if !sessionCookie.Secure {
+		t.Error("session cookie should be Secure when CookieSecure is true")
+	}
+	if sessionCookie.SameSite != http.SameSiteLaxMode {
+		t.Errorf("session cookie SameSite = %v, want %v", sessionCookie.SameSite, http.SameSiteLaxMode)
+	}
+	if sessionCookie.Domain != "feedman.example.com" {
+		t.Errorf("session cookie Domain = %q, want %q", sessionCookie.Domain, "feedman.example.com")
+	}
+	if sessionCookie.MaxAge != 86400 {
+		t.Errorf("session cookie MaxAge = %d, want %d", sessionCookie.MaxAge, 86400)
+	}
+	if loc := resp.Header.Get("Location"); loc != "http://localhost:3000" {
+		t.Errorf("Location = %q, want %q", loc, "http://localhost:3000")
 	}
 }
 

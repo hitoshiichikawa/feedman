@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hitoshi/feedman/internal/model"
@@ -384,6 +385,245 @@ func (r *PostgresItemRepo) UpdateHatebuCount(ctx context.Context, itemID string,
 	)
 	if err != nil {
 		return fmt.Errorf("はてなブックマーク数の更新に失敗しました: %w", err)
+	}
+	return nil
+}
+
+// itemSelectColumns は records 取得時に共通利用するカラム列。
+const itemSelectColumns = `id, feed_id, guid_or_id, title, link, content, summary, author,
+	published_at, is_date_estimated, fetched_at, content_hash,
+	hatebu_count, hatebu_fetched_at, created_at, updated_at`
+
+// scanItem は items テーブルの 1 行を model.Item にスキャンする。
+// itemSelectColumns の列順に対応する。
+func scanItem(scanner interface {
+	Scan(dest ...interface{}) error
+}) (*model.Item, error) {
+	item := &model.Item{}
+	var publishedAt sql.NullTime
+	var hatebuFetchedAt sql.NullTime
+	var guidOrID, link, content, summary, author, contentHash sql.NullString
+
+	if err := scanner.Scan(
+		&item.ID, &item.FeedID, &guidOrID, &item.Title, &link,
+		&content, &summary, &author,
+		&publishedAt, &item.IsDateEstimated, &item.FetchedAt, &contentHash,
+		&item.HatebuCount, &hatebuFetchedAt, &item.CreatedAt, &item.UpdatedAt,
+	); err != nil {
+		return nil, err
+	}
+
+	item.GuidOrID = nullStringValue(guidOrID)
+	item.Link = nullStringValue(link)
+	item.Content = nullStringValue(content)
+	item.Summary = nullStringValue(summary)
+	item.Author = nullStringValue(author)
+	item.ContentHash = nullStringValue(contentHash)
+	if publishedAt.Valid {
+		item.PublishedAt = &publishedAt.Time
+	}
+	if hatebuFetchedAt.Valid {
+		item.HatebuFetchedAt = &hatebuFetchedAt.Time
+	}
+
+	return item, nil
+}
+
+// FindExistingForUpsert は同一性判定に必要な既存記事を一括取得する。
+// guids / links / hashes それぞれを 1 回ずつ（合計最大 3 回）のバッチ SELECT で引くため、
+// DB 往復回数は記事件数に比例しない定数オーダーになる。
+func (r *PostgresItemRepo) FindExistingForUpsert(
+	ctx context.Context,
+	feedID string,
+	guids, links, hashes []string,
+) (*ExistingItems, error) {
+	result := &ExistingItems{
+		ByGUID:        make(map[string]*model.Item),
+		ByLink:        make(map[string]*model.Item),
+		ByContentHash: make(map[string]*model.Item),
+	}
+
+	if err := r.queryItemsByColumn(ctx, feedID, "guid_or_id", guids, result.ByGUID, func(i *model.Item) string { return i.GuidOrID }); err != nil {
+		return nil, fmt.Errorf("GUID による既存記事の一括取得に失敗しました: %w", err)
+	}
+	if err := r.queryItemsByColumn(ctx, feedID, "link", links, result.ByLink, func(i *model.Item) string { return i.Link }); err != nil {
+		return nil, fmt.Errorf("link による既存記事の一括取得に失敗しました: %w", err)
+	}
+	if err := r.queryItemsByColumn(ctx, feedID, "content_hash", hashes, result.ByContentHash, func(i *model.Item) string { return i.ContentHash }); err != nil {
+		return nil, fmt.Errorf("content_hash による既存記事の一括取得に失敗しました: %w", err)
+	}
+
+	return result, nil
+}
+
+// queryItemsByColumn は feed_id と指定カラムの IN 句で既存記事をまとめて取得し、keyFn で索引する。
+// values が空のときは DB へアクセスしない。
+func (r *PostgresItemRepo) queryItemsByColumn(
+	ctx context.Context,
+	feedID, column string,
+	values []string,
+	dest map[string]*model.Item,
+	keyFn func(*model.Item) string,
+) error {
+	if len(values) == 0 {
+		return nil
+	}
+
+	args := make([]interface{}, 0, len(values)+1)
+	args = append(args, feedID)
+	placeholders := make([]string, len(values))
+	for i, v := range values {
+		args = append(args, v)
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+	}
+
+	query := fmt.Sprintf(
+		`SELECT %s FROM items WHERE feed_id = $1 AND %s IN (%s)`,
+		itemSelectColumns, column, strings.Join(placeholders, ", "),
+	)
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		item, scanErr := scanItem(rows)
+		if scanErr != nil {
+			return scanErr
+		}
+		key := keyFn(item)
+		// 同一キーに複数行が該当する場合は先頭行を採用（既存の単一取得と整合）。
+		if _, exists := dest[key]; !exists {
+			dest[key] = item
+		}
+	}
+	return rows.Err()
+}
+
+// BulkUpsert は新規記事の一括 INSERT と既存記事の一括 UPDATE を単一トランザクションで実行する。
+// 途中でエラーが発生した場合はトランザクションをロールバックし、当該バッチを 1 件も永続化しない。
+func (r *PostgresItemRepo) BulkUpsert(ctx context.Context, toCreate, toUpdate []*model.Item) error {
+	if len(toCreate) == 0 && len(toUpdate) == 0 {
+		return nil
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("バルク UPSERT のトランザクション開始に失敗しました: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := bulkInsertItems(ctx, tx, toCreate); err != nil {
+		return fmt.Errorf("記事の一括挿入に失敗しました: %w", err)
+	}
+	if err := bulkUpdateItems(ctx, tx, toUpdate); err != nil {
+		return fmt.Errorf("記事の一括更新に失敗しました: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("バルク UPSERT のコミットに失敗しました: %w", err)
+	}
+	return nil
+}
+
+// bulkInsertItems は複数記事を 1 回の INSERT（複数行 VALUES）で挿入する。
+func bulkInsertItems(ctx context.Context, tx *sql.Tx, items []*model.Item) error {
+	if len(items) == 0 {
+		return nil
+	}
+
+	const colsPerRow = 16
+	args := make([]interface{}, 0, len(items)*colsPerRow)
+	rowClauses := make([]string, len(items))
+	for i, item := range items {
+		base := i * colsPerRow
+		ph := make([]string, colsPerRow)
+		for j := 0; j < colsPerRow; j++ {
+			ph[j] = fmt.Sprintf("$%d", base+j+1)
+		}
+		rowClauses[i] = "(" + strings.Join(ph, ", ") + ")"
+		args = append(args,
+			item.ID, item.FeedID, nullString(item.GuidOrID), item.Title,
+			nullString(item.Link), nullString(item.Content), nullString(item.Summary),
+			nullString(item.Author), item.PublishedAt, item.IsDateEstimated, item.FetchedAt,
+			nullString(item.ContentHash), item.HatebuCount, item.HatebuFetchedAt,
+			item.CreatedAt, item.UpdatedAt,
+		)
+	}
+
+	query := `INSERT INTO items (id, feed_id, guid_or_id, title, link, content, summary, author,
+		published_at, is_date_estimated, fetched_at, content_hash,
+		hatebu_count, hatebu_fetched_at, created_at, updated_at)
+		VALUES ` + strings.Join(rowClauses, ", ")
+
+	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+		return err
+	}
+	return nil
+}
+
+// bulkUpdateItems は複数記事を 1 回の UPDATE（VALUES 由来の派生テーブルと JOIN）で更新する。
+// 更新カラムは既存の Update と同一（guid_or_id / title / link / content / summary /
+// author / published_at / is_date_estimated / content_hash / updated_at）。
+func bulkUpdateItems(ctx context.Context, tx *sql.Tx, items []*model.Item) error {
+	if len(items) == 0 {
+		return nil
+	}
+
+	const colsPerRow = 11
+	args := make([]interface{}, 0, len(items)*colsPerRow)
+	rowClauses := make([]string, len(items))
+	for i, item := range items {
+		base := i * colsPerRow
+		// 型を明示するため id::uuid 等のキャストは VALUES の最初の行で行わず、
+		// UPDATE 側の比較で items.id（uuid）と v.id（text）を ::text 比較する方針を取る。
+		rowClauses[i] = fmt.Sprintf(
+			"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+			base+1, base+2, base+3, base+4, base+5, base+6,
+			base+7, base+8, base+9, base+10, base+11,
+		)
+		args = append(args,
+			item.ID, nullString(item.GuidOrID), item.Title, nullString(item.Link),
+			nullString(item.Content), nullString(item.Summary), nullString(item.Author),
+			item.PublishedAt, item.IsDateEstimated, nullString(item.ContentHash),
+			item.UpdatedAt,
+		)
+	}
+
+	// VALUES 由来の派生テーブルではプレースホルダの型推論が NULL 値で失敗し得るため、
+	// SELECT で各カラムに明示キャストを付与してから JOIN する。
+	query := `UPDATE items SET
+		guid_or_id = v.guid_or_id,
+		title = v.title,
+		link = v.link,
+		content = v.content,
+		summary = v.summary,
+		author = v.author,
+		published_at = v.published_at,
+		is_date_estimated = v.is_date_estimated,
+		content_hash = v.content_hash,
+		updated_at = v.updated_at
+	FROM (
+		SELECT
+			t.id::uuid AS id,
+			t.guid_or_id::text AS guid_or_id,
+			t.title::text AS title,
+			t.link::text AS link,
+			t.content::text AS content,
+			t.summary::text AS summary,
+			t.author::text AS author,
+			t.published_at::timestamptz AS published_at,
+			t.is_date_estimated::boolean AS is_date_estimated,
+			t.content_hash::text AS content_hash,
+			t.updated_at::timestamptz AS updated_at
+		FROM (VALUES ` + strings.Join(rowClauses, ", ") + `) AS t(id, guid_or_id, title, link, content, summary, author, published_at, is_date_estimated, content_hash, updated_at)
+	) AS v
+	WHERE items.id = v.id`
+
+	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+		return err
 	}
 	return nil
 }

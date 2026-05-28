@@ -1,9 +1,70 @@
 package config
 
 import (
+	"context"
+	"log/slog"
 	"testing"
 	"time"
 )
+
+// captureHandler はテスト中の slog.Record を収集する slog.Handler 実装。
+// パース失敗時の Warn ログ出力（件数・レベル・構造化フィールド）を検証するために使う。
+type captureHandler struct {
+	records []slog.Record
+}
+
+func (h *captureHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
+
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.records = append(h.records, r)
+	return nil
+}
+
+func (h *captureHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+
+func (h *captureHandler) WithGroup(_ string) slog.Handler { return h }
+
+// warnRecords は Warn レベルのレコードのみを返す。
+func (h *captureHandler) warnRecords() []slog.Record {
+	var out []slog.Record
+	for _, r := range h.records {
+		if r.Level == slog.LevelWarn {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// installCaptureLogger はデフォルトロガーをテスト用の captureHandler に差し替え、
+// t.Cleanup で元のロガーを復元する。返り値のハンドラから収集レコードを参照する。
+func installCaptureLogger(t *testing.T) *captureHandler {
+	t.Helper()
+	prev := slog.Default()
+	h := &captureHandler{}
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+	})
+	return h
+}
+
+// attrValue はレコードから指定キーの属性値（文字列表現）を取り出す。
+// キーが存在しない場合は ok=false を返す。
+func attrValue(r slog.Record, key string) (string, bool) {
+	var (
+		val   string
+		found bool
+	)
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == key {
+			val = a.Value.String()
+			found = true
+			return false
+		}
+		return true
+	})
+	return val, found
+}
 
 func setRequiredEnvVars(t *testing.T) {
 	t.Helper()
@@ -77,6 +138,10 @@ func TestLoad_DefaultValues(t *testing.T) {
 	if cfg.RateLimitFeedReg != 10 {
 		t.Errorf("RateLimitFeedReg = %d, want %d", cfg.RateLimitFeedReg, 10)
 	}
+	// Req 2.1: 未認証 IP レート制限の閾値の既定値は 30 req/min/IP。
+	if cfg.RateLimitUnauthIP != 30 {
+		t.Errorf("RateLimitUnauthIP = %d, want %d", cfg.RateLimitUnauthIP, 30)
+	}
 
 	// Hatebu defaults
 	if cfg.HatebuTTL != 24*time.Hour {
@@ -101,6 +166,207 @@ func TestLoad_DefaultValues(t *testing.T) {
 	if cfg.ServerPort != "8080" {
 		t.Errorf("ServerPort = %q, want %q", cfg.ServerPort, "8080")
 	}
+
+	// Security defaults: HSTS は未設定時 false（本機能導入前と等価）。
+	if cfg.HSTSEnabled != false {
+		t.Errorf("HSTSEnabled = %v, want %v (default)", cfg.HSTSEnabled, false)
+	}
+
+	// Metrics defaults: 未設定時 MetricsPort は "9090"、TrustedCIDRs は空。
+	if cfg.MetricsPort != "9090" {
+		t.Errorf("MetricsPort = %q, want %q", cfg.MetricsPort, "9090")
+	}
+	if len(cfg.TrustedCIDRs) != 0 {
+		t.Errorf("TrustedCIDRs = %v, want empty (default)", cfg.TrustedCIDRs)
+	}
+}
+
+// TestLoad_MetricsTrustedCIDRs は METRICS_TRUSTED_CIDRS のカンマ区切りパースを検証する。
+// Requirement 4.1（信頼 CIDR の設定）/ NFR 2.1（未設定時は空のまま保持し検証はミドルウェアに委譲）に対応。
+func TestLoad_MetricsTrustedCIDRs(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+		want []string
+	}{
+		{
+			name: "単一CIDRのとき1要素のスライスになる",
+			env:  "10.0.0.0/8",
+			want: []string{"10.0.0.0/8"},
+		},
+		{
+			name: "複数CIDRのとき要素ごとに分割される",
+			env:  "10.0.0.0/8,192.168.0.0/16",
+			want: []string{"10.0.0.0/8", "192.168.0.0/16"},
+		},
+		{
+			name: "要素前後に空白があるときトリムされる",
+			env:  " 10.0.0.0/8 , 192.168.0.0/16 ",
+			want: []string{"10.0.0.0/8", "192.168.0.0/16"},
+		},
+		{
+			name: "空要素が含まれるとき除外される",
+			env:  "10.0.0.0/8,,192.168.0.0/16,",
+			want: []string{"10.0.0.0/8", "192.168.0.0/16"},
+		},
+		{
+			name: "不正なCIDR文字列でもパース段階では除外せず保持する",
+			env:  "not-a-cidr,10.0.0.0/8",
+			want: []string{"not-a-cidr", "10.0.0.0/8"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			setRequiredEnvVars(t)
+			t.Setenv("METRICS_TRUSTED_CIDRS", tc.env)
+
+			// Act
+			cfg, err := Load()
+
+			// Assert
+			if err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+			if len(cfg.TrustedCIDRs) != len(tc.want) {
+				t.Fatalf("TrustedCIDRs length = %d (%v), want %d (%v)",
+					len(cfg.TrustedCIDRs), cfg.TrustedCIDRs, len(tc.want), tc.want)
+			}
+			for i, w := range tc.want {
+				if cfg.TrustedCIDRs[i] != w {
+					t.Errorf("TrustedCIDRs[%d] = %q, want %q", i, cfg.TrustedCIDRs[i], w)
+				}
+			}
+		})
+	}
+
+	t.Run("未設定（空文字）のとき空スライスを保持する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("METRICS_TRUSTED_CIDRS", "")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if len(cfg.TrustedCIDRs) != 0 {
+			t.Errorf("TrustedCIDRs = %v, want empty", cfg.TrustedCIDRs)
+		}
+	})
+
+	t.Run("空白のみのとき空スライスを保持する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("METRICS_TRUSTED_CIDRS", "   ")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if len(cfg.TrustedCIDRs) != 0 {
+			t.Errorf("TrustedCIDRs = %v, want empty", cfg.TrustedCIDRs)
+		}
+	})
+}
+
+// TestLoad_MetricsPort は METRICS_PORT の読み込みと既定値を検証する。
+// Requirement 4.1 に対応。
+func TestLoad_MetricsPort(t *testing.T) {
+	t.Run("METRICS_PORTが設定されているとき値を採用する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("METRICS_PORT", "9999")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if cfg.MetricsPort != "9999" {
+			t.Errorf("MetricsPort = %q, want %q", cfg.MetricsPort, "9999")
+		}
+	})
+
+	t.Run("METRICS_PORTが未設定のとき既定値9090を採用する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("METRICS_PORT", "")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if cfg.MetricsPort != "9090" {
+			t.Errorf("MetricsPort = %q, want %q (default)", cfg.MetricsPort, "9090")
+		}
+	})
+}
+
+// TestLoad_HSTSEnabled は HSTS_ENABLED 環境変数の読み込みを検証する。
+// Requirement 3.3（未指定・不正値時は既定値採用で起動継続）と NFR 1.2 に対応。
+func TestLoad_HSTSEnabled(t *testing.T) {
+	t.Run("HSTS_ENABLEDがtrueのときHSTSEnabledがtrueになる", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("HSTS_ENABLED", "true")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if !cfg.HSTSEnabled {
+			t.Error("HSTSEnabled = false, want true")
+		}
+	})
+
+	t.Run("HSTS_ENABLEDが未設定のときHSTSEnabledがfalseになる", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("HSTS_ENABLED", "")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if cfg.HSTSEnabled {
+			t.Error("HSTSEnabled = true, want false (default for unset)")
+		}
+	})
+
+	t.Run("HSTS_ENABLEDが不正値のときHSTSEnabledが既定値falseになり起動を継続する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("HSTS_ENABLED", "not-a-bool")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error (should continue startup with default), got %v", err)
+		}
+		if cfg.HSTSEnabled {
+			t.Error("HSTSEnabled = true, want false (default for invalid value)")
+		}
+	})
 }
 
 func TestLoad_CustomValues(t *testing.T) {
@@ -113,6 +379,7 @@ func TestLoad_CustomValues(t *testing.T) {
 	t.Setenv("FETCH_INTERVAL", "10m")
 	t.Setenv("RATE_LIMIT_GENERAL", "60")
 	t.Setenv("RATE_LIMIT_FEED_REG", "5")
+	t.Setenv("RATE_LIMIT_UNAUTH_IP", "15")
 	t.Setenv("HATEBU_TTL", "12h")
 	t.Setenv("HATEBU_BATCH_INTERVAL", "20m")
 	t.Setenv("HATEBU_API_INTERVAL", "10s")
@@ -144,6 +411,10 @@ func TestLoad_CustomValues(t *testing.T) {
 	}
 	if cfg.RateLimitFeedReg != 5 {
 		t.Errorf("RateLimitFeedReg = %d, want %d", cfg.RateLimitFeedReg, 5)
+	}
+	// Req 2.2: 指定された閾値を適用する。
+	if cfg.RateLimitUnauthIP != 15 {
+		t.Errorf("RateLimitUnauthIP = %d, want %d", cfg.RateLimitUnauthIP, 15)
 	}
 	if cfg.HatebuTTL != 12*time.Hour {
 		t.Errorf("HatebuTTL = %v, want %v", cfg.HatebuTTL, 12*time.Hour)
@@ -219,5 +490,341 @@ func TestLoad_MissingBaseURL_ReturnsError(t *testing.T) {
 	_, err := Load()
 	if err == nil {
 		t.Fatal("expected error for missing BASE_URL, got nil")
+	}
+}
+
+// TestLoad_InvalidRateLimitUnauthIP_FallsBackToDefault は Req 2.3 を検証する。
+// 不正な RATE_LIMIT_UNAUTH_IP が指定されてもエラーにせず、既定値 30 で起動を継続する。
+func TestLoad_InvalidRateLimitUnauthIP_FallsBackToDefault(t *testing.T) {
+	setRequiredEnvVars(t)
+	t.Setenv("RATE_LIMIT_UNAUTH_IP", "not-a-number")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("不正値でも起動継続すべき（エラーなし）, got %v", err)
+	}
+	if cfg.RateLimitUnauthIP != 30 {
+		t.Errorf("RateLimitUnauthIP = %d, want %d (既定値フォールバック)", cfg.RateLimitUnauthIP, 30)
+	}
+}
+
+// TestGetEnvInt は getEnvInt のパース失敗時警告ログ・フォールバック・正常系を検証する。
+// Requirement 1 (1.1/1.2/1.3) と Requirement 4 (4.1/4.2/4.3/4.4) に対応。
+func TestGetEnvInt(t *testing.T) {
+	const key = "TEST_GET_ENV_INT"
+	const defaultVal = 42
+
+	t.Run("不正値のときデフォルト値を採用しWarnを1件出力する", func(t *testing.T) {
+		// Arrange
+		h := installCaptureLogger(t)
+		t.Setenv(key, "not-an-int")
+
+		// Act
+		got := getEnvInt(key, defaultVal)
+
+		// Assert
+		if got != defaultVal {
+			t.Errorf("got = %d, want %d (default fallback)", got, defaultVal)
+		}
+		if n := len(h.warnRecords()); n != 1 {
+			t.Fatalf("warn records = %d, want 1", n)
+		}
+	})
+
+	t.Run("不正値のときWarnログにキー名・不正値・デフォルト値を構造化フィールドで含める", func(t *testing.T) {
+		// Arrange
+		h := installCaptureLogger(t)
+		t.Setenv(key, "not-an-int")
+
+		// Act
+		getEnvInt(key, defaultVal)
+
+		// Assert
+		recs := h.warnRecords()
+		if len(recs) != 1 {
+			t.Fatalf("warn records = %d, want 1", len(recs))
+		}
+		r := recs[0]
+		assertAttr(t, r, "key", key)
+		assertAttr(t, r, "value", "not-an-int")
+		assertAttr(t, r, "default", "42")
+	})
+
+	t.Run("正常値のとき値を採用しWarnを出力しない", func(t *testing.T) {
+		// Arrange
+		h := installCaptureLogger(t)
+		t.Setenv(key, "100")
+
+		// Act
+		got := getEnvInt(key, defaultVal)
+
+		// Assert
+		if got != 100 {
+			t.Errorf("got = %d, want %d", got, 100)
+		}
+		if n := len(h.warnRecords()); n != 0 {
+			t.Errorf("warn records = %d, want 0", n)
+		}
+	})
+
+	t.Run("未設定（空文字）のときデフォルト値を採用しWarnを出力しない", func(t *testing.T) {
+		// Arrange
+		h := installCaptureLogger(t)
+		t.Setenv(key, "")
+
+		// Act
+		got := getEnvInt(key, defaultVal)
+
+		// Assert
+		if got != defaultVal {
+			t.Errorf("got = %d, want %d (default fallback)", got, defaultVal)
+		}
+		if n := len(h.warnRecords()); n != 0 {
+			t.Errorf("warn records = %d, want 0", n)
+		}
+	})
+}
+
+// TestGetEnvInt64 は getEnvInt64 のパース失敗時警告ログ・フォールバック・正常系を検証する。
+// Requirement 2 (2.1/2.2/2.3) と Requirement 4 に対応。
+func TestGetEnvInt64(t *testing.T) {
+	const key = "TEST_GET_ENV_INT64"
+	const defaultVal int64 = 5242880
+
+	t.Run("不正値のときデフォルト値を採用しWarnを1件出力する", func(t *testing.T) {
+		// Arrange
+		h := installCaptureLogger(t)
+		t.Setenv(key, "12.5")
+
+		// Act
+		got := getEnvInt64(key, defaultVal)
+
+		// Assert
+		if got != defaultVal {
+			t.Errorf("got = %d, want %d (default fallback)", got, defaultVal)
+		}
+		if n := len(h.warnRecords()); n != 1 {
+			t.Fatalf("warn records = %d, want 1", n)
+		}
+	})
+
+	t.Run("不正値のときWarnログにキー名・不正値・デフォルト値を構造化フィールドで含める", func(t *testing.T) {
+		// Arrange
+		h := installCaptureLogger(t)
+		t.Setenv(key, "12.5")
+
+		// Act
+		getEnvInt64(key, defaultVal)
+
+		// Assert
+		recs := h.warnRecords()
+		if len(recs) != 1 {
+			t.Fatalf("warn records = %d, want 1", len(recs))
+		}
+		r := recs[0]
+		assertAttr(t, r, "key", key)
+		assertAttr(t, r, "value", "12.5")
+		assertAttr(t, r, "default", "5242880")
+	})
+
+	t.Run("正常値のとき値を採用しWarnを出力しない", func(t *testing.T) {
+		// Arrange
+		h := installCaptureLogger(t)
+		t.Setenv(key, "10485760")
+
+		// Act
+		got := getEnvInt64(key, defaultVal)
+
+		// Assert
+		if got != 10485760 {
+			t.Errorf("got = %d, want %d", got, 10485760)
+		}
+		if n := len(h.warnRecords()); n != 0 {
+			t.Errorf("warn records = %d, want 0", n)
+		}
+	})
+
+	t.Run("未設定（空文字）のときデフォルト値を採用しWarnを出力しない", func(t *testing.T) {
+		// Arrange
+		h := installCaptureLogger(t)
+		t.Setenv(key, "")
+
+		// Act
+		got := getEnvInt64(key, defaultVal)
+
+		// Assert
+		if got != defaultVal {
+			t.Errorf("got = %d, want %d (default fallback)", got, defaultVal)
+		}
+		if n := len(h.warnRecords()); n != 0 {
+			t.Errorf("warn records = %d, want 0", n)
+		}
+	})
+}
+
+// TestGetEnvDuration は getEnvDuration のパース失敗時警告ログ・フォールバック・正常系を検証する。
+// Requirement 3 (3.1/3.2/3.3) と Requirement 4 に対応。
+func TestGetEnvDuration(t *testing.T) {
+	const key = "TEST_GET_ENV_DURATION"
+	const defaultVal = 10 * time.Second
+
+	t.Run("不正値のときデフォルト値を採用しWarnを1件出力する", func(t *testing.T) {
+		// Arrange
+		h := installCaptureLogger(t)
+		t.Setenv(key, "10sec")
+
+		// Act
+		got := getEnvDuration(key, defaultVal)
+
+		// Assert
+		if got != defaultVal {
+			t.Errorf("got = %v, want %v (default fallback)", got, defaultVal)
+		}
+		if n := len(h.warnRecords()); n != 1 {
+			t.Fatalf("warn records = %d, want 1", n)
+		}
+	})
+
+	t.Run("不正値のときWarnログにキー名・不正値・デフォルト値を構造化フィールドで含める", func(t *testing.T) {
+		// Arrange
+		h := installCaptureLogger(t)
+		t.Setenv(key, "10sec")
+
+		// Act
+		getEnvDuration(key, defaultVal)
+
+		// Assert
+		recs := h.warnRecords()
+		if len(recs) != 1 {
+			t.Fatalf("warn records = %d, want 1", len(recs))
+		}
+		r := recs[0]
+		assertAttr(t, r, "key", key)
+		assertAttr(t, r, "value", "10sec")
+		assertAttr(t, r, "default", (10 * time.Second).String())
+	})
+
+	t.Run("正常値のとき値を採用しWarnを出力しない", func(t *testing.T) {
+		// Arrange
+		h := installCaptureLogger(t)
+		t.Setenv(key, "30s")
+
+		// Act
+		got := getEnvDuration(key, defaultVal)
+
+		// Assert
+		if got != 30*time.Second {
+			t.Errorf("got = %v, want %v", got, 30*time.Second)
+		}
+		if n := len(h.warnRecords()); n != 0 {
+			t.Errorf("warn records = %d, want 0", n)
+		}
+	})
+
+	t.Run("未設定（空文字）のときデフォルト値を採用しWarnを出力しない", func(t *testing.T) {
+		// Arrange
+		h := installCaptureLogger(t)
+		t.Setenv(key, "")
+
+		// Act
+		got := getEnvDuration(key, defaultVal)
+
+		// Assert
+		if got != defaultVal {
+			t.Errorf("got = %v, want %v (default fallback)", got, defaultVal)
+		}
+		if n := len(h.warnRecords()); n != 0 {
+			t.Errorf("warn records = %d, want 0", n)
+		}
+	})
+}
+
+// TestGetEnvBool は getEnvBool のパース失敗時警告ログ・フォールバック・正常系を検証する。
+// Requirement 3.3（未指定・不正値時は既定値採用で起動継続）に対応。
+func TestGetEnvBool(t *testing.T) {
+	const key = "TEST_GET_ENV_BOOL"
+	const defaultVal = false
+
+	t.Run("不正値のときデフォルト値を採用しWarnを1件出力する", func(t *testing.T) {
+		// Arrange
+		h := installCaptureLogger(t)
+		t.Setenv(key, "yesnt")
+
+		// Act
+		got := getEnvBool(key, defaultVal)
+
+		// Assert
+		if got != defaultVal {
+			t.Errorf("got = %v, want %v (default fallback)", got, defaultVal)
+		}
+		if n := len(h.warnRecords()); n != 1 {
+			t.Fatalf("warn records = %d, want 1", n)
+		}
+	})
+
+	t.Run("不正値のときWarnログにキー名・不正値・デフォルト値を構造化フィールドで含める", func(t *testing.T) {
+		// Arrange
+		h := installCaptureLogger(t)
+		t.Setenv(key, "yesnt")
+
+		// Act
+		getEnvBool(key, defaultVal)
+
+		// Assert
+		recs := h.warnRecords()
+		if len(recs) != 1 {
+			t.Fatalf("warn records = %d, want 1", len(recs))
+		}
+		r := recs[0]
+		assertAttr(t, r, "key", key)
+		assertAttr(t, r, "value", "yesnt")
+		assertAttr(t, r, "default", "false")
+	})
+
+	t.Run("正常値のとき値を採用しWarnを出力しない", func(t *testing.T) {
+		// Arrange
+		h := installCaptureLogger(t)
+		t.Setenv(key, "true")
+
+		// Act
+		got := getEnvBool(key, defaultVal)
+
+		// Assert
+		if got != true {
+			t.Errorf("got = %v, want %v", got, true)
+		}
+		if n := len(h.warnRecords()); n != 0 {
+			t.Errorf("warn records = %d, want 0", n)
+		}
+	})
+
+	t.Run("未設定（空文字）のときデフォルト値を採用しWarnを出力しない", func(t *testing.T) {
+		// Arrange
+		h := installCaptureLogger(t)
+		t.Setenv(key, "")
+
+		// Act
+		got := getEnvBool(key, defaultVal)
+
+		// Assert
+		if got != defaultVal {
+			t.Errorf("got = %v, want %v (default fallback)", got, defaultVal)
+		}
+		if n := len(h.warnRecords()); n != 0 {
+			t.Errorf("warn records = %d, want 0", n)
+		}
+	})
+}
+
+// assertAttr はレコードに指定キーの属性が存在し、値が期待文字列と一致することを検証する。
+func assertAttr(t *testing.T, r slog.Record, key, want string) {
+	t.Helper()
+	got, ok := attrValue(r, key)
+	if !ok {
+		t.Errorf("attribute %q not found in record", key)
+		return
+	}
+	if got != want {
+		t.Errorf("attribute %q = %q, want %q", key, got, want)
 	}
 }

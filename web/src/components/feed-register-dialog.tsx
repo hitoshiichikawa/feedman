@@ -14,7 +14,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { createApiClient } from "@/lib/api";
+import { apiClient } from "@/lib/api";
 import type { ApiErrorResponse, FeedRegistrationResponse } from "@/types/api";
 import { ApiError } from "@/lib/api";
 
@@ -45,12 +45,11 @@ export function FeedRegisterDialog({ onRegistered }: FeedRegisterDialogProps) {
     phase: "input",
   });
 
-  const api = createApiClient();
   const queryClient = useQueryClient();
 
   const registerMutation = useMutation({
     mutationFn: async (inputUrl: string) => {
-      return api.post<FeedRegistrationResponse>("/api/feeds", {
+      return apiClient.post<FeedRegistrationResponse>("/api/feeds", {
         url: inputUrl,
       });
     },

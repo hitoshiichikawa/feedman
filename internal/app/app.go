@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/hitoshi/feedman/internal/auth"
 	"github.com/hitoshi/feedman/internal/config"
 	"github.com/hitoshi/feedman/internal/database"
@@ -19,11 +21,11 @@ import (
 	"github.com/hitoshi/feedman/internal/hatebu"
 	"github.com/hitoshi/feedman/internal/item"
 	"github.com/hitoshi/feedman/internal/logger"
+	"github.com/hitoshi/feedman/internal/metrics"
 	"github.com/hitoshi/feedman/internal/middleware"
 	"github.com/hitoshi/feedman/internal/repository"
 	"github.com/hitoshi/feedman/internal/security"
 	"github.com/hitoshi/feedman/internal/subscription"
-	"github.com/hitoshi/feedman/internal/user"
 	"github.com/hitoshi/feedman/internal/worker/cleanup"
 	fetchpkg "github.com/hitoshi/feedman/internal/worker/fetch"
 )
@@ -129,7 +131,9 @@ func runServe(cfg *config.Config) error {
 	itemService := item.NewItemService(itemRepo, itemStateRepo)
 
 	subService := subscription.NewService(subRepo, itemStateRepo, feedRepo)
-	userService := user.NewService(userRepo, sessionRepo, subRepo, itemStateRepo)
+	// 退会処理は単一トランザクションで原子化する（途中失敗時は全ロールバック）。
+	txBeginner := repository.NewSQLTxBeginner(db)
+	userService := newTxUserService(txBeginner, userRepo, sessionRepo, subRepo, itemStateRepo)
 
 	// 5. ハンドラーアダプタの構築
 	subServiceAdapter := handler.NewSubscriptionServiceAdapter(subService)
@@ -145,11 +149,35 @@ func runServe(cfg *config.Config) error {
 	// デフォルト値から変更する場合のみ上書き（req/min -> req/sec に変換）
 	// configのRateLimitGeneralはreq/min単位なのでreq/secに変換する
 
+	// RateLimiter はバックグラウンドでクリーンアップ goroutine を起動するため、
+	// シャットダウン時に Stop() を呼べるよう変数参照を保持する（goroutine リーク防止）。
+	rateLimiter := middleware.NewRateLimiter(rateLimiterCfg)
+
+	// 未認証エンドポイント（/auth/google/login・/auth/google/callback・/health）向けの
+	// IP 単位レート制限。閾値は cfg.RateLimitUnauthIP（既定 30 req/min/IP、不正値は config 側で
+	// 既定フォールバック済み）から構築する。これもクリーンアップ goroutine を持つため
+	// シャットダウン時に Stop() を呼べるよう参照を保持する（goroutine リーク防止）。
+	unauthIPRateLimiter := middleware.NewIPRateLimiter(
+		middleware.DefaultIPRateLimiterConfig(cfg.RateLimitUnauthIP),
+	)
+
+	// serve 専用の Prometheus registry と Collector を生成する。
+	// serve プロセスにはフェッチ系の記録経路が無いため初期値（0）の公開となるが、
+	// /metrics 自体は信頼 CIDR 制限付きで公開する（Requirement 1.1, 5.1）。
+	serveRegistry := prometheus.NewRegistry()
+	_ = metrics.NewCollector(serveRegistry)
+
 	deps := &handler.RouterDeps{
-		HealthChecker:     db,
-		SessionFinder:     sessionRepo,
-		CORSAllowedOrigin: cfg.CORSAllowedOrigin,
-		RateLimiter:       middleware.NewRateLimiter(rateLimiterCfg),
+		HealthChecker:       db,
+		SessionFinder:       sessionRepo,
+		CORSAllowedOrigin:   cfg.CORSAllowedOrigin,
+		RateLimiter:         rateLimiter,
+		UnauthIPRateLimiter: unauthIPRateLimiter,
+		HSTSEnabled:         cfg.HSTSEnabled,
+		Logger:              slog.Default(),
+
+		MetricsHandler:    metrics.SetupMetricsRoute(serveRegistry),
+		MetricsMiddleware: middleware.NewTrustedCIDRMiddleware(cfg.TrustedCIDRs),
 
 		AuthService: authService,
 		AuthConfig: handler.AuthHandlerConfig{
@@ -199,8 +227,11 @@ func runServe(cfg *config.Config) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := server.Shutdown(ctx); err != nil {
-		return fmt.Errorf("server shutdown failed: %w", err)
+	// グレースフルシャットダウン: 稼働中リクエストの drain 完了後に
+	// RateLimiter のクリーンアップ goroutine を停止する（高々 1 回）。
+	coordinator := newShutdownCoordinator(server, rateLimiter, unauthIPRateLimiter)
+	if err := coordinator.shutdown(ctx); err != nil {
+		return err
 	}
 
 	slog.Info("API server stopped gracefully")
@@ -233,22 +264,29 @@ func runWorker(cfg *config.Config) error {
 	ssrfGuard := security.NewSSRFGuard()
 	sanitizer := security.NewContentSanitizer()
 
-	// 4. フェッチャーの初期化
-	upsertSvc := item.NewItemUpsertService(itemRepo, sanitizer)
+	// 4. worker 専用の registry と Collector を生成し、各レイヤへ注入する。
+	// フェッチ／UPSERT は worker プロセスで実行されるため、フェッチ系メトリクスは
+	// この registry に蓄積され、後述の metrics listener 経由でスクレイプ可能になる（Requirement 3.1）。
+	workerRegistry := prometheus.NewRegistry()
+	collector := metrics.NewCollector(workerRegistry)
+
+	// 5. フェッチャーの初期化（WithMetrics で Collector を注入）
+	upsertSvc := item.NewItemUpsertService(itemRepo, sanitizer, item.WithMetrics(collector))
 	fetcher := fetchpkg.NewFetcher(
 		feedRepo, subRepo, upsertSvc, ssrfGuard,
 		slog.Default(), cfg.FetchTimeout, cfg.FetchMaxSize,
+		fetchpkg.WithMetrics(collector),
 	)
 
-	// 5. スケジューラの起動
+	// 6. スケジューラの起動
 	scheduler := fetchpkg.NewScheduler(
 		feedRepo, fetcher, slog.Default(), cfg.FetchMaxConcurrent,
 	)
 
-	// 6. クリーンアップジョブの初期化
+	// 7. クリーンアップジョブの初期化
 	cleanupJob := cleanup.NewCleanupJob(db, slog.Default())
 
-	// 7. はてなブックマークバッチジョブの初期化
+	// 8. はてなブックマークバッチジョブの初期化
 	hatebuClient := hatebu.NewClient(
 		&http.Client{Timeout: 10 * time.Second},
 		slog.Default(),
@@ -277,6 +315,11 @@ func runWorker(cfg *config.Config) error {
 		slog.Duration("fetch_interval", cfg.FetchInterval),
 		slog.Int("max_concurrent", cfg.FetchMaxConcurrent),
 	)
+
+	// worker 専用の metrics listener を起動する（信頼 CIDR 制限付き）。
+	// worker は HTTP ルーターを持たないため独立 listener で /metrics を公開し、
+	// ctx キャンセルで graceful stop する（Requirement 1.2, 3.1, 3.2, 3.3）。
+	startWorkerMetricsListener(ctx, ":"+cfg.MetricsPort, workerRegistry, cfg.TrustedCIDRs)
 
 	// はてなブックマークバッチジョブをバックグラウンドで起動
 	go hatebuBatch.Start(ctx)

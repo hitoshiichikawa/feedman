@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -291,6 +292,62 @@ func TestHandleCallback_ExistingUser_LogsInAndCreatesSession(t *testing.T) {
 	}
 }
 
+func TestHandleCallback_IssuesDistinctSessionIDPerLogin(t *testing.T) {
+	// Arrange: 同一ユーザーが連続でログインしても毎回異なる session_id が払い出されること
+	// （AC R1.3 / R2.2 ログイン前後で有効な識別子が同一にならないことの基盤を担保する）
+	ctx := context.Background()
+
+	existingUserID := "existing-user-id-rotate"
+
+	provider := &mockOAuthProvider{
+		exchangeCodeFn: func(ctx context.Context, code string) (*OAuthUserInfo, error) {
+			return &OAuthUserInfo{
+				ProviderUserID: "google-user-rotate",
+				Email:          "rotate@example.com",
+				Name:           "Rotate User",
+				Provider:       "google",
+			}, nil
+		},
+	}
+
+	identityRepo := &mockIdentityRepo{
+		findByProviderFn: func(ctx context.Context, provider, providerUserID string) (*model.Identity, error) {
+			return &model.Identity{
+				ID:             "identity-rotate",
+				UserID:         existingUserID,
+				Provider:       "google",
+				ProviderUserID: "google-user-rotate",
+			}, nil
+		},
+	}
+
+	sessionRepo := &mockSessionRepo{
+		createFn: func(ctx context.Context, session *model.Session) error {
+			return nil
+		},
+	}
+
+	svc := NewService(provider, &mockUserRepo{}, identityRepo, sessionRepo, ServiceConfig{SessionMaxAge: 86400})
+
+	// Act: 2 回ログインする
+	first, err := svc.HandleCallback(ctx, "auth-code-1")
+	if err != nil {
+		t.Fatalf("first HandleCallback() error = %v", err)
+	}
+	second, err := svc.HandleCallback(ctx, "auth-code-2")
+	if err != nil {
+		t.Fatalf("second HandleCallback() error = %v", err)
+	}
+
+	// Assert: 2 回のログインで払い出された session_id が異なること
+	if first.ID == "" || second.ID == "" {
+		t.Fatal("expected non-empty session IDs")
+	}
+	if first.ID == second.ID {
+		t.Errorf("session IDs must differ between logins, got %q twice", first.ID)
+	}
+}
+
 func TestHandleCallback_OAuthError_ReturnsError(t *testing.T) {
 	ctx := context.Background()
 
@@ -375,6 +432,67 @@ func TestLogout_EmptySessionID_ReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty session ID")
 	}
+}
+
+func TestHashSessionIDForLog_SameInput_ReturnsSameValue(t *testing.T) {
+	// Req 2.1: 同一のセッション ID から短縮値を生成すると常に同一の短縮値を返す
+	// Arrange
+	sessionID := "session-consistent-123"
+
+	// Act
+	first := hashSessionIDForLog(sessionID)
+	second := hashSessionIDForLog(sessionID)
+
+	// Assert
+	if first != second {
+		t.Errorf("same input must yield same value, got %q and %q", first, second)
+	}
+}
+
+func TestHashSessionIDForLog_DifferentInput_ReturnsDistinctValue(t *testing.T) {
+	// Req 2.2: 異なるセッション ID から短縮値を生成するとそれぞれ区別可能な短縮値を返す
+	// Arrange
+	idA := "session-a"
+	idB := "session-b"
+
+	// Act
+	hashA := hashSessionIDForLog(idA)
+	hashB := hashSessionIDForLog(idB)
+
+	// Assert
+	if hashA == hashB {
+		t.Errorf("different inputs must yield distinct values, both got %q", hashA)
+	}
+}
+
+func TestHashSessionIDForLog_ReturnsEightCharsWithoutRawInput(t *testing.T) {
+	// Req 1.3 / NFR 1.2: 短縮値はハッシュ値の先頭 8 文字に限定され、生入力を復元・露出しない
+	// Arrange
+	sessionID := "super-secret-session-token-value"
+
+	// Act
+	hash := hashSessionIDForLog(sessionID)
+
+	// Assert
+	if len(hash) != 8 {
+		t.Errorf("hash length = %d, want 8", len(hash))
+	}
+	if strings.Contains(hash, sessionID) {
+		t.Errorf("hash %q must not contain raw session ID %q", hash, sessionID)
+	}
+}
+
+func TestHashSessionIDForLog_EmptyInput_ReturnsValueWithoutPanic(t *testing.T) {
+	// Req 3.1: 空文字のセッション ID が渡されてもパニックせず短縮値を返す
+	t.Run("空文字入力のときパニックせず8文字の値を返す", func(t *testing.T) {
+		// Act
+		hash := hashSessionIDForLog("")
+
+		// Assert
+		if len(hash) != 8 {
+			t.Errorf("hash length for empty input = %d, want 8", len(hash))
+		}
+	})
 }
 
 func TestGetCurrentUser_ValidSession_ReturnsUser(t *testing.T) {

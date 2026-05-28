@@ -156,12 +156,27 @@ func isBlockedIP(ip net.IP) bool {
 	return false
 }
 
-// blockedHostnames はブロック対象のホスト名。
+// blockedHostnames はブロック対象のホスト名（完全一致）。
+// ループバック別名・クラウドメタデータエンドポイントのホスト名表記を拒否する。
+// 本リストはホスト名の完全一致ブロックのみを担い、DNS解決後の宛先IP検証は
+// フェッチ層（NewSafeClientが生成するsafeurl Dialerフック）の責務である。
 var blockedHostnames = []string{
+	// ループバック別名
 	"localhost",
+	"localhost.localdomain",
+	"ip6-localhost",
+	"ip6-loopback",
+	// クラウドメタデータエンドポイントのホスト名表記
+	"metadata.google.internal", // GCP メタデータ
+	"metadata",                 // 一般的なメタデータ別名
 }
 
 // isBlockedHostname はホスト名がブロック対象かを検証する。
+// 判定は小文字化した上でブロック対象ホスト名との完全一致で行う（大文字小文字非依存）。
+// 部分一致・接尾辞一致では拒否しないため、localhost.example.com や notlocalhost 等の
+// 正当なホスト名を過剰ブロックしない。
+// なお本関数はホスト名の静的な完全一致ブロックのみを担い、DNS解決後の宛先IP検証は
+// フェッチ層（NewSafeClientが生成するsafeurl Dialerフック）の責務である。
 func isBlockedHostname(host string) bool {
 	lower := strings.ToLower(host)
 	for _, blocked := range blockedHostnames {

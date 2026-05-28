@@ -76,6 +76,42 @@ func (m *mockUpsertService) UpsertItems(_ context.Context, _ string, items []mod
 	return m.insertCount, m.updateCount, m.err
 }
 
+// mockMetricsCollector は metrics.MetricsCollector のテスト用モック。
+// 各記録メソッドの呼び出し回数と最後に渡された値を保持する。
+type mockMetricsCollector struct {
+	fetchSuccess  int
+	fetchFailure  int
+	parseFailure  int
+	httpStatus    int
+	fetchLatency  int
+	itemsUpserted int
+
+	lastStatusCode    int
+	lastItemsUpserted int
+	lastLatency       time.Duration
+}
+
+func (m *mockMetricsCollector) RecordFetchSuccess(_ string) { m.fetchSuccess++ }
+
+func (m *mockMetricsCollector) RecordFetchFailure(_, _ string) { m.fetchFailure++ }
+
+func (m *mockMetricsCollector) RecordParseFailure(_ string) { m.parseFailure++ }
+
+func (m *mockMetricsCollector) RecordHTTPStatus(statusCode int) {
+	m.httpStatus++
+	m.lastStatusCode = statusCode
+}
+
+func (m *mockMetricsCollector) RecordFetchLatency(duration time.Duration) {
+	m.fetchLatency++
+	m.lastLatency = duration
+}
+
+func (m *mockMetricsCollector) RecordItemsUpserted(count int) {
+	m.itemsUpserted++
+	m.lastItemsUpserted = count
+}
+
 // mockSSRFGuard はSSRFGuardServiceのテスト用モック。
 type mockSSRFGuard struct {
 	validateErr error
@@ -782,5 +818,341 @@ func TestFetcher_Fetch_UpdatesFeedTitle(t *testing.T) {
 
 	if feed.Title != "Updated Feed Title" {
 		t.Errorf("Feed.Title = %q, want %q", feed.Title, "Updated Feed Title")
+	}
+}
+
+// TestFetcher_Fetch_PersistsTitleAndSiteURL は、フェッチ成功時に
+// パース済みタイトル・サイト URL が UpdateFetchState（永続化処理）へ
+// 渡されることを検証する（Requirement 1.1 / 1.2 / 1.3 / 2.3）。
+// mock repo が in-memory の feed をそのまま受け取るため、永続化処理に
+// 正しい値が引き渡されることを直接捕捉できる。
+func TestFetcher_Fetch_PersistsTitleAndSiteURL(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		fmt.Fprint(w, `<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <title>Parsed Site Title</title>
+    <link>https://site.example.com</link>
+  </channel>
+</rss>`)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	var persistedTitle, persistedSiteURL string
+	feedRepo := &mockFeedRepo{
+		updateFetchStateFunc: func(_ context.Context, feed *model.Feed) error {
+			persistedTitle = feed.Title
+			persistedSiteURL = feed.SiteURL
+			return nil
+		},
+	}
+
+	f := NewFetcher(
+		feedRepo,
+		&mockSubRepo{minInterval: 60},
+		&mockUpsertService{},
+		&mockSSRFGuard{},
+		newTestLogger(&buf),
+		10*time.Second,
+		5*1024*1024,
+	)
+
+	feed := &model.Feed{
+		ID:      "feed-1",
+		FeedURL: server.URL,
+		// 初期タイトルが URL のまま（不具合 #113 の状態）
+		Title: server.URL,
+	}
+
+	// Act
+	if err := f.Fetch(context.Background(), feed); err != nil {
+		t.Fatalf("Fetch() がエラーを返した: %v", err)
+	}
+
+	// Assert: 永続化処理にパース済みタイトル・サイト URL が渡される
+	if persistedTitle != "Parsed Site Title" {
+		t.Errorf("UpdateFetchState に渡された Title = %q, want %q", persistedTitle, "Parsed Site Title")
+	}
+	if persistedSiteURL != "https://site.example.com" {
+		t.Errorf("UpdateFetchState に渡された SiteURL = %q, want %q", persistedSiteURL, "https://site.example.com")
+	}
+}
+
+// TestFetcher_Fetch_EmptyParsedTitleDoesNotOverwrite は、パース済みタイトル・
+// サイト URL が空のとき、既存のタイトル・サイト URL が空値で上書きされず、
+// 永続化処理にも既存値が引き渡されることを検証する（Requirement 2.1 / 2.2）。
+func TestFetcher_Fetch_EmptyParsedTitleDoesNotOverwrite(t *testing.T) {
+	// Arrange: title / link を持たないフィードを返すサーバー
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		fmt.Fprint(w, `<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <description>タイトル・リンクなしのフィード</description>
+    <item><title>記事</title><guid>g1</guid></item>
+  </channel>
+</rss>`)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	var persistedTitle, persistedSiteURL string
+	feedRepo := &mockFeedRepo{
+		updateFetchStateFunc: func(_ context.Context, feed *model.Feed) error {
+			persistedTitle = feed.Title
+			persistedSiteURL = feed.SiteURL
+			return nil
+		},
+	}
+
+	f := NewFetcher(
+		feedRepo,
+		&mockSubRepo{minInterval: 60},
+		&mockUpsertService{insertCount: 1},
+		&mockSSRFGuard{},
+		newTestLogger(&buf),
+		10*time.Second,
+		5*1024*1024,
+	)
+
+	feed := &model.Feed{
+		ID:      "feed-1",
+		FeedURL: server.URL,
+		Title:   "既存タイトル",
+		SiteURL: "https://existing.example.com",
+	}
+
+	// Act
+	if err := f.Fetch(context.Background(), feed); err != nil {
+		t.Fatalf("Fetch() がエラーを返した: %v", err)
+	}
+
+	// Assert: 既存値が空で上書きされない & 永続化処理にも既存値が渡される
+	if feed.Title != "既存タイトル" {
+		t.Errorf("Feed.Title = %q, want %q（空で上書きしてはならない）", feed.Title, "既存タイトル")
+	}
+	if feed.SiteURL != "https://existing.example.com" {
+		t.Errorf("Feed.SiteURL = %q, want %q（空で上書きしてはならない）", feed.SiteURL, "https://existing.example.com")
+	}
+	if persistedTitle != "既存タイトル" {
+		t.Errorf("UpdateFetchState に渡された Title = %q, want %q", persistedTitle, "既存タイトル")
+	}
+	if persistedSiteURL != "https://existing.example.com" {
+		t.Errorf("UpdateFetchState に渡された SiteURL = %q, want %q", persistedSiteURL, "https://existing.example.com")
+	}
+}
+
+// --- Task 3.1: WithMetrics によるメトリクス記録のテスト ---
+
+func TestFetcher_Fetch_Metrics_Success200(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		fmt.Fprint(w, `<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <title>Test Feed</title>
+    <item><title>A</title><guid>g1</guid></item>
+  </channel>
+</rss>`)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	mc := &mockMetricsCollector{}
+	f := NewFetcher(
+		&mockFeedRepo{updateFetchStateFunc: func(_ context.Context, _ *model.Feed) error { return nil }},
+		&mockSubRepo{minInterval: 60},
+		&mockUpsertService{insertCount: 1},
+		&mockSSRFGuard{},
+		newTestLogger(&buf),
+		10*time.Second,
+		5*1024*1024,
+		WithMetrics(mc),
+	)
+	feed := &model.Feed{ID: "feed-1", FeedURL: server.URL, FetchStatus: model.FetchStatusActive}
+
+	// Act
+	if err := f.Fetch(context.Background(), feed); err != nil {
+		t.Fatalf("Fetch() がエラーを返した: %v", err)
+	}
+
+	// Assert: 200 成功時は成功数・HTTP ステータス・レイテンシが各 1 回記録される
+	if mc.fetchSuccess != 1 {
+		t.Errorf("RecordFetchSuccess 呼び出し回数 = %d, want 1", mc.fetchSuccess)
+	}
+	if mc.fetchFailure != 0 {
+		t.Errorf("RecordFetchFailure 呼び出し回数 = %d, want 0", mc.fetchFailure)
+	}
+	if mc.httpStatus != 1 || mc.lastStatusCode != http.StatusOK {
+		t.Errorf("RecordHTTPStatus = (count %d, code %d), want (1, 200)", mc.httpStatus, mc.lastStatusCode)
+	}
+	if mc.fetchLatency != 1 {
+		t.Errorf("RecordFetchLatency 呼び出し回数 = %d, want 1", mc.fetchLatency)
+	}
+}
+
+func TestFetcher_Fetch_Metrics_304Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	mc := &mockMetricsCollector{}
+	f := NewFetcher(
+		&mockFeedRepo{updateFetchStateFunc: func(_ context.Context, _ *model.Feed) error { return nil }},
+		&mockSubRepo{minInterval: 60},
+		&mockUpsertService{},
+		&mockSSRFGuard{},
+		newTestLogger(&buf),
+		10*time.Second,
+		5*1024*1024,
+		WithMetrics(mc),
+	)
+	feed := &model.Feed{ID: "feed-1", FeedURL: server.URL, ETag: `"abc"`}
+
+	// Act
+	_ = f.Fetch(context.Background(), feed)
+
+	// Assert: 304 は成功（変更なし）として成功数に計上される
+	if mc.fetchSuccess != 1 {
+		t.Errorf("304 時の RecordFetchSuccess 呼び出し回数 = %d, want 1", mc.fetchSuccess)
+	}
+	if mc.lastStatusCode != http.StatusNotModified {
+		t.Errorf("RecordHTTPStatus のステータス = %d, want 304", mc.lastStatusCode)
+	}
+}
+
+func TestFetcher_Fetch_Metrics_HTTPFailure(t *testing.T) {
+	// Arrange: SSRFGuard が ValidateURL を成功させた上で、到達不能なアドレスへ client.Do を失敗させる
+	var buf bytes.Buffer
+	mc := &mockMetricsCollector{}
+	f := NewFetcher(
+		&mockFeedRepo{updateFetchStateFunc: func(_ context.Context, _ *model.Feed) error { return nil }},
+		&mockSubRepo{minInterval: 60},
+		&mockUpsertService{},
+		&mockSSRFGuard{},
+		newTestLogger(&buf),
+		1*time.Second,
+		5*1024*1024,
+		WithMetrics(mc),
+	)
+	// 予約済みドキュメント用ドメインで名前解決に失敗させる
+	feed := &model.Feed{ID: "feed-1", FeedURL: "http://nonexistent.invalid/feed.xml", FetchStatus: model.FetchStatusActive}
+
+	// Act
+	_ = f.Fetch(context.Background(), feed)
+
+	// Assert: HTTP リクエスト失敗で失敗数が記録され、成功数は 0
+	if mc.fetchFailure != 1 {
+		t.Errorf("RecordFetchFailure 呼び出し回数 = %d, want 1", mc.fetchFailure)
+	}
+	if mc.fetchSuccess != 0 {
+		t.Errorf("RecordFetchSuccess 呼び出し回数 = %d, want 0", mc.fetchSuccess)
+	}
+	// レイテンシは defer で常に記録される
+	if mc.fetchLatency != 1 {
+		t.Errorf("RecordFetchLatency 呼び出し回数 = %d, want 1", mc.fetchLatency)
+	}
+}
+
+func TestFetcher_Fetch_Metrics_ParseFailure(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		fmt.Fprint(w, `not valid XML at all!!!`)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	mc := &mockMetricsCollector{}
+	f := NewFetcher(
+		&mockFeedRepo{updateFetchStateFunc: func(_ context.Context, _ *model.Feed) error { return nil }},
+		&mockSubRepo{minInterval: 60},
+		&mockUpsertService{},
+		&mockSSRFGuard{},
+		newTestLogger(&buf),
+		10*time.Second,
+		5*1024*1024,
+		WithMetrics(mc),
+	)
+	feed := &model.Feed{ID: "feed-1", FeedURL: server.URL, FetchStatus: model.FetchStatusActive}
+
+	// Act
+	_ = f.Fetch(context.Background(), feed)
+
+	// Assert: パース失敗はパース失敗数とフェッチ失敗数の両方を記録する
+	if mc.parseFailure != 1 {
+		t.Errorf("RecordParseFailure 呼び出し回数 = %d, want 1", mc.parseFailure)
+	}
+	if mc.fetchFailure != 1 {
+		t.Errorf("RecordFetchFailure 呼び出し回数 = %d, want 1", mc.fetchFailure)
+	}
+	if mc.fetchSuccess != 0 {
+		t.Errorf("RecordFetchSuccess 呼び出し回数 = %d, want 0", mc.fetchSuccess)
+	}
+}
+
+func TestFetcher_Fetch_Metrics_HTTPStatusRecordedOnBackoff(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	mc := &mockMetricsCollector{}
+	f := NewFetcher(
+		&mockFeedRepo{updateFetchStateFunc: func(_ context.Context, _ *model.Feed) error { return nil }},
+		&mockSubRepo{minInterval: 60},
+		&mockUpsertService{},
+		&mockSSRFGuard{},
+		newTestLogger(&buf),
+		10*time.Second,
+		5*1024*1024,
+		WithMetrics(mc),
+	)
+	feed := &model.Feed{ID: "feed-1", FeedURL: server.URL, FetchStatus: model.FetchStatusActive}
+
+	// Act
+	_ = f.Fetch(context.Background(), feed)
+
+	// Assert: 500 はバックオフ失敗として失敗数を記録し、HTTP ステータスも記録される
+	if mc.lastStatusCode != http.StatusInternalServerError {
+		t.Errorf("RecordHTTPStatus のステータス = %d, want 500", mc.lastStatusCode)
+	}
+	if mc.fetchFailure != 1 {
+		t.Errorf("RecordFetchFailure 呼び出し回数 = %d, want 1", mc.fetchFailure)
+	}
+}
+
+func TestNewFetcher_DefaultMetricsIsNopAndNilSafe(t *testing.T) {
+	// Arrange: WithMetrics を指定しない（既存 7 引数 call site 相当）
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		fmt.Fprint(w, `<?xml version="1.0"?><rss version="2.0"><channel><title>T</title></channel></rss>`)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	f := NewFetcher(
+		&mockFeedRepo{updateFetchStateFunc: func(_ context.Context, _ *model.Feed) error { return nil }},
+		&mockSubRepo{minInterval: 60},
+		&mockUpsertService{},
+		&mockSSRFGuard{},
+		newTestLogger(&buf),
+		10*time.Second,
+		5*1024*1024,
+	)
+	feed := &model.Feed{ID: "feed-1", FeedURL: server.URL, FetchStatus: model.FetchStatusActive}
+
+	// Act + Assert: option 未指定でも nil 参照で panic せず正常完了する
+	if err := f.Fetch(context.Background(), feed); err != nil {
+		t.Fatalf("option 未指定の Fetch() がエラーを返した: %v", err)
 	}
 }

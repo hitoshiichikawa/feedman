@@ -14,7 +14,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { UserMinus } from "lucide-react";
-import { createApiClient } from "@/lib/api";
+import { apiClient } from "@/lib/api";
 
 /** WithdrawDialog コンポーネントのプロパティ */
 interface WithdrawDialogProps {
@@ -31,11 +31,10 @@ interface WithdrawDialogProps {
  */
 export function WithdrawDialog({ onWithdrawn }: WithdrawDialogProps) {
   const [open, setOpen] = useState(false);
-  const api = createApiClient();
   const queryClient = useQueryClient();
 
   const withdrawMutation = useMutation({
-    mutationFn: () => api.delete("/api/account"),
+    mutationFn: () => apiClient.delete("/api/account"),
     onSuccess: () => {
       // 全キャッシュをクリア（認証情報も含む）
       queryClient.clear();

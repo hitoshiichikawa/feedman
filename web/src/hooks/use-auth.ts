@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { createApiClient } from "@/lib/api";
+import { apiClient } from "@/lib/api";
 import type { User } from "@/types/auth";
 
 /**
@@ -12,11 +12,9 @@ import type { User } from "@/types/auth";
  * 未認証の場合は401エラーとなりisErrorがtrueになる。
  */
 export function useCurrentUser() {
-  const api = createApiClient();
-
   return useQuery<User>({
     queryKey: ["auth", "me"],
-    queryFn: () => api.get<User>("/auth/me"),
+    queryFn: () => apiClient.get<User>("/auth/me"),
     retry: false, // 認証エラーの場合はリトライしない
     staleTime: 5 * 60 * 1000, // 5分間キャッシュ
   });
@@ -29,11 +27,10 @@ export function useCurrentUser() {
  * 成功時にQueryClientのキャッシュをクリアする。
  */
 export function useLogout() {
-  const api = createApiClient();
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: () => api.post("/auth/logout"),
+    mutationFn: () => apiClient.post("/auth/logout"),
     onSuccess: () => {
       // 全キャッシュをクリア
       queryClient.clear();

@@ -243,4 +243,274 @@ describe("ItemDetail コンポーネント", () => {
 
     expect(screen.getByText("テスト著者")).toBeInTheDocument();
   });
+
+  // Req 1.1 / 2.1: 危険な要素を含む記事本文はサニタイズ後の結果が描画されること
+  it("記事本文にscript要素が含まれるときサニタイズされて描画されること", () => {
+    const dangerousItem: ItemDetailType = {
+      ...mockItem,
+      content:
+        "<p>安全な本文</p><script>window.__xss = true;</script>",
+    };
+
+    render(
+      <ItemDetail
+        item={dangerousItem}
+        onMarkAsRead={() => {}}
+        onToggleStar={() => {}}
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    const contentArea = screen.getByTestId("item-content");
+    // 許可タグは保持される
+    expect(contentArea.innerHTML).toContain("安全な本文");
+    // script 要素は除去される
+    expect(contentArea.innerHTML).not.toContain("<script");
+    expect(contentArea.innerHTML).not.toContain("window.__xss");
+  });
+
+  // Req 1.1 / 2.3: on* インラインイベントハンドラ属性が除去されること
+  it("記事本文にonerror属性が含まれるときサニタイズされて描画されること", () => {
+    const dangerousItem: ItemDetailType = {
+      ...mockItem,
+      content:
+        '<img src="https://example.com/a.png" alt="画像" onerror="window.__xss = true;">',
+    };
+
+    render(
+      <ItemDetail
+        item={dangerousItem}
+        onMarkAsRead={() => {}}
+        onToggleStar={() => {}}
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    const contentArea = screen.getByTestId("item-content");
+    expect(contentArea.innerHTML).not.toContain("onerror");
+    // 許可された画像属性は保持される
+    expect(contentArea.innerHTML).toContain("https://example.com/a.png");
+  });
+
+  // Req 1.3: 空文字列の記事本文は空のコンテンツ領域を表示すること
+  it("記事本文が空文字列のとき空のコンテンツ領域を表示すること", () => {
+    const emptyItem: ItemDetailType = { ...mockItem, content: "" };
+
+    render(
+      <ItemDetail
+        item={emptyItem}
+        onMarkAsRead={() => {}}
+        onToggleStar={() => {}}
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    const contentArea = screen.getByTestId("item-content");
+    expect(contentArea).toBeInTheDocument();
+    expect(contentArea.innerHTML).toBe("");
+  });
+
+  it("タイトルが元記事への外部リンクであり、新規タブで開くこと", () => {
+    render(
+      <ItemDetail
+        item={mockItem}
+        onMarkAsRead={() => {}}
+        onToggleStar={() => {}}
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    const titleLink = screen.getByRole("link", { name: "テスト記事のタイトル" });
+    expect(titleLink).toHaveAttribute("href", "https://example.com/article-1");
+    expect(titleLink).toHaveAttribute("target", "_blank");
+    expect(titleLink).toHaveAttribute("rel", "noopener noreferrer");
+  });
+
+  // 本文の高さクリップ / 「続きを読む」トグル（Req 1〜4）
+  describe("本文の高さ制限と続きを読むトグル", () => {
+    /**
+     * コンテンツ表示エリアの scrollHeight をモックするヘルパー。
+     * jsdom はレイアウトを計算しないため scrollHeight は常に 0 を返す。
+     * data-testid="item-content" 要素に対して固定の scrollHeight を返すよう
+     * HTMLElement.prototype.scrollHeight を差し替える。
+     */
+    function mockContentScrollHeight(value: number): () => void {
+      const original = Object.getOwnPropertyDescriptor(
+        HTMLElement.prototype,
+        "scrollHeight"
+      );
+      Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+        configurable: true,
+        get(this: HTMLElement) {
+          if (this.getAttribute("data-testid") === "item-content") {
+            return value;
+          }
+          return 0;
+        },
+      });
+      return () => {
+        if (original) {
+          Object.defineProperty(
+            HTMLElement.prototype,
+            "scrollHeight",
+            original
+          );
+        } else {
+          // 元々プロパティが存在しなかった場合は削除する
+          delete (HTMLElement.prototype as unknown as Record<string, unknown>)
+            .scrollHeight;
+        }
+      };
+    }
+
+    // Req 1.1 / 1.2 / 1.3 / 2.1: 本文が 300px を超えるとき折りたたみ・フェードアウト・「続きを読む」を表示する
+    it("本文の高さが300pxを超えるとき折りたたまれ「続きを読む」ボタンとフェードアウトが表示されること", async () => {
+      // Arrange
+      const restore = mockContentScrollHeight(500);
+      try {
+        render(
+          <ItemDetail
+            item={mockItem}
+            onMarkAsRead={() => {}}
+            onToggleStar={() => {}}
+          />,
+          { wrapper: createWrapper() }
+        );
+
+        // Act / Assert
+        const toggle = await screen.findByTestId("content-toggle");
+        expect(toggle).toHaveTextContent("続きを読む");
+        expect(screen.getByTestId("content-fade")).toBeInTheDocument();
+        // 折りたたみ時はコンテナに高さ制限クラスが付与される
+        expect(screen.getByTestId("item-content").className).toContain(
+          "max-h-[300px]"
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    // Req 2.2 / 2.3 / 2.4: 「続きを読む」押下で全文表示・フェードアウト除去・文言が「折りたたむ」に変わる
+    it("「続きを読む」ボタンを押下すると全文表示に切り替わりフェードアウトが消え文言が「折りたたむ」になること", async () => {
+      // Arrange
+      const restore = mockContentScrollHeight(500);
+      try {
+        const user = userEvent.setup();
+        render(
+          <ItemDetail
+            item={mockItem}
+            onMarkAsRead={() => {}}
+            onToggleStar={() => {}}
+          />,
+          { wrapper: createWrapper() }
+        );
+        const toggle = await screen.findByTestId("content-toggle");
+
+        // Act
+        await user.click(toggle);
+
+        // Assert
+        expect(screen.getByTestId("content-toggle")).toHaveTextContent(
+          "折りたたむ"
+        );
+        expect(screen.queryByTestId("content-fade")).not.toBeInTheDocument();
+        expect(screen.getByTestId("item-content").className).not.toContain(
+          "max-h-[300px]"
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    // Req 3.1 / 3.2 / 3.3 / 3.4: 「折りたたむ」押下で 300px 再制限・フェードアウト再表示・文言が「続きを読む」に戻る
+    it("全文表示中に「折りたたむ」ボタンを押下すると300px再制限とフェードアウト再表示が行われ文言が「続きを読む」に戻ること", async () => {
+      // Arrange
+      const restore = mockContentScrollHeight(500);
+      try {
+        const user = userEvent.setup();
+        render(
+          <ItemDetail
+            item={mockItem}
+            onMarkAsRead={() => {}}
+            onToggleStar={() => {}}
+          />,
+          { wrapper: createWrapper() }
+        );
+        const toggle = await screen.findByTestId("content-toggle");
+        await user.click(toggle); // 全文表示へ
+
+        // Act
+        await user.click(screen.getByTestId("content-toggle")); // 折りたたみへ復帰
+
+        // Assert
+        expect(screen.getByTestId("content-toggle")).toHaveTextContent(
+          "続きを読む"
+        );
+        expect(screen.getByTestId("content-fade")).toBeInTheDocument();
+        expect(screen.getByTestId("item-content").className).toContain(
+          "max-h-[300px]"
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    // Req 4.1 / 4.2 / 4.3: 本文が 300px 未満なら折りたたまず全文表示・ボタンとフェードアウトを出さない
+    it("本文の高さが300px未満のとき折りたたまず「続きを読む」ボタンもフェードアウトも表示しないこと", async () => {
+      // Arrange
+      const restore = mockContentScrollHeight(200);
+      try {
+        render(
+          <ItemDetail
+            item={mockItem}
+            onMarkAsRead={() => {}}
+            onToggleStar={() => {}}
+          />,
+          { wrapper: createWrapper() }
+        );
+
+        // Act
+        await waitFor(() => {
+          // 測定後にもボタンが現れないことを確認するため一旦描画完了を待つ
+          expect(screen.getByTestId("item-content")).toBeInTheDocument();
+        });
+
+        // Assert
+        expect(screen.queryByTestId("content-toggle")).not.toBeInTheDocument();
+        expect(screen.queryByTestId("content-fade")).not.toBeInTheDocument();
+        expect(screen.getByTestId("item-content").className).not.toContain(
+          "max-h-[300px]"
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    // Req 4.1 境界値: 本文の高さがちょうど 300px のとき折りたたまない（超過のみ折りたたむ）
+    it("本文の高さがちょうど300pxのとき折りたたまず「続きを読む」ボタンを表示しないこと", async () => {
+      // Arrange
+      const restore = mockContentScrollHeight(300);
+      try {
+        render(
+          <ItemDetail
+            item={mockItem}
+            onMarkAsRead={() => {}}
+            onToggleStar={() => {}}
+          />,
+          { wrapper: createWrapper() }
+        );
+
+        // Act
+        await waitFor(() => {
+          expect(screen.getByTestId("item-content")).toBeInTheDocument();
+        });
+
+        // Assert
+        expect(screen.queryByTestId("content-toggle")).not.toBeInTheDocument();
+        expect(screen.queryByTestId("content-fade")).not.toBeInTheDocument();
+      } finally {
+        restore();
+      }
+    });
+  });
 });

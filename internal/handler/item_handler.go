@@ -51,6 +51,7 @@ type itemSummaryResponse struct {
 	FeedID          string    `json:"feed_id"`
 	Title           string    `json:"title"`
 	Link            string    `json:"link"`
+	Summary         string    `json:"summary"` // サニタイズ済みの概要（空の場合は空文字列）
 	PublishedAt     time.Time `json:"published_at"`
 	IsDateEstimated bool      `json:"is_date_estimated"`
 	IsRead          bool      `json:"is_read"`
@@ -91,7 +92,7 @@ type itemStateResponse struct {
 func (h *ItemHandler) ListItems(w http.ResponseWriter, r *http.Request) {
 	userID, err := middleware.UserIDFromContext(r.Context())
 	if err != nil {
-		writeAPIErrorResponse(w, http.StatusUnauthorized, &model.APIError{
+		middleware.WriteErrorResponse(w, http.StatusUnauthorized, &model.APIError{
 			Code:     "UNAUTHORIZED",
 			Message:  "認証が必要です。",
 			Category: "auth",
@@ -125,7 +126,7 @@ func (h *ItemHandler) ListItems(w http.ResponseWriter, r *http.Request) {
 func (h *ItemHandler) GetItem(w http.ResponseWriter, r *http.Request) {
 	userID, err := middleware.UserIDFromContext(r.Context())
 	if err != nil {
-		writeAPIErrorResponse(w, http.StatusUnauthorized, &model.APIError{
+		middleware.WriteErrorResponse(w, http.StatusUnauthorized, &model.APIError{
 			Code:     "UNAUTHORIZED",
 			Message:  "認証が必要です。",
 			Category: "auth",
@@ -143,7 +144,7 @@ func (h *ItemHandler) GetItem(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if detail == nil {
-		writeAPIErrorResponse(w, http.StatusNotFound, model.NewItemNotFoundError(itemID))
+		middleware.WriteErrorResponse(w, http.StatusNotFound, model.NewItemNotFoundError(itemID))
 		return
 	}
 
@@ -156,7 +157,7 @@ func (h *ItemHandler) GetItem(w http.ResponseWriter, r *http.Request) {
 func (h *ItemHandler) UpdateItemState(w http.ResponseWriter, r *http.Request) {
 	userID, err := middleware.UserIDFromContext(r.Context())
 	if err != nil {
-		writeAPIErrorResponse(w, http.StatusUnauthorized, &model.APIError{
+		middleware.WriteErrorResponse(w, http.StatusUnauthorized, &model.APIError{
 			Code:     "UNAUTHORIZED",
 			Message:  "認証が必要です。",
 			Category: "auth",
@@ -169,7 +170,7 @@ func (h *ItemHandler) UpdateItemState(w http.ResponseWriter, r *http.Request) {
 
 	var req itemStateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeAPIErrorResponse(w, http.StatusBadRequest, &model.APIError{
+		middleware.WriteErrorResponse(w, http.StatusBadRequest, &model.APIError{
 			Code:     "INVALID_REQUEST",
 			Message:  "リクエストボディの解析に失敗しました。",
 			Category: "validation",
@@ -180,7 +181,7 @@ func (h *ItemHandler) UpdateItemState(w http.ResponseWriter, r *http.Request) {
 
 	// is_readとis_starredの両方がnilの場合はバリデーションエラー
 	if req.IsRead == nil && req.IsStarred == nil {
-		writeAPIErrorResponse(w, http.StatusBadRequest, &model.APIError{
+		middleware.WriteErrorResponse(w, http.StatusBadRequest, &model.APIError{
 			Code:     "INVALID_REQUEST",
 			Message:  "is_readまたはis_starredのいずれかを指定してください。",
 			Category: "validation",

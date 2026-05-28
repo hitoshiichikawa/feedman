@@ -2,6 +2,7 @@ package subscription
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -141,6 +142,103 @@ func TestService_ListSubscriptions(t *testing.T) {
 	}
 }
 
+// TestService_UpdateSettings_BoundaryValues はフェッチ間隔の境界値バリデーションを検証する。
+// 要件 1.1-1.10 / 2.1 / 2.4 / 3.1 / NFR 1.1 / NFR 2.1 に対応する。
+func TestService_UpdateSettings_BoundaryValues(t *testing.T) {
+	tests := []struct {
+		name       string
+		minutes    int
+		wantReject bool
+	}{
+		{"下限未満(29)のとき拒否", 29, true},
+		{"下限(30)のとき受理", 30, false},
+		{"刻み違反(31)のとき拒否", 31, true},
+		{"刻み違反(45)のとき拒否", 45, true},
+		{"中間値(60)のとき受理", 60, false},
+		{"中間値(90)のとき受理", 90, false},
+		{"上限(720)のとき受理", 720, false},
+		{"上限超過(721)のとき拒否", 721, true},
+		{"ゼロ(0)のとき拒否", 0, true},
+		{"負値(-30)のとき拒否", -30, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Arrange
+			now := time.Now()
+			updateCalled := false
+			subRepo := &mockSubRepo{
+				findByIDFn: func(ctx context.Context, id string) (*model.Subscription, error) {
+					return &model.Subscription{ID: "sub-1", UserID: "user-1", FeedID: "feed-1"}, nil
+				},
+				updateFetchIntervalFn: func(ctx context.Context, id string, minutes int) error {
+					updateCalled = true
+					return nil
+				},
+				listByUserIDWithFeedFn: func(ctx context.Context, userID string) ([]repository.SubscriptionWithFeedInfo, error) {
+					return []repository.SubscriptionWithFeedInfo{
+						{
+							Subscription: model.Subscription{
+								ID:                   "sub-1",
+								UserID:               userID,
+								FeedID:               "feed-1",
+								FetchIntervalMinutes: tt.minutes,
+								CreatedAt:            now,
+							},
+							FeedTitle:   "Test Feed",
+							FeedURL:     "https://example.com/feed.xml",
+							FetchStatus: model.FetchStatusActive,
+							UnreadCount: 2,
+						},
+					}, nil
+				},
+			}
+
+			svc := NewService(subRepo, nil, nil)
+
+			// Act
+			result, err := svc.UpdateSettings(context.Background(), "user-1", "sub-1", tt.minutes)
+
+			// Assert
+			if tt.wantReject {
+				if err == nil {
+					t.Fatalf("minutes=%d: expected error, got nil", tt.minutes)
+				}
+				apiErr, ok := err.(*model.APIError)
+				if !ok {
+					t.Fatalf("minutes=%d: error type = %T, want *model.APIError", tt.minutes, err)
+				}
+				if apiErr.Code != model.ErrCodeInvalidFetchInterval {
+					t.Errorf("minutes=%d: error code = %q, want %q", tt.minutes, apiErr.Code, model.ErrCodeInvalidFetchInterval)
+				}
+				if updateCalled {
+					t.Errorf("minutes=%d: UpdateFetchInterval should not be called on rejection", tt.minutes)
+				}
+				if result != nil {
+					t.Errorf("minutes=%d: expected nil result on rejection, got %+v", tt.minutes, result)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("minutes=%d: unexpected error: %v", tt.minutes, err)
+			}
+			if !updateCalled {
+				t.Errorf("minutes=%d: expected UpdateFetchInterval to be called", tt.minutes)
+			}
+			if result == nil {
+				t.Fatalf("minutes=%d: expected non-nil result", tt.minutes)
+			}
+			if result.FetchIntervalMinutes != tt.minutes {
+				t.Errorf("minutes=%d: FetchIntervalMinutes = %d, want %d", tt.minutes, result.FetchIntervalMinutes, tt.minutes)
+			}
+			if result.FeedTitle != "Test Feed" {
+				t.Errorf("minutes=%d: FeedTitle = %q, want %q", tt.minutes, result.FeedTitle, "Test Feed")
+			}
+		})
+	}
+}
+
 // TestService_Unsubscribe は購読解除を検証する。
 func TestService_Unsubscribe(t *testing.T) {
 	deleteCalled := false
@@ -258,5 +356,432 @@ func TestService_ResumeFetch_NotStopped_ReturnsError(t *testing.T) {
 	_, err := svc.ResumeFetch(context.Background(), "user-1", "sub-1")
 	if err == nil {
 		t.Fatal("expected error for non-stopped feed, got nil")
+	}
+}
+
+// TestService_Unsubscribe_NilItemStateRepo_SkipsItemStateDelete は
+// 記事状態リポジトリが未設定（nil）のとき、記事状態削除をスキップしたうえで
+// 購読削除が正常に完了することを検証する（要件 3.1）。
+func TestService_Unsubscribe_NilItemStateRepo_SkipsItemStateDelete(t *testing.T) {
+	// Arrange: itemStateRepo を nil で生成する。
+	deleteCalled := false
+	subRepo := &mockSubRepo{
+		findByIDFn: func(ctx context.Context, id string) (*model.Subscription, error) {
+			return &model.Subscription{ID: "sub-1", UserID: "user-1", FeedID: "feed-1"}, nil
+		},
+		deleteFn: func(ctx context.Context, id string) error {
+			deleteCalled = true
+			return nil
+		},
+	}
+
+	svc := NewService(subRepo, nil, nil)
+
+	// Act
+	err := svc.Unsubscribe(context.Background(), "user-1", "sub-1")
+
+	// Assert: nil 分岐でも購読削除が呼ばれ、エラーなく完了する。
+	if err != nil {
+		t.Fatalf("Unsubscribe returned error: %v", err)
+	}
+	if !deleteCalled {
+		t.Error("expected subscription Delete to be called even when itemStateRepo is nil")
+	}
+}
+
+// TestService_Unsubscribe_ItemStateDeleteError_PropagatesError は
+// 記事状態リポジトリの削除（DeleteByUserAndFeed）がエラーを返したとき、
+// 購読解除がそのエラーを呼び出し元へ伝播し、購読削除を行わないことを検証する（要件 3.2）。
+func TestService_Unsubscribe_ItemStateDeleteError_PropagatesError(t *testing.T) {
+	// Arrange: DeleteByUserAndFeed がエラーを返す。
+	sentinelErr := errors.New("delete item states failed")
+	deleteCalled := false
+	subRepo := &mockSubRepo{
+		findByIDFn: func(ctx context.Context, id string) (*model.Subscription, error) {
+			return &model.Subscription{ID: "sub-1", UserID: "user-1", FeedID: "feed-1"}, nil
+		},
+		deleteFn: func(ctx context.Context, id string) error {
+			deleteCalled = true
+			return nil
+		},
+	}
+	itemStateRepo := &mockItemStateRepo{
+		deleteByUserAndFeedFn: func(ctx context.Context, userID, feedID string) error {
+			return sentinelErr
+		},
+	}
+
+	svc := NewService(subRepo, itemStateRepo, nil)
+
+	// Act
+	err := svc.Unsubscribe(context.Background(), "user-1", "sub-1")
+
+	// Assert: エラーが wrap されて伝播し、購読削除は実行されない。
+	if err == nil {
+		t.Fatal("expected error from item state delete, got nil")
+	}
+	if !errors.Is(err, sentinelErr) {
+		t.Errorf("expected wrapped error to match sentinel, got %v", err)
+	}
+	if deleteCalled {
+		t.Error("subscription Delete should not be called when item state delete fails")
+	}
+}
+
+// TestService_ResumeFetch_NotStopped_ReturnsFeedNotStoppedAndDoesNotUpdate は
+// 停止中ではない（active）フィードに対してフェッチ再開が呼ばれたとき、
+// 状態前提違反として FEED_NOT_STOPPED 専用エラーを返し、フィード状態を更新しないことを
+// 検証する（要件 4.1）。
+func TestService_ResumeFetch_NotStopped_ReturnsFeedNotStoppedAndDoesNotUpdate(t *testing.T) {
+	// Arrange: フィードは active 状態（停止中ではない）。
+	updateCalled := false
+	subRepo := &mockSubRepo{
+		findByIDFn: func(ctx context.Context, id string) (*model.Subscription, error) {
+			return &model.Subscription{ID: "sub-1", UserID: "user-1", FeedID: "feed-1"}, nil
+		},
+	}
+	feedRepo := &mockFeedRepo{
+		findByIDFn: func(ctx context.Context, id string) (*model.Feed, error) {
+			return &model.Feed{ID: "feed-1", FetchStatus: model.FetchStatusActive}, nil
+		},
+		updateFetchStateFn: func(ctx context.Context, feed *model.Feed) error {
+			updateCalled = true
+			return nil
+		},
+	}
+
+	svc := NewService(subRepo, nil, feedRepo)
+
+	// Act
+	result, err := svc.ResumeFetch(context.Background(), "user-1", "sub-1")
+
+	// Assert: 専用エラー（FEED_NOT_STOPPED）が返り、状態更新は呼ばれない。
+	if err == nil {
+		t.Fatal("expected error for non-stopped feed, got nil")
+	}
+	apiErr, ok := err.(*model.APIError)
+	if !ok {
+		t.Fatalf("error type = %T, want *model.APIError", err)
+	}
+	if apiErr.Code != model.ErrCodeFeedNotStopped {
+		t.Errorf("error code = %q, want %q", apiErr.Code, model.ErrCodeFeedNotStopped)
+	}
+	if updateCalled {
+		t.Error("UpdateFetchState should not be called when feed is not stopped")
+	}
+	if result != nil {
+		t.Errorf("expected nil result, got %+v", result)
+	}
+}
+
+// TestService_UpdateSettings_Success は有効間隔・所有者一致・全依存成功時に
+// 更新後の購読情報を返し UpdateFetchInterval が呼ばれることを検証する（要件 1.1）。
+func TestService_UpdateSettings_Success(t *testing.T) {
+	// Arrange
+	now := time.Now()
+	updateCalled := false
+	const wantMinutes = 60
+	subRepo := &mockSubRepo{
+		findByIDFn: func(ctx context.Context, id string) (*model.Subscription, error) {
+			return &model.Subscription{ID: "sub-1", UserID: "user-1", FeedID: "feed-1"}, nil
+		},
+		updateFetchIntervalFn: func(ctx context.Context, id string, minutes int) error {
+			updateCalled = true
+			return nil
+		},
+		listByUserIDWithFeedFn: func(ctx context.Context, userID string) ([]repository.SubscriptionWithFeedInfo, error) {
+			return []repository.SubscriptionWithFeedInfo{
+				{
+					Subscription: model.Subscription{
+						ID:                   "sub-1",
+						UserID:               userID,
+						FeedID:               "feed-1",
+						FetchIntervalMinutes: wantMinutes,
+						CreatedAt:            now,
+					},
+					FeedTitle:   "Test Feed",
+					FeedURL:     "https://example.com/feed.xml",
+					FetchStatus: model.FetchStatusActive,
+					UnreadCount: 3,
+				},
+			}, nil
+		},
+	}
+
+	svc := NewService(subRepo, nil, nil)
+
+	// Act
+	result, err := svc.UpdateSettings(context.Background(), "user-1", "sub-1", wantMinutes)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !updateCalled {
+		t.Error("expected UpdateFetchInterval to be called")
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.ID != "sub-1" {
+		t.Errorf("ID = %q, want %q", result.ID, "sub-1")
+	}
+	if result.FetchIntervalMinutes != wantMinutes {
+		t.Errorf("FetchIntervalMinutes = %d, want %d", result.FetchIntervalMinutes, wantMinutes)
+	}
+	if result.FeedTitle != "Test Feed" {
+		t.Errorf("FeedTitle = %q, want %q", result.FeedTitle, "Test Feed")
+	}
+	if result.UnreadCount != 3 {
+		t.Errorf("UnreadCount = %d, want %d", result.UnreadCount, 3)
+	}
+}
+
+// TestService_UpdateSettings_WrongUser_ReturnsSubscriptionNotFound は
+// 他ユーザー所有の購読 ID 指定時に SUBSCRIPTION_NOT_FOUND を返し、
+// フェッチ間隔更新が呼ばれないことを検証する（要件 1.2 / 2.1 / 2.2）。
+func TestService_UpdateSettings_WrongUser_ReturnsSubscriptionNotFound(t *testing.T) {
+	// Arrange
+	updateCalled := false
+	subRepo := &mockSubRepo{
+		findByIDFn: func(ctx context.Context, id string) (*model.Subscription, error) {
+			return &model.Subscription{ID: "sub-1", UserID: "user-other", FeedID: "feed-1"}, nil
+		},
+		updateFetchIntervalFn: func(ctx context.Context, id string, minutes int) error {
+			updateCalled = true
+			return nil
+		},
+		listByUserIDWithFeedFn: func(ctx context.Context, userID string) ([]repository.SubscriptionWithFeedInfo, error) {
+			return nil, nil
+		},
+	}
+
+	svc := NewService(subRepo, nil, nil)
+
+	// Act
+	result, err := svc.UpdateSettings(context.Background(), "user-1", "sub-1", 60)
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected error for wrong user, got nil")
+	}
+	apiErr, ok := err.(*model.APIError)
+	if !ok {
+		t.Fatalf("error type = %T, want *model.APIError", err)
+	}
+	if apiErr.Code != model.ErrCodeSubscriptionNotFound {
+		t.Errorf("error code = %q, want %q", apiErr.Code, model.ErrCodeSubscriptionNotFound)
+	}
+	if updateCalled {
+		t.Error("UpdateFetchInterval should not be called on authorization failure")
+	}
+	if result != nil {
+		t.Errorf("expected nil result, got %+v", result)
+	}
+}
+
+// TestService_UpdateSettings_SubscriptionNotFound は
+// 購読が存在しない（FindByID が nil を返す）場合に
+// SUBSCRIPTION_NOT_FOUND を返すことを検証する（要件 1.3）。
+func TestService_UpdateSettings_SubscriptionNotFound(t *testing.T) {
+	// Arrange
+	updateCalled := false
+	subRepo := &mockSubRepo{
+		findByIDFn: func(ctx context.Context, id string) (*model.Subscription, error) {
+			return nil, nil
+		},
+		updateFetchIntervalFn: func(ctx context.Context, id string, minutes int) error {
+			updateCalled = true
+			return nil
+		},
+		listByUserIDWithFeedFn: func(ctx context.Context, userID string) ([]repository.SubscriptionWithFeedInfo, error) {
+			return nil, nil
+		},
+	}
+
+	svc := NewService(subRepo, nil, nil)
+
+	// Act
+	result, err := svc.UpdateSettings(context.Background(), "user-1", "sub-1", 60)
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected error for missing subscription, got nil")
+	}
+	apiErr, ok := err.(*model.APIError)
+	if !ok {
+		t.Fatalf("error type = %T, want *model.APIError", err)
+	}
+	if apiErr.Code != model.ErrCodeSubscriptionNotFound {
+		t.Errorf("error code = %q, want %q", apiErr.Code, model.ErrCodeSubscriptionNotFound)
+	}
+	if updateCalled {
+		t.Error("UpdateFetchInterval should not be called when subscription is missing")
+	}
+	if result != nil {
+		t.Errorf("expected nil result, got %+v", result)
+	}
+}
+
+// TestService_UpdateSettings_FindByIDError は
+// 購読フェッチ（FindByID）が永続層エラーを返す場合に
+// 当該エラーが wrap されて伝播することを検証する（要件 1.4）。
+func TestService_UpdateSettings_FindByIDError(t *testing.T) {
+	// Arrange
+	sentinelErr := errors.New("find by id failed")
+	updateCalled := false
+	subRepo := &mockSubRepo{
+		findByIDFn: func(ctx context.Context, id string) (*model.Subscription, error) {
+			return nil, sentinelErr
+		},
+		updateFetchIntervalFn: func(ctx context.Context, id string, minutes int) error {
+			updateCalled = true
+			return nil
+		},
+		listByUserIDWithFeedFn: func(ctx context.Context, userID string) ([]repository.SubscriptionWithFeedInfo, error) {
+			return nil, nil
+		},
+	}
+
+	svc := NewService(subRepo, nil, nil)
+
+	// Act
+	result, err := svc.UpdateSettings(context.Background(), "user-1", "sub-1", 60)
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected error from FindByID, got nil")
+	}
+	if !errors.Is(err, sentinelErr) {
+		t.Errorf("expected wrapped error to match sentinel, got %v", err)
+	}
+	if updateCalled {
+		t.Error("UpdateFetchInterval should not be called when FindByID fails")
+	}
+	if result != nil {
+		t.Errorf("expected nil result, got %+v", result)
+	}
+}
+
+// TestService_UpdateSettings_UpdateFetchIntervalError は
+// フェッチ間隔更新（UpdateFetchInterval）がエラーを返す場合に
+// 当該エラーが wrap されて伝播することを検証する（要件 1.5）。
+func TestService_UpdateSettings_UpdateFetchIntervalError(t *testing.T) {
+	// Arrange
+	sentinelErr := errors.New("update fetch interval failed")
+	subRepo := &mockSubRepo{
+		findByIDFn: func(ctx context.Context, id string) (*model.Subscription, error) {
+			return &model.Subscription{ID: "sub-1", UserID: "user-1", FeedID: "feed-1"}, nil
+		},
+		updateFetchIntervalFn: func(ctx context.Context, id string, minutes int) error {
+			return sentinelErr
+		},
+		listByUserIDWithFeedFn: func(ctx context.Context, userID string) ([]repository.SubscriptionWithFeedInfo, error) {
+			return nil, nil
+		},
+	}
+
+	svc := NewService(subRepo, nil, nil)
+
+	// Act
+	result, err := svc.UpdateSettings(context.Background(), "user-1", "sub-1", 60)
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected error from UpdateFetchInterval, got nil")
+	}
+	if !errors.Is(err, sentinelErr) {
+		t.Errorf("expected wrapped error to match sentinel, got %v", err)
+	}
+	if result != nil {
+		t.Errorf("expected nil result, got %+v", result)
+	}
+}
+
+// TestService_UpdateSettings_ListByUserIDWithFeedInfoError は
+// 更新後の購読一覧再取得（ListByUserIDWithFeedInfo）がエラーを返す場合に
+// 当該エラーが wrap されて伝播することを検証する（要件 1.6）。
+func TestService_UpdateSettings_ListByUserIDWithFeedInfoError(t *testing.T) {
+	// Arrange
+	sentinelErr := errors.New("list by user id with feed info failed")
+	subRepo := &mockSubRepo{
+		findByIDFn: func(ctx context.Context, id string) (*model.Subscription, error) {
+			return &model.Subscription{ID: "sub-1", UserID: "user-1", FeedID: "feed-1"}, nil
+		},
+		updateFetchIntervalFn: func(ctx context.Context, id string, minutes int) error {
+			return nil
+		},
+		listByUserIDWithFeedFn: func(ctx context.Context, userID string) ([]repository.SubscriptionWithFeedInfo, error) {
+			return nil, sentinelErr
+		},
+	}
+
+	svc := NewService(subRepo, nil, nil)
+
+	// Act
+	result, err := svc.UpdateSettings(context.Background(), "user-1", "sub-1", 60)
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected error from ListByUserIDWithFeedInfo, got nil")
+	}
+	if !errors.Is(err, sentinelErr) {
+		t.Errorf("expected wrapped error to match sentinel, got %v", err)
+	}
+	if result != nil {
+		t.Errorf("expected nil result, got %+v", result)
+	}
+}
+
+// TestService_UpdateSettings_NotFoundAfterUpdate は
+// 更新は成功するが再取得結果に対象購読 ID が含まれない場合に
+// SUBSCRIPTION_NOT_FOUND を返すことを検証する（要件 1.7）。
+func TestService_UpdateSettings_NotFoundAfterUpdate(t *testing.T) {
+	// Arrange
+	now := time.Now()
+	subRepo := &mockSubRepo{
+		findByIDFn: func(ctx context.Context, id string) (*model.Subscription, error) {
+			return &model.Subscription{ID: "sub-1", UserID: "user-1", FeedID: "feed-1"}, nil
+		},
+		updateFetchIntervalFn: func(ctx context.Context, id string, minutes int) error {
+			return nil
+		},
+		listByUserIDWithFeedFn: func(ctx context.Context, userID string) ([]repository.SubscriptionWithFeedInfo, error) {
+			// 対象 ID（sub-1）を含まない別購読のみを返す
+			return []repository.SubscriptionWithFeedInfo{
+				{
+					Subscription: model.Subscription{
+						ID:                   "sub-other",
+						UserID:               userID,
+						FeedID:               "feed-other",
+						FetchIntervalMinutes: 60,
+						CreatedAt:            now,
+					},
+					FeedTitle:   "Other Feed",
+					FeedURL:     "https://example.com/other.xml",
+					FetchStatus: model.FetchStatusActive,
+				},
+			}, nil
+		},
+	}
+
+	svc := NewService(subRepo, nil, nil)
+
+	// Act
+	result, err := svc.UpdateSettings(context.Background(), "user-1", "sub-1", 60)
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected error when target subscription is absent after update, got nil")
+	}
+	apiErr, ok := err.(*model.APIError)
+	if !ok {
+		t.Fatalf("error type = %T, want *model.APIError", err)
+	}
+	if apiErr.Code != model.ErrCodeSubscriptionNotFound {
+		t.Errorf("error code = %q, want %q", apiErr.Code, model.ErrCodeSubscriptionNotFound)
+	}
+	if result != nil {
+		t.Errorf("expected nil result, got %+v", result)
 	}
 }

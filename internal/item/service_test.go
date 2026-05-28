@@ -39,8 +39,8 @@ func (m *mockItemRepoForService) FindByID(ctx context.Context, id string) (*mode
 
 // mockItemStateRepoForService はサービステスト用のItemStateRepositoryモック。
 type mockItemStateRepoForService struct {
-	states     map[string]*model.ItemState // userID+itemID -> state
-	upsertFn   func(ctx context.Context, userID, itemID string, isRead *bool, isStarred *bool) (*model.ItemState, error)
+	states   map[string]*model.ItemState // userID+itemID -> state
+	upsertFn func(ctx context.Context, userID, itemID string, isRead *bool, isStarred *bool) (*model.ItemState, error)
 }
 
 func newMockItemStateRepoForService() *mockItemStateRepoForService {
@@ -128,6 +128,106 @@ func TestItemService_ListItems_ReturnsItems(t *testing.T) {
 	}
 	if item.IsStarred != true {
 		t.Error("expected item to be starred")
+	}
+}
+
+// TestItemService_ListItems_IncludesSummary は記事一覧のサマリーに概要(Summary)が
+// 含まれること、および空概要が空文字列として保持されることを検証する。Req 1.1 / 1.3 に対応。
+func TestItemService_ListItems_IncludesSummary(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+
+	cases := []struct {
+		name        string
+		summary     string
+		wantSummary string
+	}{
+		{name: "概要が存在するとき概要を保持する", summary: "記事の概要テキスト", wantSummary: "記事の概要テキスト"},
+		{name: "概要が空のとき空文字列を保持する", summary: "", wantSummary: ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			repo := newMockItemRepoForService()
+			repo.listByFeedFn = func(ctx context.Context, feedID, userID string, filter model.ItemFilter, cursor time.Time, limit int) ([]model.ItemWithState, error) {
+				return []model.ItemWithState{
+					{
+						Item: model.Item{
+							ID:          "item-1",
+							FeedID:      "feed-1",
+							Title:       "記事1",
+							Link:        "https://example.com/1",
+							Summary:     tc.summary,
+							PublishedAt: &now,
+						},
+					},
+				}, nil
+			}
+			svc := NewItemService(repo, newMockItemStateRepoForService())
+
+			// Act
+			result, err := svc.ListItems(context.Background(), "user-123", "feed-1", model.ItemFilterAll, "", 50)
+
+			// Assert
+			if err != nil {
+				t.Fatalf("ListItems returned error: %v", err)
+			}
+			if len(result.Items) != 1 {
+				t.Fatalf("items count = %d, want 1", len(result.Items))
+			}
+			if result.Items[0].Summary != tc.wantSummary {
+				t.Errorf("Summary = %q, want %q", result.Items[0].Summary, tc.wantSummary)
+			}
+		})
+	}
+}
+
+// TestItemService_SummaryConsistentBetweenListAndDetail は同一記事の概要が
+// 一覧(ListItems)と詳細(GetItem)で同一の文字列値になることを検証する。Req 1.2 に対応。
+func TestItemService_SummaryConsistentBetweenListAndDetail(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	const wantSummary = "一覧と詳細で一致する概要"
+
+	srcItem := model.Item{
+		ID:          "item-1",
+		FeedID:      "feed-1",
+		Title:       "記事1",
+		Link:        "https://example.com/1",
+		Summary:     wantSummary,
+		Content:     "<p>本文</p>",
+		PublishedAt: &now,
+	}
+
+	repo := newMockItemRepoForService()
+	repo.listByFeedFn = func(ctx context.Context, feedID, userID string, filter model.ItemFilter, cursor time.Time, limit int) ([]model.ItemWithState, error) {
+		return []model.ItemWithState{{Item: srcItem}}, nil
+	}
+	repo.findByIDFn = func(ctx context.Context, id string) (*model.Item, error) {
+		itemCopy := srcItem
+		return &itemCopy, nil
+	}
+	svc := NewItemService(repo, newMockItemStateRepoForService())
+
+	listResult, err := svc.ListItems(context.Background(), "user-123", "feed-1", model.ItemFilterAll, "", 50)
+	if err != nil {
+		t.Fatalf("ListItems returned error: %v", err)
+	}
+	detail, err := svc.GetItem(context.Background(), "user-123", "item-1")
+	if err != nil {
+		t.Fatalf("GetItem returned error: %v", err)
+	}
+
+	if len(listResult.Items) != 1 {
+		t.Fatalf("items count = %d, want 1", len(listResult.Items))
+	}
+	if listResult.Items[0].Summary != wantSummary {
+		t.Errorf("list Summary = %q, want %q", listResult.Items[0].Summary, wantSummary)
+	}
+	if detail.Summary != wantSummary {
+		t.Errorf("detail Summary = %q, want %q", detail.Summary, wantSummary)
+	}
+	if listResult.Items[0].Summary != detail.Summary {
+		t.Errorf("list Summary %q != detail Summary %q", listResult.Items[0].Summary, detail.Summary)
 	}
 }
 

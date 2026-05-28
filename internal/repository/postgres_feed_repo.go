@@ -161,15 +161,21 @@ func nullStringValue(ns sql.NullString) string {
 // ListDueForFetch はフェッチ対象のフィードを取得する。
 // next_fetch_at <= now() かつ fetch_status = 'active' かつ購読者が存在するフィードを
 // FOR UPDATE SKIP LOCKEDで排他的に取得する。
+//
+// 購読者の存在判定は EXISTS サブクエリで行う。
+// INNER JOIN + DISTINCT を使うと PostgreSQL が DISTINCT と FOR UPDATE の併用を
+// 許可せず（0A000: FOR UPDATE is not allowed with DISTINCT clause）クエリが
+// 失敗するため、EXISTS により feeds を 1 行/フィードに保ちつつ
+// FOR UPDATE OF f SKIP LOCKED を維持する。
 func (r *PostgresFeedRepo) ListDueForFetch(ctx context.Context) ([]*model.Feed, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT DISTINCT f.id, f.feed_url, f.site_url, f.title, f.favicon_data, f.favicon_mime,
+		`SELECT f.id, f.feed_url, f.site_url, f.title, f.favicon_data, f.favicon_mime,
 		        f.etag, f.last_modified, f.fetch_status, f.consecutive_errors,
 		        f.error_message, f.next_fetch_at, f.created_at, f.updated_at
 		 FROM feeds f
-		 INNER JOIN subscriptions s ON f.id = s.feed_id
 		 WHERE f.next_fetch_at <= now()
 		   AND f.fetch_status = 'active'
+		   AND EXISTS (SELECT 1 FROM subscriptions s WHERE s.feed_id = f.id)
 		 ORDER BY f.next_fetch_at ASC
 		 FOR UPDATE OF f SKIP LOCKED`,
 	)
@@ -211,18 +217,29 @@ func (r *PostgresFeedRepo) ListDueForFetch(ctx context.Context) ([]*model.Feed, 
 }
 
 // UpdateFetchState はフィードのフェッチ状態を更新する。
+//
+// フェッチ状態項目（fetch_status / consecutive_errors / error_message /
+// next_fetch_at / etag / last_modified）に加えて、フェッチ成功時にパースされた
+// title / site_url も永続化する。呼び出し側（Fetcher）はパース済みタイトル・
+// サイト URL が空のときは feed.Title / feed.SiteURL を上書きしない（既存値を維持する）
+// ため、本メソッドは渡された feed の値をそのまま書き込めば、フェッチ失敗・未変更
+// パスでは DB 上の既存値が破壊されない。
 func (r *PostgresFeedRepo) UpdateFetchState(ctx context.Context, feed *model.Feed) error {
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE feeds SET
-		    fetch_status = $2,
-		    consecutive_errors = $3,
-		    error_message = $4,
-		    next_fetch_at = $5,
-		    etag = $6,
-		    last_modified = $7,
+		    title = $2,
+		    site_url = $3,
+		    fetch_status = $4,
+		    consecutive_errors = $5,
+		    error_message = $6,
+		    next_fetch_at = $7,
+		    etag = $8,
+		    last_modified = $9,
 		    updated_at = now()
 		 WHERE id = $1`,
 		feed.ID,
+		feed.Title,
+		nullString(feed.SiteURL),
 		feed.FetchStatus,
 		feed.ConsecutiveErrors,
 		nullString(feed.ErrorMessage),
