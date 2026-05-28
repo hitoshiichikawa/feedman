@@ -125,7 +125,7 @@
   - _Requirements: 1.3, 1.4, 1.5, 4.1, 4.4, 4.5_
   - _Boundary: useItemSearch_
   - _Depends: 7.1_
-- [ ] 7.3 `web/src/components/header-search-bar.tsx` と `header-search-bar.test.tsx` を新規作成する (P)
+- [x] 7.3 `web/src/components/header-search-bar.tsx` と `header-search-bar.test.tsx` を新規作成する (P)
   - design.md の `HeaderSearchBar` 疑似シグネチャに従い、入力欄 / Enter ハンドラ / クリアボタンを実装する
   - 空入力 Enter で `SET_SEARCH_QUERY` を dispatch しないこと（Req 1.5）を確認するテストを含む
   - 入力消去ボタンで `CLEAR_SEARCH` が発行されること（Req 1.6）を確認するテストを含む
