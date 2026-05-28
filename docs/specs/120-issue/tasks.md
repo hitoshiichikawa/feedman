@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. pg_trgm 拡張と GIN インデックスを追加するマイグレーションを作成する
+- [x] 1. pg_trgm 拡張と GIN インデックスを追加するマイグレーションを作成する
   - `internal/database/migrations/20260528120000_add_item_search_indexes.up.sql` を新規作成し、
     `CREATE EXTENSION IF NOT EXISTS pg_trgm;` を先頭に追加する
   - 同 up.sql に `CREATE INDEX idx_items_title_trgm ON items USING GIN (title gin_trgm_ops);` を追加する
