@@ -392,6 +392,72 @@ Web フロントエンド: `AppState` 拡張と `StarredNavItem` コンポーネ
   追加した `useStarredItems` を経由した右ペイン描画を担当する。本 task では AppShell への
   組み込みは行っていない（spec の `_Boundary: AppState, StarredNavItem_` に従って境界外）。
 
+### Task 7
+
+Web フロントエンド: `StarredItemList` コンポーネントと `AppShell` 統合（最終 task）。
+
+#### 採用方針
+
+- 既存 `item-list.tsx` の `ItemRow` / `ItemDetailArea` を `function` から `export function`
+  に変更するだけの最小侵襲な変更で再利用化。既存呼び出し側（同ファイル内 `ItemList`）は
+  変更不要のため、`ItemList` の挙動・既存テスト 27 件の挙動が完全に保たれる（Req 5.3）。
+- `StarredItemList` は `ItemList` をテンプレートにしつつ、フィード横断仕様に合わせた以下の
+  差分を持つ:
+  - フィルタタブを描画しない（Non-Goals: お気に入り一覧上のサブフィルタ UI 切替を提供しない）
+  - ヘッダにコンテキストタイトル「お気に入り」を h2 で描画（Req 2.1）
+  - `useAppState().expandedItemId` と `useAppDispatch()` 経由で展開状態を管理（Req 2.8 / 3.1）。
+    `ItemList` は props 経由（`expandedItemId` / `onSelectItem`）で受け取る前提だが、
+    `StarredItemList` は AppShell から props を受けず内部で AppState に接続する形にした
+    （`feedId` のような props がなく、右ペイン直下で完結する component なので AppState
+    から直接配線する方が結線が浅くなる）
+  - 各 `ItemRow` の直後に `feed_title` を `text-muted-foreground text-xs truncate` で 1 行
+    併記（Req 2.4）。デザイン上の配置は「タイトル直下に薄い文字色で 1 行」を `ItemRow`
+    本体外側の兄弟 div として配置（`ItemRow` を改造せずに併記を実現）
+- AppShell は `state.selectedView === "starred"` の三項分岐で `StarredItemList` /
+  `ItemList` を切替（Req 1.3）。左ペイン先頭に `StarredNavItem` を `px-2 pt-2` で配置し
+  フィード見出しの上に常時 1 件表示する（Req 1.1）。既存の `FeedList` 描画ロジック・
+  既存の `handleSelectFeed` / `handleSelectItem` は変更しない（Req 1.4 / 5.3）。
+
+#### 重要な判断
+
+- **IntersectionObserver の class mock 化**: `vi.fn().mockImplementation(() => ({ ... }))`
+  パターンは `new IntersectionObserver()` 呼び出しで「is not a constructor」エラーになる
+  ため、`class MockIntersectionObserver { ... }` を直接書く形に変更した。これは
+  `app-shell.test.tsx` の既存 IntersectionObserver mock も対象（StarredItemList を内部
+  描画する新フローテストで露呈）。`item-list.test.tsx` の既存 mock パターンは触らず
+  （関数として呼ばれず new されないため既存テストでは表面化しなかったが、StarredItemList
+  経由で初めて顕在化した）。
+- **feed_title の DOM 配置を `ItemRow` 外側にした理由**: `ItemRow` を export して再利用
+  する設計に合わせ、`ItemRow` 本体は単一フィードと横断スターで完全に同一のレンダリング
+  を保ち、フィード識別情報の併記は `StarredItemList` 側でラップする責務にした。
+  これにより `ItemRow` のテスト粒度（既存 27 件）が `feed_title` の有無で枝分かれせず、
+  `ItemList` 側でも `ItemRow` 関連の挙動が完全に同一に保たれる（Req 5.3 を構造的に担保）。
+- **テストケース構成**: spec 指示の (a)〜(f) を以下にマップ:
+  - (a) `記事 0 件のときに空状態「記事がありません」を表示すること`（Req 2.6 / 空状態と
+    エラー状態の区別）
+  - (b) `API 取得に失敗したときエラー状態「記事の読み込みに失敗しました」を表示すること`
+    （Req 2.7 / 空状態との区別）
+  - (c) `複数フィードのスター記事と各行の feed_title を併記して表示すること`（Req 2.3 /
+    2.4 / `text-muted-foreground` `text-xs` のクラス検証も含む）
+  - (d) `ヘッダにコンテキストタイトル「お気に入り」を表示すること`（Req 2.1）
+  - (e) `sentinel が visible になったとき次ページを fetch し cursor を付与すること`
+    （Req 2.5 / Intersection Observer callback を手動 invoke）
+  - (f) `記事行クリックで EXPAND_ITEM が dispatch されて expandedItemId が更新される
+    こと`（Req 2.8 / 3.1 / `StateProbe` 経由で AppState を観測）
+  - AppShell 側追加: `左ペイン先頭に StarredNavItem が表示されること` + `クリック→
+    右ペイン切替→フィード行クリックで戻るのフローテスト`（Req 1.1 / 1.3 / 1.4 / 2.1 / 5.3）
+
+#### 残存課題
+
+- なし（最終 task）。Issue #117 全体の AC は本 task で全て担保された。Reviewer / PjM 段階で
+  PR レビューに進む。
+- 派生課題候補（本 Issue スコープ外、将来検討）:
+  - StarredItemList で楽観的更新時の `feed_title` 保持挙動は spread copy で保たれる前提
+    （Task 5 learning で言及）。実環境のスター解除直後の挙動を手動確認する価値あり
+  - feed_title の表示位置を `ItemRow` 内部に組み込むデザイン微調整（現状は行下の兄弟
+    div）はデザイナーレビューを経て改善余地あり。本実装では「タイトル直下に薄い文字色で
+    1 行」（Req 2.4）を最小コストで満たす配置にとどめた
+
 ## 確認事項
 
 なし（design.md / requirements.md と本実装に矛盾は確認されていない）。
