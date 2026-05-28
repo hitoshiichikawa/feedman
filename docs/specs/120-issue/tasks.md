@@ -25,7 +25,7 @@
     `ErrCodeFeedNotSubscribed → http.StatusForbidden` のエントリを追加
   - _Requirements: 3.3, 3.5, 4.5_
 
-- [ ] 3. Repository 層で検索 SQL を実装する
+- [x] 3. Repository 層で検索 SQL を実装する
 - [x] 3.1 `internal/repository/interfaces.go` に `ItemSearchRepository` インターフェースを追加する
   - design.md の `SearchByUserAndKeyword(ctx, userID, pattern string, feedID *string, cursorID string, cursorPublishedAt time.Time, limit int)` シグネチャに従う
   - `PostgresItemRepo` が当該インターフェースを満たすことを compile-time check に追加する
