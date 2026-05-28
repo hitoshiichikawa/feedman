@@ -15,7 +15,7 @@
     `FaviconData []byte` + `FaviconMime string` を持たせる
   - 既存 `ItemWithState` パターンと整合する命名・並び順にする
   - _Requirements: 4.2_
-- [ ] 2.2 `internal/model/errors.go` に検索向けのエラーコードと生成関数を追加する
+- [x] 2.2 `internal/model/errors.go` に検索向けのエラーコードと生成関数を追加する
   - `ErrCodeInvalidSearchQuery = "INVALID_SEARCH_QUERY"` および
     `ErrCodeFeedNotSubscribed = "FEED_NOT_SUBSCRIBED"` を定数に追加
   - `NewInvalidSearchQueryError(reason string) *APIError`（Category: "validation"）と
