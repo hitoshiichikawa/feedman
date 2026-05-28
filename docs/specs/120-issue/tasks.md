@@ -81,7 +81,7 @@
   - `RouterDeps` に `ItemSearchService ItemSearchServiceInterface` を追加する
   - **`/api/items/{id}` よりも前**にルートを登録する（chi の static 優先順位を担保）
   - _Requirements: 1.3, 1.4, 3.3_
-- [ ] 5.3 `internal/handler/service_adapter.go` に `ItemSearchServiceAdapter` を追加する
+- [x] 5.3 `internal/handler/service_adapter.go` に `ItemSearchServiceAdapter` を追加する
   - `itemsearch.SearchService` の戻り値（`ItemSearchSummary[]` + favicon の `[]byte`/mime）を
     `itemSearchResponse` に変換する。`FaviconData` が空でなければ
     `data:<mime>;base64,...` 形式の data URL に整形（`subscription.Service.ListSubscriptions` と
