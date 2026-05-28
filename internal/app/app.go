@@ -112,6 +112,7 @@ func runServe(cfg *config.Config) error {
 
 	// 3. セキュリティサービスの初期化
 	ssrfGuard := security.NewSSRFGuard()
+	sanitizer := security.NewContentSanitizer()
 
 	// 4. ドメインサービスの初期化
 	oauthProvider := auth.NewGoogleOAuthProvider(auth.GoogleOAuthConfig{
@@ -130,9 +131,33 @@ func runServe(cfg *config.Config) error {
 
 	itemService := item.NewItemService(itemRepo, itemStateRepo)
 
-	subService := subscription.NewService(subRepo, itemStateRepo, feedRepo)
+	// serve 専用の Prometheus registry と Collector を生成する。
+	// Collector は手動フェッチ系のカウンタ（feedman_manual_fetch_total）も保持しており、
+	// subscription.Service.ManualFetch から記録される（Issue #115 Req 8.x）。
+	// /metrics エンドポイントは信頼 CIDR 制限付きで公開される（Requirement 1.1, 5.1）。
+	serveRegistry := prometheus.NewRegistry()
+	serveCollector := metrics.NewCollector(serveRegistry)
+
+	// 手動フェッチ用の Fetcher を組み立てる（Issue #115 task 6.1）。
+	// worker 側 (runWorker) と同じ依存配線パターンで、SSRFGuard / Sanitizer / UpsertSvc /
+	// Fetcher を構築する。タイムアウト・最大サイズも自動経路と同一の cfg 値を使う（NFR 1.1）。
+	upsertSvc := item.NewItemUpsertService(itemRepo, sanitizer, item.WithMetrics(serveCollector))
+	fetcher := fetchpkg.NewFetcher(
+		feedRepo, subRepo, upsertSvc, ssrfGuard,
+		slog.Default(), cfg.FetchTimeout, cfg.FetchMaxSize,
+		fetchpkg.WithMetrics(serveCollector),
+	)
+
+	// 退会処理と手動フェッチで共有する DB トランザクション基盤。
 	// 退会処理は単一トランザクションで原子化する（途中失敗時は全ロールバック）。
 	txBeginner := repository.NewSQLTxBeginner(db)
+	// 手動フェッチ用 tx beginner は repository.TxBeginner とは別 interface（Commit / Rollback を
+	// 含めた tx ハンドルライフサイクル抽象化）を必要とするため別途構築する（Issue #115）。
+	manualFetchTxBeginner := subscription.NewSQLManualFetchTxBeginner(db)
+	subService := subscription.NewService(
+		subRepo, itemStateRepo, feedRepo,
+		fetcher, manualFetchTxBeginner, serveCollector,
+	)
 	userService := newTxUserService(txBeginner, userRepo, sessionRepo, subRepo, itemStateRepo)
 
 	// 5. ハンドラーアダプタの構築
@@ -160,12 +185,6 @@ func runServe(cfg *config.Config) error {
 	unauthIPRateLimiter := middleware.NewIPRateLimiter(
 		middleware.DefaultIPRateLimiterConfig(cfg.RateLimitUnauthIP),
 	)
-
-	// serve 専用の Prometheus registry と Collector を生成する。
-	// serve プロセスにはフェッチ系の記録経路が無いため初期値（0）の公開となるが、
-	// /metrics 自体は信頼 CIDR 制限付きで公開する（Requirement 1.1, 5.1）。
-	serveRegistry := prometheus.NewRegistry()
-	_ = metrics.NewCollector(serveRegistry)
 
 	deps := &handler.RouterDeps{
 		HealthChecker:       db,
