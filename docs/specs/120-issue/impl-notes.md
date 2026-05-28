@@ -141,3 +141,75 @@ learning は改変しない。
     `len(hits) > limit` で判定して `hits = hits[:limit]` に切り詰める設計
     （design.md と tasks.md Task 4 で明示）。本 method 自体は LIMIT を
     そのまま適用するだけで HasMore ロジックを持たない。
+
+### Task 4
+
+- 採用方針: `internal/itemsearch.SearchService` を `service.go` / `service_test.go`
+  の 2 ファイルで新規実装。design.md の `Search(ctx, userID, rawQuery, feedID, cursorStr, limit)`
+  シグネチャに従い、(1) クエリ正規化（前後空白 trim + 空クエリ判定）、(2) LIKE メタ文字
+  エスケープ、(3) feed_id 指定時の購読確認、(4) cursor `<RFC3339Nano>|<uuid>` 解析、
+  (5) limit クランプ、(6) `limit+1` 取得 → HasMore 判定 → NextCursor 生成、(7)
+  `ItemSearchHit` → `ItemSearchSummary` 変換の各責務を 1 メソッドで完結させる。
+  テストは 30+ ケースのテーブル駆動で AC 1.5 / 2.4 / 2.6 / 3.5 / 4.1 / 4.4 を網羅する。
+- 重要な判断:
+  - **`SubscriptionRepository.Exists` を新規追加せず、既存 `FindByUserAndFeed` を再利用する**。
+    tasks.md は「未存在なら追加」も許容するが、`FindByUserAndFeed` は既に
+    `(*model.Subscription, error)` を返し nil で未購読を判定可能なため、interface 拡張は
+    不要と判断した。新規メソッド追加は本 task のスコープを膨らませ、他コンシューマへの
+    影響もあるため、最小侵襲を優先する。Service 層が `sub == nil → NewFeedNotSubscribedError`
+    で判定する形にし、`subRepo.FindByUserAndFeed` のエラーは
+    `fmt.Errorf("check subscription: %w", err)` で wrap する。
+  - **`ItemSearchSummary` に `FaviconData []byte` / `FaviconMime string` を追加した**
+    （design.md 行 295-309 の field 一覧は `FaviconURL *string` のみだが拡張）。理由は
+    impl-notes Task 2 で「favicon の data URL 化は Task 5.3 の `ItemSearchServiceAdapter`
+    が担う」と責務分離が確定しているため、Service 層が data URL を生成すると Adapter 層
+    と二重責務になる。Service 層は `ItemSearchHit.FaviconData` / `FaviconMime` を
+    そのまま pass-through し、`FaviconURL` は常に nil としておく形を採用した。
+    Adapter 層（Task 5.3）が `data:<mime>;base64,...` 形式に整形して `FaviconURL` を
+    populate する責務を持つ。design.md の field 一覧との差分はあるが、impl-notes
+    Task 2 の責務分離判断を優先する。
+  - **NextCursor を末尾項目の `PublishedAt` がゼロ値の場合は空文字とする**。
+    `repository` 層は NULL `published_at` をゼロ値（`time.Time{}`）にマッピングする
+    （impl-notes Task 3）。ゼロ値で cursor を組み立てると `(published_at, id) <
+    (cursor)` のタプル比較が壊れて並び順が不安定になるため、安全側に倒して NextCursor
+    を発行しない。HasMore は実体ベースで保持し、UI 側で「次ページあり」だけは表示できる。
+  - **limit クランプを Service 層でも実施**（0 以下 → 50、200 超 → 200）。
+    design.md の handler 層仕様で同じクランプを行う前提だが、handler を経由しない
+    直接呼び出しや handler 側のバグへの防御として Service 層でも適用する。クランプ後の
+    `effectiveLimit` に対して `+1` した値を repository に渡し、`len(hits) > effectiveLimit`
+    で HasMore を判定する。
+  - **cursor parse は Service 層の責務**（impl-notes Task 3 既述）。
+    `strings.SplitN(cursorStr, "|", 2)` で分割し、length != 2 / parse 失敗 / id 空 /
+    `|` が複数 のいずれも `NewInvalidSearchQueryError` で 400 に倒す。UUID 自体の
+    厳密 parse は repository 層の `$5::uuid` cast に任せ、Service 層は「空でない文字列」
+    程度の sanity check に留めた（過剰な依存追加を避ける）。
+  - **`escapeLikePattern` の順序**: `\` → `%` → `_` の順で `strings.ReplaceAll` を
+    適用する（順序逆転すると `%` のエスケープに使った `\` 自体が再エスケープされて
+    `\\%` のように二重に化けるため）。PostgreSQL ILIKE の標準 escape 文字は `\` で、
+    本実装の出力（例: `50\%off`）はそのまま LIKE / ILIKE の述語に渡せる。
+  - **テストモックの設計**: `mockItemSearchRepo` は呼び出し引数を
+    `recordedSearchCall` スライスに記録する callable assertion パターンを採用。
+    `mockSubRepo` は `repository.SubscriptionRepository` interface 全メソッドを実装する
+    必要があるが、本テストで触れない他メソッドは `panic` で fail-fast にした
+    （誤って呼ばれたら即座にテスト失敗）。`mockSubRepo` は
+    `var _ repository.SubscriptionRepository = (*mockSubRepo)(nil)` で compile-time
+    check を入れている。
+- 残存課題（次 task に影響する事項）:
+  - **Task 5.3 の `ItemSearchServiceAdapter` 実装で、`ItemSearchSummary.FaviconData`
+    /  `FaviconMime` を data URL に整形する責務**が確定。`subscription.Service.
+    ListSubscriptions` と同じ `data:<mime>;base64,...` 形式のロジックを再利用する
+    形（既存パターンとの整合）。Adapter 側で `FaviconURL` を populate し、Service 層
+    では `FaviconURL=nil` のままにする。
+  - **Task 5.1 の handler 実装で、`limit` クエリパラメータの解析・クランプ**は
+    本 Service 層でも防御的に行うが、handler 側も同じクランプ（design.md「API
+    Contract」節の `defaultItemsPerPage = 50` / 上限 200）を実装する必要がある。
+    handler が `?limit=0` のような不正値を渡しても Service 層が defaultSearchLimit
+    に倒して安全動作するが、handler 側で明示的に解析するのが UX 上望ましい。
+  - **Task 5.4 の handler テストで、Service モックを差し替える**実装が必要。
+    本 task では `SearchService` を struct で公開しているため、handler 側で
+    `ItemSearchServiceInterface`（design.md 行 70-79 / tasks.md Task 5.1）を定義し、
+    Adapter 経由で interface を満たす設計が想定される（既存
+    `ItemServiceInterface` / `ItemServiceAdapter` パターンと整合）。
+  - **Task 5.5 の `app.go` wiring で、`itemsearch.NewSearchService(itemRepo, subRepo)`
+    を呼び出す**形になる。`itemRepo` は `repository.ItemSearchRepository`（Task 3.1
+    で追加済み）、`subRepo` は既存 `repository.SubscriptionRepository`（変更不要）。
