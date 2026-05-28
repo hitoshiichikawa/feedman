@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. DB マイグレーション: feeds.last_successful_fetch_at カラム追加
-- [ ] 1.1 up / down マイグレーションファイルを新規作成
+- [x] 1.1 up / down マイグレーションファイルを新規作成
   - `internal/database/migrations/20260528120000_add_feeds_last_successful_fetch_at.up.sql` を作成し、
     `ALTER TABLE feeds ADD COLUMN last_successful_fetch_at TIMESTAMPTZ NULL` を記述（バックフィルなし）
   - `internal/database/migrations/20260528120000_add_feeds_last_successful_fetch_at.down.sql` を作成し、
