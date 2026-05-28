@@ -68,7 +68,7 @@
   - _Depends: 2.1, 3.1_
 
 - [ ] 5. Metrics: feedman_manual_fetch_total カウンタ追加
-- [ ] 5.1 MetricsCollector interface に 4 メソッド追加 + Collector / NopCollector 実装 (P)
+- [x] 5.1 MetricsCollector interface に 4 メソッド追加 + Collector / NopCollector 実装 (P)
   - `internal/metrics/metrics.go` の `MetricsCollector` interface に以下 4 メソッドを追加:
     `RecordManualFetchSuccess()` / `RecordManualFetchFailure(reason string)` /
     `RecordManualFetchCooldownRejected()` / `RecordManualFetchLockConflict()`
