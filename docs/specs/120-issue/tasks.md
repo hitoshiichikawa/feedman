@@ -77,7 +77,7 @@
     `omitempty` を付ける（subscription_handler.go と同じ流儀）
   - NFR 3.1 の構造化ログ（`slog.Info("item search request", user_id, search_type, scope, query_len, feed_id)`）を発行する
   - _Requirements: 1.3, 1.4, 3.3, 3.5, 4.4, 4.5, NFR 3.1_
-- [ ] 5.2 `internal/handler/router.go` に `/api/items/search` ルートを登録する
+- [x] 5.2 `internal/handler/router.go` に `/api/items/search` ルートを登録する
   - `RouterDeps` に `ItemSearchService ItemSearchServiceInterface` を追加する
   - **`/api/items/{id}` よりも前**にルートを登録する（chi の static 優先順位を担保）
   - _Requirements: 1.3, 1.4, 3.3_
