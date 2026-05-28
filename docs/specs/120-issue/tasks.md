@@ -88,7 +88,7 @@
     同じパターンを再利用）
   - compile-time check `var _ ItemSearchServiceInterface = (*ItemSearchServiceAdapter)(nil)` を追加
   - _Requirements: 4.2_
-- [ ] 5.4 `internal/handler/item_search_handler_test.go` を新規作成する
+- [x] 5.4 `internal/handler/item_search_handler_test.go` を新規作成する
   - テーブル駆動で 200 成功（横断 / フィード内） / 401（withUserID なし） / 400（cursor 不正・
     feed_id UUID パース失敗） / 403（未購読 feed_id） / 空クエリ → 200 OK 空配列を検証する。
     既存 `item_handler_test.go` の `mockItemService` パターンを踏襲し、mock service を差し替える
