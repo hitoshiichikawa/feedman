@@ -30,7 +30,7 @@
   - design.md の `SearchByUserAndKeyword(ctx, userID, pattern string, feedID *string, cursorID string, cursorPublishedAt time.Time, limit int)` シグネチャに従う
   - `PostgresItemRepo` が当該インターフェースを満たすことを compile-time check に追加する
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.6, 3.1, 3.2, 3.4, 4.1, 4.2_
-- [ ] 3.2 `internal/repository/postgres_item_repo.go` に `SearchByUserAndKeyword` を実装する
+- [x] 3.2 `internal/repository/postgres_item_repo.go` に `SearchByUserAndKeyword` を実装する
   - design.md の参照 SQL（`items JOIN subscriptions ... JOIN feeds ... LEFT JOIN item_states`、
     `ILIKE $2`、`($3::uuid IS NULL OR i.feed_id = $3)` の任意フィルタ、
     `(published_at, id) < (cursor)` のタプル比較ページング、`ORDER BY published_at DESC, id DESC`）
