@@ -40,7 +40,7 @@
   - _Boundary: ItemHandler, Router, Integration_
   - _Depends: 3_
 
-- [ ] 5. Web: 型定義と `useStarredItems` フック
+- [x] 5. Web: 型定義と `useStarredItems` フック
   - `web/src/types/item.ts` に `StarredItemSummary extends ItemSummary { feed_title: string }` と `StarredItemListResponse` を追加する
   - `web/src/hooks/use-starred-items.ts` を新規作成し、`useInfiniteQuery` で `GET /api/feeds/starred/items?limit=50[&cursor=...]` を呼び出す。queryKey は `["items", "starred"]`（前置キー `"items"` を共有して既存 `useToggleStar` の invalidate に乗る）
   - `web/src/hooks/use-starred-items.test.tsx` を新規作成し、(a) 初回リクエストの URL クエリ検証、(b) `next_cursor` を pageParam として送る、(c) `has_more=false` のとき `getNextPageParam` が `undefined` を返す、を検証する
