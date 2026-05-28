@@ -24,3 +24,15 @@ func (NopCollector) RecordFetchLatency(duration time.Duration) {}
 
 // RecordItemsUpserted は何も記録しない。
 func (NopCollector) RecordItemsUpserted(count int) {}
+
+// RecordManualFetchSuccess は何も記録しない。
+func (NopCollector) RecordManualFetchSuccess() {}
+
+// RecordManualFetchFailure は何も記録しない。
+func (NopCollector) RecordManualFetchFailure(reason string) {}
+
+// RecordManualFetchCooldownRejected は何も記録しない。
+func (NopCollector) RecordManualFetchCooldownRejected() {}
+
+// RecordManualFetchLockConflict は何も記録しない。
+func (NopCollector) RecordManualFetchLockConflict() {}
