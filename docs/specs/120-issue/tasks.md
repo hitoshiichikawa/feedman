@@ -52,7 +52,7 @@
   - 検索実行前後で対象記事の `item_states.is_read` / `is_starred` が変化しないことを検証する（Req 5.3）
   - _Requirements: 2.2, 2.3, 2.4, 2.5, 2.6, 3.1, 3.2, 3.4, 4.1, 5.3_
 
-- [ ] 4. ドメインサービス `internal/itemsearch.SearchService` を実装する
+- [x] 4. ドメインサービス `internal/itemsearch.SearchService` を実装する
   - `internal/itemsearch/service.go` を新規作成し、design.md の `SearchService.Search(ctx, userID, rawQuery string, feedID *string, cursorStr string, limit int)` シグネチャ・正規化
     ロジック（前後空白 trim、空クエリ判定、LIKE メタ文字エスケープ）・`feedID != nil` 時の購読確認
     （既存 `SubscriptionRepository.Exists` 相当の経路を再利用、未購読なら `NewFeedNotSubscribedError`
