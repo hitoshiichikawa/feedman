@@ -8,11 +8,14 @@
 
 **Impact**: 現在は `selectedFeedId: string | null` を起点に「個別フィード 1 件」のみを右ペインに表示する単一モードのアーキテクチャを、(1) 横断モード／個別モードの 2 系統 ViewMode に拡張し、(2) ユーザー単位で「最後に横断一覧を開いた時刻」をサーバ側 DB（`user_cross_feed_views` テーブル）に永続化することで複数デバイスをまたいで一貫した新着判定を提供する。既存個別フィード閲覧の挙動・レイアウト・パフォーマンスは後退させない（Requirement 5 / NFR 1.2 / NFR 2）。
 
+**Session-Level Baseline Consistency**（PR #129 レビューフィードバック反映、Req 4.7 対応）: 新着判定基準時刻は **クライアント側で同一セッション内で固定**する設計を採用する。サーバ側 `user_cross_feed_views.last_seen_at` はセッション初回ロード時に `PUT /api/users/me/cross-feed-last-seen` で更新する（次セッション / 別デバイス向け cross-device 同期）が、同一セッション中は初回 fetch で受信した `since_time` を `AppStateContext.crossFeedSessionSince` に保持し、以降の `GET /api/items/cross-feed` に `since` query parameter として明示送信することで、横断 ↔ 個別フィードの行き来で表示中の新着記事が消失しない UX を保証する。サーバは `since` 受信時にその値を新着判定基準として採用し、`user_cross_feed_views` の値は参照しない（List 操作は副作用なし）。
+
 ### Goals
 
 - 左ペイン最上部に常設仮想エントリ「すべての新着記事」を追加し、選択時に全購読フィードの新着記事を `published_at DESC, id DESC` の決定論的順序でマージ表示する（Req 1, 2）
 - 各記事カードに発信元フィードのフィード名と favicon バッジを併記し、favicon 未設定時は既存個別フィード一覧と同じ代替アイコン（lucide-react `Rss`）を表示する（Req 3、#122 で実装済の `FeedFavicon` を抽出再利用）
 - 「前回横断一覧を開いた時刻」をユーザー単位で DB 永続化し、再ログイン後・複数デバイス間で一貫した新着抽出を提供する（Req 4）
+- 同一セッション中はクライアント側で新着基準時刻を固定保持し、横断 ↔ 個別フィード間 navigation で表示中の新着記事が消えない UX を提供する（Req 4.7）
 - 既存の個別フィード閲覧導線・既読／スター操作・未読数バッジ・スクロール挙動を一切変更しない（Req 5, NFR 2.1）
 - 横断一覧の初期表示開始を 1 秒以内とし、ページング（limit 50 件 / cursor）で大量件数時も UI を無応答にしない（NFR 1.1, 1.3）
 
@@ -54,7 +57,7 @@
 ```mermaid
 flowchart LR
   subgraph Web[web/ Next.js]
-    AS[AppStateContext<br/>viewMode + lastCrossFeedSeenAt]
+    AS[AppStateContext<br/>viewMode + crossFeedSessionSince]
     FL[FeedList<br/>+ AllNewItemsEntry]
     IL[ItemList<br/>routing by viewMode]
     CFI[CrossFeedItemList<br/>+ FeedBadge]
@@ -198,11 +201,12 @@ web/src/
 | 3.3 | favicon 未設定・読込失敗時の代替アイコン | FeedFavicon | `Rss` lucide icon | 既存 #122 の onError fallback ロジック踏襲 |
 | 3.4 | レイアウト視認性阻害なし | CrossFeedItemList / ItemRow 拡張 | バッジは右上 or 左 16px 領域 | Tailwind `flex-shrink-0` で固定幅 |
 | 4.1 | ユーザーごとに最後に開いた時刻を記録 | UserCrossFeedViewRepository / crossfeed.Service | `user_cross_feed_views(user_id PK, last_seen_at)` | Upsert で 1 行/ユーザー |
-| 4.2 | 当該時刻より後の記事を新着抽出 | ItemRepository.ListNewAcrossFeeds | `WHERE i.published_at > $sinceTime` | sinceTime は前回保存値 or fallback |
-| 4.3 | 表示処理完了時に時刻を更新 | crossfeed.Service / TouchLastSeen | PUT /api/users/me/cross-feed-last-seen | 別エンドポイント分離（PM 確認事項 2） |
-| 4.4 | 初回は既定窓 fallback | crossfeed.Service | `if lastSeen IS NULL: sinceTime = now - 24h` | PM 確認事項 2: 24 時間を design 確定 |
+| 4.2 | 新着判定基準時刻より後の記事を新着抽出 | ItemRepository.ListNewAcrossFeeds | `WHERE i.published_at > $sinceTime` | sinceTime は client override（Req 4.7）> stored last_seen_at > 24h fallback の 3 段優先順位 |
+| 4.3 | セッション初回表示完了時にサーバ側 last_seen_at を更新 | crossfeed.Service.TouchLastSeen / CrossFeedItemList useEffect | PUT /api/users/me/cross-feed-last-seen | CrossFeedItemList が「`crossFeedSessionSince === null` のとき 1 回だけ」mutate を呼ぶことで session 内 1 回に絞る（Req 4.7 と整合） |
+| 4.4 | 初回は既定窓 fallback | crossfeed.Service | `if overrideSince == nil && lastSeen IS NULL: sinceTime = now - 24h` | PM 確認事項 2: 24 時間を design 確定 |
 | 4.5 | 再ログイン後も保持 | user_cross_feed_views テーブル | DB 永続化（PM 確認事項 1: サーバ側採用） | session lifecycle と独立 |
 | 4.6 | 新着 0 件時の空状態表示 | CrossFeedItemList | empty state UI | 既存「記事がありません」相当のメッセージ |
+| 4.7 | 同一セッション内の baseline 固定 | AppStateContext.crossFeedSessionSince / useCrossFeedItems / CrossFeedHandler `since` query param / crossfeed.Service overrideSince | dispatch SET_CROSS_FEED_SESSION_SINCE → `?since=<ISO>` を以降の GET に常時付与 → Service が overrideSince を最優先採用 | 初回 fetch で受信した since_time を client に保持し、行き来時の表示中 item 集合を維持（PR #129 案A） |
 | 5.1 | 個別フィード閲覧の挙動不変 | AppStateContext / ItemList（既存） | viewMode='feed' 時は既存 ItemList を一切変更せず描画 | reducer の SELECT_FEED は既存と同等 reset 挙動 |
 | 5.2 | 個別フィード並び順・スタイル不変 | FeedList（最上部追加のみ） | 既存 feeds.map 部分は無変更 | FeedFavicon の抽出は同一の見た目 |
 | 5.3 | 既読・スター操作の同期 | useMarkAsRead / useToggleStar / queryClient | mutation success 時に `["items", ...]` と `["cross-feed-items"]` 両方 invalidate | Frontend キャッシュ整合 |
@@ -224,12 +228,12 @@ web/src/
 | Field | Detail |
 |-------|--------|
 | Intent | 横断新着一覧の取得と「最後に横断一覧を開いた時刻」の管理を担うドメインサービス |
-| Requirements | 2.1, 2.2, 2.3, 4.1, 4.2, 4.3, 4.4, 4.5 |
+| Requirements | 2.1, 2.2, 2.3, 4.1, 4.2, 4.3, 4.4, 4.5, 4.7 |
 
 **Responsibilities & Constraints**
-- 主責務: ユーザーの最終アクセス時刻を読み出し→新着記事の cursor ベース取得→TouchLastSeen で時刻更新（更新は別エンドポイント呼び出しで実施、List 自体は副作用なし）
+- 主責務: 新着判定基準時刻の決定（client override 優先→stored lastSeen→24h fallback の 3 段優先順位）→cursor ベースの新着記事取得→TouchLastSeen で時刻更新（更新は別エンドポイント呼び出しで実施、List 自体は副作用なし）
 - ドメイン境界: 「横断 timeline view 状態」と「item 集合の絞り込みルール」を所有。`item` ドメイン（個別フィード）の責務は侵さない
-- 不変条件: TouchLastSeen は冪等（同時刻書き込みは安全）。ListNewItems は同一引数で常に同一結果（DB 状態が変わらない限り）
+- 不変条件: TouchLastSeen は冪等（同時刻書き込みは安全）。ListNewItems は同一引数で常に同一結果（DB 状態が変わらない限り）。overrideSince 指定時は `user_cross_feed_views` を参照しない（client が baseline の正本を持つ session 内不変条件、Req 4.7）
 
 **Dependencies**
 - Inbound: `handler.CrossFeedServiceAdapter` — DTO 変換 (Critical)
@@ -262,12 +266,16 @@ type CrossFeedItemSummary struct {
     FeedFaviconURL *string // data URL（subscription.SubscriptionInfo と同形式）。未設定なら nil
 }
 
-// ListNewItems はユーザーの全購読フィードから lastSeen 以降の新着を public 降順で取得する。
-// lastSeen 記録が無いユーザーは 24 時間 fallback を採用する（Req 4.4）。
+// ListNewItems はユーザーの全購読フィードから sinceTime 以降の新着を public 降順で取得する。
+// sinceTime の決定順序:
+//   (1) overrideSince が非 nil ならその値を採用（クライアント主導の session-level baseline、Req 4.7）
+//   (2) nil なら userCrossFeedViewRepo.Get で lastSeen を取得し採用
+//   (3) lastSeen 記録も無いユーザーは now() - 24h fallback を採用（Req 4.4）
 // cursorStr は (RFC3339Nano, itemID) を区切り文字 ":" で連結した複合カーソル。
-func (s *Service) ListNewItems(ctx context.Context, userID, cursorStr string, limit int) (*NewItemsResult, error)
+func (s *Service) ListNewItems(ctx context.Context, userID, cursorStr string, limit int, overrideSince *time.Time) (*NewItemsResult, error)
 // Preconditions: userID != ""、limit > 0
 // Postconditions: 戻り値 Items は published_at DESC, id DESC の決定論順序
+//                 戻り値 NewItemsResult.SinceTime に実際に採用した基準時刻を格納（クライアントが crossFeedSessionSince として保持）
 
 // TouchLastSeen は「最後に横断一覧を開いた時刻」を now() で UPSERT する。
 // 単独で呼び出され、ListNewItems からは呼ばない（リトライ・冪等性のため分離）。
@@ -363,12 +371,13 @@ LIMIT $5;
 | Field | Detail |
 |-------|--------|
 | Intent | 横断一覧 GET と最終アクセス時刻 PUT の HTTP エンドポイント |
-| Requirements | 1.2, 2.1, 4.3 |
+| Requirements | 1.2, 2.1, 4.3, 4.7 |
 
 **Responsibilities & Constraints**
 - 認証必須グループ配下に登録（既存 `r.Group` 内で middleware.UserIDFromContext を使用）
 - GET と PUT を **分離**（PM 確認事項 2: リトライ・冪等性に強い）
 - レスポンス DTO に `feed_id` / `feed_title` / `feed_favicon_url` を含め N+1 を回避
+- GET 時のクエリパラメータ `since`（Req 4.7）: `time.Parse(time.RFC3339, since)` で parse 成功時のみ `overrideSince` として Service に渡す。失敗時は 400 INVALID_REQUEST。省略時は nil（従来挙動）
 
 **Contracts**: Service [ ] / API [x] / Event [ ] / Batch [ ] / State [ ]
 
@@ -376,12 +385,13 @@ LIMIT $5;
 
 | Method | Endpoint | Request | Response | Errors |
 |--------|----------|---------|----------|--------|
-| GET | `/api/items/cross-feed?cursor=<RFC3339Nano:itemID>&limit=<N>` | query parameters のみ | `CrossFeedListResponse` | 401 / 500 |
+| GET | `/api/items/cross-feed?cursor=<RFC3339Nano:itemID>&limit=<N>&since=<RFC3339>` | query parameters のみ | `CrossFeedListResponse` | 400 / 401 / 500 |
 | PUT | `/api/users/me/cross-feed-last-seen` | （body 無し） | 204 No Content | 401 / 500 |
 
 クエリパラメータ:
 - `cursor`: 省略時は先頭から取得。`<published_at(RFC3339Nano)>:<item_id(UUID)>` の文字列（コロン区切り）
 - `limit`: 省略時 50。最大 200（NFR 1.3 / PM 確認事項 3: design 確定値）
+- `since`: 省略可。RFC3339（タイムゾーン必須）の datetime。指定時はサーバの `user_cross_feed_views.last_seen_at` を参照せず、当該値を新着判定基準時刻として採用する（Req 4.7、クライアント主導の session-level baseline）。省略時は従来通り stored `last_seen_at` または 24h fallback。不正形式は 400 INVALID_REQUEST
 
 レスポンス DTO（JSON）:
 
@@ -417,14 +427,16 @@ LIMIT $5;
 
 | Field | Detail |
 |-------|--------|
-| Intent | viewMode 判別子を導入し、横断モード／個別モード／未選択を厳密区別 |
-| Requirements | 1.2, 1.3, 5.1 |
+| Intent | viewMode 判別子を導入し、横断モード／個別モード／未選択を厳密区別。加えて同一セッション内の新着判定基準時刻を保持する |
+| Requirements | 1.2, 1.3, 4.7, 5.1 |
 
 **Responsibilities & Constraints**
 - `AppState` 拡張: `viewMode: 'none' | 'feed' | 'cross-feed'` を追加。`selectedFeedId` は viewMode='feed' でのみ意味を持つ
-- 新 action: `SELECT_ALL_NEW_ITEMS`（viewMode='cross-feed' に遷移、`selectedFeedId=null`, `expandedItemId=null`）/ 既存 `SELECT_FEED` は viewMode='feed' + selectedFeedId 設定に拡張
-- 後方互換: `useAppState()` の戻り値型に `viewMode` を追加するのみ。既存呼び出し側は selectedFeedId だけを参照するなら破壊なし
-- 初期 state は `viewMode: 'none'`（既存挙動と同等：何も選択されていない状態）
+- `AppState` 拡張（Req 4.7）: `crossFeedSessionSince: string | null` を追加し、同一セッション内の新着判定基準時刻（RFC3339 文字列）を保持。初期値は `null`（セッション初回 fetch 前を表す）
+- 新 action: `SELECT_ALL_NEW_ITEMS`（viewMode='cross-feed' に遷移、`selectedFeedId=null`, `expandedItemId=null`、`crossFeedSessionSince` は **保持**）/ 既存 `SELECT_FEED` は viewMode='feed' + selectedFeedId 設定に拡張（`crossFeedSessionSince` は **保持**）
+- 新 action: `SET_CROSS_FEED_SESSION_SINCE`（横断一覧の **初回** fetch 完了時に CrossFeedItemList から dispatch、`crossFeedSessionSince` を当該レスポンス `since_time` で固定）
+- 後方互換: `useAppState()` の戻り値型に `viewMode` / `crossFeedSessionSince` を追加するのみ。既存呼び出し側は selectedFeedId だけを参照するなら破壊なし
+- 初期 state は `viewMode: 'none'`, `crossFeedSessionSince: null`（既存挙動と同等：何も選択されていない状態）。セッション境界（ログアウト / 再ログイン / ページ全体リロード）で provider が再生成されるため、新セッションでは `crossFeedSessionSince` が再び null に戻る（Req 4.7 の「セッション初回表示時の値で固定」の自然な帰結）
 
 ##### State Transition
 
@@ -433,16 +445,18 @@ type ViewMode = 'none' | 'feed' | 'cross-feed';
 
 interface AppState {
   viewMode: ViewMode;
-  selectedFeedId: string | null;   // viewMode === 'feed' でのみ非 null
+  selectedFeedId: string | null;          // viewMode === 'feed' でのみ非 null
   expandedItemId: string | null;
   filter: ItemFilter;
+  crossFeedSessionSince: string | null;   // Req 4.7: セッション初回 fetch で受信した since_time を保持
 }
 
 type AppAction =
-  | { type: 'SELECT_FEED'; feedId: string }            // viewMode='feed', selectedFeedId=feedId, reset expanded/filter
-  | { type: 'SELECT_ALL_NEW_ITEMS' }                   // viewMode='cross-feed', selectedFeedId=null, reset expanded/filter
-  | { type: 'EXPAND_ITEM'; itemId: string }            // 既存
-  | { type: 'SET_FILTER'; filter: ItemFilter };        // 既存
+  | { type: 'SELECT_FEED'; feedId: string }                          // viewMode='feed', selectedFeedId=feedId, reset expanded/filter, crossFeedSessionSince 保持
+  | { type: 'SELECT_ALL_NEW_ITEMS' }                                 // viewMode='cross-feed', selectedFeedId=null, reset expanded/filter, crossFeedSessionSince 保持
+  | { type: 'SET_CROSS_FEED_SESSION_SINCE'; sinceTime: string }      // セッション初回 fetch 完了で固定（NEW、Req 4.7）
+  | { type: 'EXPAND_ITEM'; itemId: string }                          // 既存
+  | { type: 'SET_FILTER'; filter: ItemFilter };                      // 既存
 ```
 
 #### AllNewItemsEntry（FeedList 内の private function）
@@ -463,13 +477,15 @@ type AppAction =
 
 | Field | Detail |
 |-------|--------|
-| Intent | 横断一覧の右ペイン描画。記事行に FeedBadge を併記 |
-| Requirements | 2.1, 2.2, 2.4, 2.5, 3.1, 3.2, 3.3, 3.4, 4.6, NFR 1.3 |
+| Intent | 横断一覧の右ペイン描画。記事行に FeedBadge を併記。セッション初回 fetch 完了時に session-level baseline を AppStateContext へ固定する |
+| Requirements | 2.1, 2.2, 2.4, 2.5, 3.1, 3.2, 3.3, 3.4, 4.3, 4.6, 4.7, NFR 1.3 |
 
 **Responsibilities & Constraints**
 - 内部 state: `expandedItemId` は AppStateContext 経由（既存 ItemList と同等）。フィルタ tabs は横断一覧では **表示しない**（Non-Goals に従い filter=all 固定）
 - 無限スクロールは既存 ItemList と同じ IntersectionObserver パターン
-- マウント時に `useTouchCrossFeedLastSeen()` を **初回データ受信完了後 1 回だけ** 呼び出し（Req 4.3 の「表示処理完了」を初回ページ受信完了で定義）
+- 初回 fetch 完了時の処理（Req 4.3 / 4.7）: `crossFeedSessionSince === null` かつ 初回 page の取得に成功したとき、**同一の useEffect で 1 回だけ**以下を実行する:
+  1. `dispatch({ type: 'SET_CROSS_FEED_SESSION_SINCE', sinceTime: data.pages[0].since_time })` — session baseline をクライアントに固定（Req 4.7）
+  2. `useTouchCrossFeedLastSeen().mutate()` — サーバ側 `last_seen_at` を now() に更新（Req 4.3、次セッション / 別デバイス向け同期）
 - 既読化・スター付与は既存 `useMarkAsRead` / `useToggleStar` を再利用。mutation `onSuccess` で `queryClient.invalidateQueries({ queryKey: ['cross-feed-items'] })` も追加（既存 hook を拡張）
 - 空状態: `data?.pages[0]?.items.length === 0` のとき「新着記事はありません」を表示（Req 4.6）
 
@@ -484,14 +500,29 @@ export function CrossFeedItemList(): JSX.Element;
 
 ```typescript
 export function useCrossFeedItems(): UseInfiniteQueryResult<CrossFeedListResponse>;
-// queryKey: ['cross-feed-items']
-// queryFn: apiClient.get<CrossFeedListResponse>('/api/items/cross-feed?cursor=...&limit=50')
+// 内部で AppStateContext から crossFeedSessionSince を読み取る（Req 4.7）
+// queryKey: ['cross-feed-items', crossFeedSessionSince ?? 'initial']
+//   - crossFeedSessionSince が null（セッション初回）と非 null（baseline 固定後）でキャッシュ entry を分離
+// queryFn: ({ pageParam }) =>
+//   apiClient.get<CrossFeedListResponse>(
+//     '/api/items/cross-feed?limit=50' +
+//     (pageParam ? `&cursor=${encodeURIComponent(pageParam)}` : '') +
+//     (crossFeedSessionSince ? `&since=${encodeURIComponent(crossFeedSessionSince)}` : '')
+//   )
 // getNextPageParam: (lastPage) => lastPage.has_more ? lastPage.next_cursor : undefined
-// staleTime: 0（横断戻り時に最新状態を反映, Req 5.4）
+// staleTime: 0（横断戻り時に最新状態を反映, Req 5.4）。
+//   crossFeedSessionSince が固定されている間は同一 queryKey なので
+//   refetchOnMount が走っても server 側は since 固定で同一 baseline を採用するため
+//   表示中の記事集合は維持される（Req 4.7）
+// 実装最適化: 初回 fetch（crossFeedSessionSince=null）の成功時に
+//   queryClient.setQueryData(['cross-feed-items', sinceTime], data) で
+//   新 queryKey にデータを移送し、SET_CROSS_FEED_SESSION_SINCE dispatch 直後の
+//   重複 fetch を回避してよい（必須ではないが推奨）
 
 export function useTouchCrossFeedLastSeen(): UseMutationResult<void, Error, void>;
 // mutationFn: () => apiClient.put('/api/users/me/cross-feed-last-seen')
 // 失敗しても UI には影響しない（次回起動時 lastSeen が同じ値のまま）
+// セッション中の連続呼び出しは CrossFeedItemList 側で「初回 fetch 完了時のみ」に絞る（Req 4.3）
 ```
 
 #### FeedFavicon（既存 feed-list.tsx 内 private → 共有 component に昇格）
@@ -594,11 +625,14 @@ PostgreSQL planner は `subscriptions` を user_id で nested-loop → 各 `feed
 
 ### Unit Tests
 
-- **`crossfeed.Service.ListNewItems`** — lastSeen 記録あり時に `sinceTime = lastSeen` で repo を呼ぶこと
-- **`crossfeed.Service.ListNewItems`** — lastSeen 記録なし（初回）時に `sinceTime = now - 24h` fallback で repo を呼ぶこと（Req 4.4）
+- **`crossfeed.Service.ListNewItems`** — overrideSince=nil + lastSeen 記録あり時に `sinceTime = lastSeen` で repo を呼ぶこと
+- **`crossfeed.Service.ListNewItems`** — overrideSince=nil + lastSeen 記録なし（初回）時に `sinceTime = now - 24h` fallback で repo を呼ぶこと（Req 4.4）
+- **`crossfeed.Service.ListNewItems`** — overrideSince=非 nil 時に lastSeen を **無視** し `sinceTime = *overrideSince` で repo を呼ぶこと（Req 4.7、優先順位検証）
 - **`crossfeed.Service.ListNewItems`** — cursorStr が不正形式時に `INVALID_REQUEST` 相当のエラーを返すこと
 - **`crossfeed.Service.TouchLastSeen`** — `UserCrossFeedViewRepository.Upsert` が呼ばれること
-- **`appReducer` (web)** — `SELECT_ALL_NEW_ITEMS` action で viewMode='cross-feed', selectedFeedId=null, expandedItemId=null, filter='all' になること
+- **`appReducer` (web)** — `SELECT_ALL_NEW_ITEMS` action で viewMode='cross-feed', selectedFeedId=null, expandedItemId=null, filter='all' になり **crossFeedSessionSince は保持**されること
+- **`appReducer` (web)** — `SET_CROSS_FEED_SESSION_SINCE` action で crossFeedSessionSince が指定 sinceTime に固定されること（Req 4.7）
+- **`appReducer` (web)** — `SELECT_FEED` action で viewMode='feed' に遷移しても **crossFeedSessionSince は保持**されること（Req 4.7、行き来時の baseline 固定検証）
 
 ### Integration Tests
 
@@ -607,6 +641,8 @@ PostgreSQL planner は `subscriptions` を user_id で nested-loop → 各 `feed
 - **`PostgresUserCrossFeedViewRepo.Upsert` → `Get`** — 同一 user_id への二度目の Upsert で last_seen_at が更新されること
 - **`POST /api/items/cross-feed` → 認証なし** → 401（既存 middleware の動作確認）
 - **`GET /api/items/cross-feed` → 認証あり** → items 配列 + next_cursor + has_more が返ること
+- **`GET /api/items/cross-feed?since=<RFC3339>` → 認証あり** → サーバ側 last_seen_at と異なる値を `since` に渡したケースで、当該 since 値を基準に新着抽出されること（Req 4.7）
+- **`GET /api/items/cross-feed?since=invalid` → 認証あり** → 400 INVALID_REQUEST（Req 4.7、不正値検証）
 
 ### E2E/UI Tests
 
@@ -615,6 +651,9 @@ PostgreSQL planner は `subscriptions` を user_id で nested-loop → 各 `feed
 - **`AppShell` test** — viewMode='cross-feed' のとき `<CrossFeedItemList />` が描画され、viewMode='feed' のとき既存 `<ItemList />` が描画されること（Req 1.2, 1.3, 5.1）
 - **`CrossFeedItemList` test** — API モックで 0 件返却時に「新着記事はありません」が表示されること（Req 4.6）
 - **`CrossFeedItemList` test** — マウント時に `useTouchCrossFeedLastSeen` の mutate が初回データ受信後に 1 回だけ呼ばれること（Req 4.3）
+- **`CrossFeedItemList` test** — 初回 fetch 完了時に `SET_CROSS_FEED_SESSION_SINCE` が `data.pages[0].since_time` で dispatch されること（Req 4.7）
+- **`useCrossFeedItems` test** — `crossFeedSessionSince === null` のとき URL に `since` が含まれないこと、非 null のとき `?since=<encoded>` が付与されること（Req 4.7）
+- **`AppShell` test** — 横断一覧表示中に個別フィードを選択 → 再び横断一覧に戻ったとき、`crossFeedSessionSince` が保持されたままで useCrossFeedItems が同一 baseline で fetch すること（Req 4.7、行き来時の整合性検証）
 
 ### Performance/Load
 
@@ -640,7 +679,7 @@ PostgreSQL planner は `subscriptions` を user_id で nested-loop → 各 `feed
 
 | PM 確認事項 | Design 確定値 | 確定根拠 |
 |---|---|---|
-| 1. 永続化粒度（サーバ／クライアント） | サーバ側 DB（新規 `user_cross_feed_views` 表） | 複数デバイス一貫性 + 再ログイン保持の要件 4.5 を素直に満たす |
+| 1. 永続化粒度（サーバ／クライアント） | **両方** — サーバ側 DB（新規 `user_cross_feed_views` 表）で next-session / cross-device 用の永続化、クライアント側 `AppStateContext.crossFeedSessionSince` で同一セッション中の baseline 固定（Req 4.5 / Req 4.7 を両立、PR #129 案A） | 複数デバイス一貫性 + 再ログイン保持（Req 4.5）と、セッション中の行き来で記事が消えない UX（Req 4.7）を同時に満たすため、責務を 2 階層で分離 |
 | 2. 初回 fallback 窓 | 直近 24 時間 | 「日次で新着確認する」典型 workflow に合致。実装は単純な定数 |
 | 3. 件数上限 | デフォルト 50 件 / 上限 200 件 + cursor 追加読み込み | 既存 `ItemService.defaultItemsPerPage=50` と整合。上限 200 で UI 無応答リスク回避 |
 | 4. 既読除外 | 除外しない（既読記事も新着として表示し、既存と同じ視覚扱い） | Non-Goals 化。実装単純化と「新着 = 公開時刻ベース」の semantics 明確化 |
