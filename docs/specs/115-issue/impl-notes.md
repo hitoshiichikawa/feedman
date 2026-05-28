@@ -52,6 +52,21 @@
 - **結果分類のロバスト性**: `Fetcher` 自体は `nil` を返しても、既存の `ApplyParseFailure` などの仕組みでフィード内部のエラーメッセージに失敗内容が記録される場合がある。そのため、`Fetch` 呼び出し後のフィード状態（`ConsecutiveErrors == 0 && FetchStatus == model.FetchStatusActive` 等）やエラーメッセージの文言（"UPSERT" や "パース" などの文字列検知）に基づいて適切に APIError (FEED_COOLDOWN, FETCH_FAILED, PARSE_FAILED) に変換し、対応するメトリクス（metrics package 実装予定）の Nop stub を定義・呼び出しした。
 - **単体テストの網羅**: `mockManualFetchTx` や `mockManualFetchMetricsRecorder` 等の専用モックを定義し、正常系成功、認可失敗（他ユーザーまたは存在しない購読ID）、ロック競合（`ErrFeedLocked` 発生時）、クールダウンによる拒否、およびSSRF / パース失敗 / 一般HTTPエラーなど各種フェッチエラー時のハンドリングとメトリクス記録が正しく行われることを検証した。
 
+### Task 5
+
+採用方針: `metrics.MetricsCollector` interface に手動フェッチ系 4 メソッド（`RecordManualFetchSuccess` / `RecordManualFetchFailure(reason)` / `RecordManualFetchCooldownRejected` / `RecordManualFetchLockConflict`）を追加し、`Collector` 実装に Prometheus `CounterVec` `feedman_manual_fetch_total`（label: `result`）を新設。`NopCollector` には 4 つの no-op 実装を追加。同時に task 4 で導入した local subinterface `ManualFetchMetricsRecorder` を削除し、`subscription.Service` の依存型を formal な `metrics.MetricsCollector` に置換することで、production wiring（task 6.1）が `*metrics.Collector` をそのまま注入できる形へ整えた。
+
+重要な判断:
+- **ラベル値の定数化**: `success` / `cooldown_rejected` / `lock_conflict` の 3 つは Collector 側の `const` として固定値で出力（呼び出し側が誤字を混入しても影響を局所化）。一方 `RecordManualFetchFailure(reason)` の `reason` はサービス層が `fetch_error` / `parse_error` / `upsert_error` / `ssrf_blocked` を選択する責務とし、Collector 側ではラベル文字列をそのまま通す方針。これは task 4 の `classifyFetchError` がエラー文字列パターンに依存して動的分類している現状と整合させ、Collector 側に whitelist を持たせると分類変更時に 2 箇所修正が必要になる二重メンテを避ける判断
+- **subscription.Service 側 hack の正式化**: task 4 は metrics 実装が後続のため local subinterface を採用していた。本 task で `metrics.MetricsCollector` に手動フェッチ系が揃ったため、`Service.metricsRecorder` の型を `metrics.MetricsCollector` に置換。挙動は完全に等価で、test mock `mockManualFetchMetricsRecorder` は interface 充足のため自動フェッチ系 6 メソッドの no-op を追加した
+- **既存テストモックへの影響波及**: `internal/item/upsert_test.go` と `internal/worker/fetch/fetcher_test.go` の `mockMetricsCollector` も interface 拡張に伴い 4 no-op 追加が必要。両モックは `WithMetrics(c metrics.MetricsCollector)` への引数として参照されているため、4 メソッド未実装だと build error になる。upsert / worker fetcher は手動フェッチ系メソッドを呼ばないため、観測対象は従来どおり変更なし
+- **テスト設計**: `getManualFetchCounter` ヘルパで registry から `feedman_manual_fetch_total` の特定 label 値を抽出する共通関数を導入。label 別の独立カウント、自動フェッチ系との別系列性（Req 8.5）、reason 文字列の透過性を境界テストで検証
+- **NopCollector ZeroValue テストの拡張**: 既存の境界値テスト（空文字 feedID / 0 件 / status=0）に倣い、手動フェッチ系の `reason=""` 入力でも panic しないことを担保
+
+残存課題:
+- **`internal/app/app.go` の build error**: task 4 で `subscription.NewService` のシグネチャが拡張された結果、`app.go:133` が引数不足で build に失敗する状態が task 4 完了時から残っており、本 task のスコープ外（task 6.1 の `app.runServe` 依存配線追加で解消される）。本 task 単体のテスト（`go test ./internal/metrics/... ./internal/subscription/... ./internal/item/... ./internal/worker/...`）はすべて pass する
+- task 6.1 の Handler 実装で `metrics.NewCollector` を `serveCollector` として `subscription.NewService` に渡すことで、production パスで `feedman_manual_fetch_total` が `/metrics` エンドポイントから公開される（本 task では公開機構は変更していない / Collector を起動済み registry に登録するだけで `metrics.Handler` / `SetupMetricsRoute` 経由で自動的に Prometheus テキスト形式に現れる）
+
 ## 補足
 
 
