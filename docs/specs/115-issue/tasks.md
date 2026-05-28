@@ -80,7 +80,7 @@
   - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5_
   - _Boundary: metrics.Collector, metrics.NopCollector_
 
-- [ ] 6. Handler / Router: POST /api/subscriptions/{id}/fetch 追加
+- [x] 6. Handler / Router: POST /api/subscriptions/{id}/fetch 追加
 - [x] 6.1 SubscriptionServiceInterface 拡張 + Handler.ManualFetch + Router 配線 + Error マッピング
   - `internal/handler/subscription_handler.go` の `SubscriptionServiceInterface` に
     `ManualFetch(ctx, userID, subscriptionID string) (*subscriptionResponse, error)` を追加
