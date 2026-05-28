@@ -29,7 +29,7 @@
   - _Depends: 1.1_
 
 - [ ] 3. Worker fetcher の成功経路に UpdateLastSuccessfulFetchAt 反映
-- [ ] 3.1 既存 Fetcher.Fetch の ApplySuccess 直後に成功時刻を記録 (P)
+- [x] 3.1 既存 Fetcher.Fetch の ApplySuccess 直後に成功時刻を記録 (P)
   - `internal/worker/fetch/fetcher.go` の 2 箇所（304 Not Modified パス / 200 OK 成功パス）の `ApplySuccess` 呼び出し直後に
     `f.feedRepo.UpdateLastSuccessfulFetchAt(ctx, feed.ID, time.Now())` を 1 行追加する
   - エラーが発生した場合はログ警告のみ（成功時刻の記録失敗で fetch 自体は成功扱いを維持）
