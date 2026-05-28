@@ -10,7 +10,7 @@
   - _Requirements: NFR 1.2_
 
 - [ ] 2. 検索ドメイン用のモデルとエラーコードを追加する
-- [ ] 2.1 `internal/model/item.go` に `ItemSearchHit` 構造体を追加する
+- [x] 2.1 `internal/model/item.go` に `ItemSearchHit` 構造体を追加する
   - design.md の Data Models 節で定義した `ItemSummary` 相当のフィールド + `FeedTitle string` +
     `FaviconData []byte` + `FaviconMime string` を持たせる
   - 既存 `ItemWithState` パターンと整合する命名・並び順にする
