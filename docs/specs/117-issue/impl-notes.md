@@ -154,6 +154,68 @@ Service 層 `ListStarredItems` メソッドの追加と単体テスト。
   `starredItemListResult`（handler 層 JSON 応答型）に変換する予定。`ItemServiceInterface`
   への `ListStarredItems` 追加は Task 3 の責務範囲。
 
+### Task 3
+
+Handler 層 `ListStarredItems` ハンドラ + アダプタ + ルート登録、および単体テスト。
+
+#### 採用方針
+
+- `starredItemSummaryResponse` は `itemSummaryResponse` を struct embed して
+  `FeedTitle string \`json:"feed_title"\`` を追加する形（design.md §要件 2.4 採用案）。
+  既存 `itemSummaryResponse` を変更せず、JSON 出力時には embed 元の全フィールド +
+  `feed_title` が同列に並ぶ（Go の encoding/json は anonymous embedded struct を
+  inline 展開するため）。NFR 3.1（既存応答スキーマと区別不能 = 既存 API のスキーマ
+  汚染なし）を構造的に担保する。
+- `starredItemListResult` も `itemListResult` と同形のフィールド構成（Items / NextCursor /
+  HasMore）に揃え、handler 層レイヤでも横断 API と単一フィード API の応答形状が型レベルで
+  並列であることを表現。
+- ルート登録は `/api/feeds` 直下の `/{id}` ブロックの**直前**に `r.Get("/starred/items", ...)`
+  を置く。chi v5 のトライ木は静的セグメント `starred` を動的パラメータ `{id}` より優先
+  するため登録順は問わないが、可読性のためコメント + 物理的な隣接配置で意図を明示。
+- `handler` 層単体テストでは router を経由せずハンドラを直接呼ぶため、ルーティング優先順位の
+  実 router 経由検証は Task 4（integration_test.go）の責務範囲とする（design.md にも明記）。
+
+#### 重要な判断
+
+- **Items=nil → `"items":[]` の正規化を handler 層に実装**: service 層が `Items: nil` な
+  `*starredItemListResult` を返した場合でも、JSON 上 `"items": null` ではなく `"items": []` を
+  返すよう handler 内で正規化。NFR 3.1（既存応答スキーマと区別不能 = 配列フィールドは常に
+  配列であり null にならない）を確実に守るため。`TestItemHandler_ListStarredItems_EmptyResult_NilItems`
+  で当該挙動を JSON 直接 substring マッチで検証している。
+  - 既存 `ListItems` ハンドラは service 層の保証に依存して同等の正規化をしていない
+    （`buildItemListResult` が常に `make([]ItemSummary, 0)` 以上のスライスを返すため）が、
+    `ListStarredItems` 側は handler のテスト時に service 層 mock が `nil` を返すケースを
+    扱う必要があるため、handler 層に防御的に正規化を入れた。production 経路では adapter
+    層が `make([]starredItemSummaryResponse, len(result.Items))` で常に非 nil スライスを
+    作るため、本正規化は no-op になる。
+- **mockItemService への `listStarredItemsFn` 追加**: 既存 `mockItemService` は `ItemServiceInterface`
+  を満たす実装で、本 task で `ListStarredItems` を interface に追加したため、mock 側にも
+  メソッド追加が必要。既存パターン（fn フィールド + nil なら zero value 返却）に合わせた。
+  これにより `router_full_test.go` / `router_unauth_ratelimit_test.go` / `integration_test.go` /
+  `router_logging_test.go` / `router_metrics_test.go` の各テストで `&mockItemService{}` を
+  そのまま渡している既存箇所も、interface 追加の影響を受けずコンパイル可能（実体メソッドが
+  zero value を返す）。
+- **テストケース構成**: task 指示の (a)〜(e) を以下にマップし、追加で NFR 3.1 補強:
+  - (a) `TestItemHandler_ListStarredItems_NoUserID_ReturnsUnauthorized`（401、応答ボディに
+    items を含めない）
+  - (b) `TestItemHandler_ListStarredItems_Success`（200、Content-Type、items 配列、next_cursor、
+    has_more、各 item の feed_title / feed_id / is_starred）
+  - (c) `TestItemHandler_ListStarredItems_WithCursor`（?cursor=2026-02-27T10:00:00Z が
+    service 層にそのまま伝搬）
+  - (d) `TestItemHandler_ListStarredItems_InvalidCursor_ReturnsBadRequest`（service 層が
+    `model.NewInvalidFilterError` → 400 + APIError code = `INVALID_FILTER`）
+  - (e) `TestItemHandler_ListStarredItems_EmptyResult`（items=[] / has_more=false /
+    next_cursor は omit）
+  - 追加: `TestItemHandler_ListStarredItems_EmptyResult_NilItems`（service 層 mock が
+    Items=nil を返しても JSON 上は items=[] であることを substring マッチで検証 / NFR 3.1）
+
+#### 残存課題
+
+- なし。Task 4（integration_test.go の追加）が次タスクで、router 経由の到達性
+  （`/api/feeds/starred/items` が `ListStarredItems` に届くこと、`/api/feeds/{id}/items` と
+  衝突しないこと）と認証クッキー付き E2E 形のシナリオを担当する。本 task で実装した
+  ハンドラ・アダプタ・ルート登録は Task 4 から再利用可能な状態にしてある。
+
 ## 確認事項
 
 なし（design.md / requirements.md と本実装に矛盾は確認されていない）。
