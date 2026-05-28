@@ -11,9 +11,18 @@ import type { ItemFilter } from "@/types/item";
 
 // --- State ---
 
+/**
+ * 右ペインの表示モード。
+ * - `"feed"`: 単一フィード記事一覧（selectedFeedId が選択中フィードを示す）
+ * - `"starred"`: フィード横断のお気に入り記事一覧
+ */
+export type SelectedView = "feed" | "starred";
+
 /** アプリケーションUIステート */
 export interface AppState {
-  /** 現在選択中のフィードID（null = 未選択） */
+  /** 現在の右ペイン表示モード（"feed" or "starred"） */
+  selectedView: SelectedView;
+  /** 現在選択中のフィードID（null = 未選択 / "starred" 選択時も null） */
   selectedFeedId: string | null;
   /** 現在展開中の記事ID（null = 未展開） */
   expandedItemId: string | null;
@@ -23,6 +32,7 @@ export interface AppState {
 
 /** 初期状態 */
 const initialState: AppState = {
+  selectedView: "feed",
   selectedFeedId: null,
   expandedItemId: null,
   filter: "all",
@@ -30,8 +40,15 @@ const initialState: AppState = {
 
 // --- Actions ---
 
-/** フィード選択アクション: 展開記事IDとフィルタをリセットする */
+/** フィード選択アクション: 展開記事IDとフィルタをリセットし、selectedView を "feed" に戻す */
 type SelectFeedAction = { type: "SELECT_FEED"; feedId: string };
+
+/**
+ * お気に入り選択アクション:
+ * selectedView を "starred" に切り替え、selectedFeedId / expandedItemId をリセットし、
+ * filter を "all" に戻す。
+ */
+type SelectStarredAction = { type: "SELECT_STARRED" };
 
 /** 記事展開アクション: 同じIDなら閉じる（トグル）、異なるIDなら排他的に展開 */
 type ExpandItemAction = { type: "EXPAND_ITEM"; itemId: string };
@@ -40,7 +57,11 @@ type ExpandItemAction = { type: "EXPAND_ITEM"; itemId: string };
 type SetFilterAction = { type: "SET_FILTER"; filter: ItemFilter };
 
 /** 全アクションのユニオン型 */
-export type AppAction = SelectFeedAction | ExpandItemAction | SetFilterAction;
+export type AppAction =
+  | SelectFeedAction
+  | SelectStarredAction
+  | ExpandItemAction
+  | SetFilterAction;
 
 // --- Reducer ---
 
@@ -50,7 +71,16 @@ function appReducer(state: AppState, action: AppAction): AppState {
     case "SELECT_FEED":
       return {
         ...state,
+        selectedView: "feed",
         selectedFeedId: action.feedId,
+        expandedItemId: null,
+        filter: "all",
+      };
+    case "SELECT_STARRED":
+      return {
+        ...state,
+        selectedView: "starred",
+        selectedFeedId: null,
         expandedItemId: null,
         filter: "all",
       };
