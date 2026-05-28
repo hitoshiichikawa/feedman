@@ -67,6 +67,19 @@
 - **`internal/app/app.go` の build error**: task 4 で `subscription.NewService` のシグネチャが拡張された結果、`app.go:133` が引数不足で build に失敗する状態が task 4 完了時から残っており、本 task のスコープ外（task 6.1 の `app.runServe` 依存配線追加で解消される）。本 task 単体のテスト（`go test ./internal/metrics/... ./internal/subscription/... ./internal/item/... ./internal/worker/...`）はすべて pass する
 - task 6.1 の Handler 実装で `metrics.NewCollector` を `serveCollector` として `subscription.NewService` に渡すことで、production パスで `feedman_manual_fetch_total` が `/metrics` エンドポイントから公開される（本 task では公開機構は変更していない / Collector を起動済み registry に登録するだけで `metrics.Handler` / `SetupMetricsRoute` 経由で自動的に Prometheus テキスト形式に現れる）
 
+### Task 6
+
+採用方針: Handler / Router 層に `POST /api/subscriptions/{id}/fetch` を追加し、既存 `ResumeFetch` と同パターン（認証→path param→service→`handleServiceError`）で実装。`SubscriptionServiceInterface` に `ManualFetch` を 1 メソッド追加し、`SubscriptionServiceAdapter.ManualFetch` で `subscription.Service.ManualFetch` を呼んで `*SubscriptionInfo` → `*subscriptionResponse` に変換する。`mapAPIErrorToHTTPStatus` に `FEED_FETCH_IN_PROGRESS → 409` / `FEED_COOLDOWN → 429` を追加し、`middleware.WriteErrorResponse` には `APIError.Details map[string]any` を omitempty 付きで透過させた。最後に `internal/app/app.go:runServe` に worker 側と同パターンの依存配線（SSRFGuard / Sanitizer / UpsertService / Fetcher / Collector / ManualFetchTxBeginner）を組み込み、`subscription.NewService` を 6 引数版に呼び出すよう更新。これで task 4 完了時から残っていた app.go の build error が解消され、production パスで `POST /fetch` が動作可能となった。
+
+重要な判断:
+- **handler の HTTP マッピング配置**: 行ロック競合（`FEED_FETCH_IN_PROGRESS`）を 409 にマップしたのは、既存ドメイン衝突系（`FEED_NOT_STOPPED` / `SUBSCRIPTION_LIMIT` / `DUPLICATE_SUBSCRIPTION`）が一律 409 に統一されている既存実装慣習（`internal/handler/feed_handler_test.go:953`）との整合最優先。クールダウン拒否を 429 にしたのは Req 2.1 の自然なマッピング（HTTP 仕様の "Too Many Requests" 直訳）
+- **`APIError.Details` の omitempty 戦略**: `middleware.ErrorResponseBody` に `Details map[string]any \`json:"details,omitempty"\`` を 1 フィールド追加するだけで wire format の後方互換が保たれた。既存 4 フィールド（code/message/category/action）に対する既存テスト群（`TestErrorResponseBody_AllFieldsPresent` 等）は無修正でパス。新規 2 テスト（`TestWriteErrorResponse_WithDetails` / `TestWriteErrorResponse_NilDetailsOmitted`）でクールダウン経路と既存経路の両方の wire format を境界として明示
+- **app.go の依存配線重複の排除**: 既存の `_ = metrics.NewCollector(serveRegistry)` を削除し、戻り値を `serveCollector` として受け取る形に集約。同一 Collector を UpsertService / Fetcher / Service の 3 経路に注入することで、手動フェッチ成功・失敗カウンタが同一 registry に集約され、自動経路（worker）と独立した serve プロセス registry として `/metrics` に公開される（design.md の Migration Strategy / Backend Wiring 節と整合）
+- **`SQLManualFetchTxBeginner` を別 interface として配線**: 既存 `repository.NewSQLTxBeginner(db)` は退会処理で使用中（戻り値型 `*sql.Tx` を直接返す簡易抽象）。手動フェッチは Commit/Rollback を含む tx ハンドルライフサイクル抽象（`subscription.ManualFetchTx`）が必要なため、task 4 で導入した `subscription.NewSQLManualFetchTxBeginner(db)` を別途呼び出す方針を採用。同一 `*sql.DB` を共有しているため、Connection Pool は共通
+- **テスト戦略の網羅**: `mockSubscriptionService` に `manualFetchFn` を追加し、200 / 401 / 404 / 409 / 429 / 502 / 500 / no-body 8 ケースを境界値・異常系含めて Red→Green→Refactor で実装。Req 1.4（未認証時にサービス未呼び出し）は spy 変数 `called` で検証、Req 1.6（他人 subID も同 404）は table-driven で 2 ケースに分離、Req 2.2（429 ボディの `details.retry_after_seconds` 含有）は handler 単体経路でも middleware まで含めた JSON 出力で `details.retry_after_seconds = 480` を検証することで RouterDeps を通さない短絡経路でも wire format を担保
+
+残存課題: なし（task 6 完了で Issue #115 の Go 側実装は完了。task 7 系の web 側 hook / UI は別 task）。
+
 ## 補足
 
 
