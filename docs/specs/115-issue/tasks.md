@@ -14,7 +14,7 @@
   - _Requirements: 2.4_
 
 - [ ] 2. Repository 層: 行ロック取得 + last_successful_fetch_at 更新メソッド追加
-- [ ] 2.1 LockFeedForUpdateNowait / UpdateLastSuccessfulFetchAt の interface 定義と PostgreSQL 実装
+- [x] 2.1 LockFeedForUpdateNowait / UpdateLastSuccessfulFetchAt の interface 定義と PostgreSQL 実装
   - `internal/repository/interfaces.go` の `FeedRepository` interface に以下 2 メソッドを追加:
     `LockFeedForUpdateNowait(ctx, tx *sql.Tx, feedID string) (*model.Feed, error)`
     `UpdateLastSuccessfulFetchAt(ctx, feedID string, at time.Time) error`
