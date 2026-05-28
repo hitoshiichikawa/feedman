@@ -9,7 +9,7 @@
     （`pg_trgm` 拡張は他用途で使われる可能性があるため `DROP EXTENSION` は行わない）
   - _Requirements: NFR 1.2_
 
-- [ ] 2. 検索ドメイン用のモデルとエラーコードを追加する
+- [x] 2. 検索ドメイン用のモデルとエラーコードを追加する
 - [x] 2.1 `internal/model/item.go` に `ItemSearchHit` 構造体を追加する
   - design.md の Data Models 節で定義した `ItemSummary` 相当のフィールド + `FeedTitle string` +
     `FaviconData []byte` + `FaviconMime string` を持たせる
