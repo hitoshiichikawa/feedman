@@ -2,6 +2,7 @@ package subscription
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -97,6 +98,12 @@ func (m *mockFeedRepo) UpdateFetchState(ctx context.Context, feed *model.Feed) e
 	if m.updateFetchStateFn != nil {
 		return m.updateFetchStateFn(ctx, feed)
 	}
+	return nil
+}
+func (m *mockFeedRepo) LockFeedForUpdateNowait(ctx context.Context, tx *sql.Tx, feedID string) (*model.Feed, error) {
+	return nil, nil
+}
+func (m *mockFeedRepo) UpdateLastSuccessfulFetchAt(ctx context.Context, feedID string, at time.Time) error {
 	return nil
 }
 

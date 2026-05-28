@@ -3,10 +3,12 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/hitoshi/feedman/internal/database"
 	"github.com/hitoshi/feedman/internal/model"
 	_ "github.com/lib/pq"
@@ -544,6 +546,184 @@ func TestPostgresFeedRepo_LastSuccessfulFetchAt_Scan(t *testing.T) {
 		}
 		if !feed.LastSuccessfulFetchAt.UTC().Truncate(time.Microsecond).Equal(successAt) {
 			t.Errorf("FindByID: LastSuccessfulFetchAt = %v, want %v", feed.LastSuccessfulFetchAt.UTC(), successAt)
+		}
+	})
+}
+
+// TestPostgresFeedRepo_LockFeedForUpdateNowait は Issue #115 (Req 3.1 / 3.2 / 3.4) の
+// 非ブロッキング行ロック取得メソッドが、ロック未保持時に Feed を返し、
+// 別 tx 保持中に ErrFeedLocked を返し、存在しない ID で (nil, nil) を返すことを検証する。
+// テスト用 PostgreSQL に接続できない場合はスキップする。
+func TestPostgresFeedRepo_LockFeedForUpdateNowait(t *testing.T) {
+	ctx := context.Background()
+
+	// Req 3.1: 競合がない状態で行ロックを取得でき、対象フィードが返る
+	t.Run("ロック未保持のときFeedを返す", func(t *testing.T) {
+		db := setupListDueTestDB(t)
+		repo := NewPostgresFeedRepo(db)
+
+		feedID := insertTestFeed(t, db, "https://example.com/lock-ok.xml", time.Now().Add(-1*time.Minute), model.FetchStatusActive)
+
+		// Arrange: tx を開始
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("BeginTx returned error: %v", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		// Act
+		feed, err := repo.LockFeedForUpdateNowait(ctx, tx, feedID)
+
+		// Assert
+		if err != nil {
+			t.Fatalf("LockFeedForUpdateNowait returned error: %v", err)
+		}
+		if feed == nil {
+			t.Fatal("expected non-nil feed, got nil")
+		}
+		if feed.ID != feedID {
+			t.Errorf("feed.ID = %q, want %q", feed.ID, feedID)
+		}
+
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("Commit returned error: %v", err)
+		}
+	})
+
+	// Req 3.2 / NFR 1.2: 別 tx がロック保持中は ErrFeedLocked を即時に返す
+	t.Run("別tx保持中のときErrFeedLockedを返す", func(t *testing.T) {
+		db := setupListDueTestDB(t)
+		repo := NewPostgresFeedRepo(db)
+
+		feedID := insertTestFeed(t, db, "https://example.com/lock-conflict.xml", time.Now().Add(-1*time.Minute), model.FetchStatusActive)
+
+		// Arrange: tx A で先にロックを取得（生 SQL で同等の SELECT FOR UPDATE を発行）
+		txA, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("BeginTx(A) returned error: %v", err)
+		}
+		defer func() { _ = txA.Rollback() }()
+
+		if _, err := txA.ExecContext(ctx, `SELECT id FROM feeds WHERE id = $1 FOR UPDATE`, feedID); err != nil {
+			t.Fatalf("先行ロック取得に失敗: %v", err)
+		}
+
+		// Act: tx B から NOWAIT で再取得を試みる
+		txB, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("BeginTx(B) returned error: %v", err)
+		}
+		defer func() { _ = txB.Rollback() }()
+
+		start := time.Now()
+		feed, err := repo.LockFeedForUpdateNowait(ctx, txB, feedID)
+		elapsed := time.Since(start)
+
+		// Assert: ErrFeedLocked が返り、500ms 以内に確定する（NFR 1.2 のベストエフォート確認）
+		if feed != nil {
+			t.Errorf("expected nil feed on lock conflict, got %+v", feed)
+		}
+		if !errors.Is(err, ErrFeedLocked) {
+			t.Fatalf("err = %v, want errors.Is(err, ErrFeedLocked) = true", err)
+		}
+		if elapsed > 500*time.Millisecond {
+			t.Errorf("ロック競合検出に %v かかった (want < 500ms / NFR 1.2)", elapsed)
+		}
+	})
+
+	// FindByID と同等: 存在しない ID は (nil, nil) を返す
+	t.Run("存在しないIDのときnilを返す", func(t *testing.T) {
+		db := setupListDueTestDB(t)
+		repo := NewPostgresFeedRepo(db)
+
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("BeginTx returned error: %v", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		missingID := uuid.NewString()
+		feed, err := repo.LockFeedForUpdateNowait(ctx, tx, missingID)
+
+		if err != nil {
+			t.Errorf("expected nil error for missing ID, got: %v", err)
+		}
+		if feed != nil {
+			t.Errorf("expected nil feed for missing ID, got: %+v", feed)
+		}
+	})
+}
+
+// TestPostgresFeedRepo_UpdateLastSuccessfulFetchAt は Issue #115 (Req 1.2) の
+// 最終成功時刻更新メソッドが、初回呼び出しで時刻を永続化し、
+// 2 回目呼び出しで上書きすることを検証する。
+// テスト用 PostgreSQL に接続できない場合はスキップする。
+func TestPostgresFeedRepo_UpdateLastSuccessfulFetchAt(t *testing.T) {
+	ctx := context.Background()
+
+	// Req 1.2: 初回呼び出しで時刻が永続化される
+	t.Run("初回呼び出しで時刻が永続化される", func(t *testing.T) {
+		db := setupListDueTestDB(t)
+		repo := NewPostgresFeedRepo(db)
+
+		feedID := insertTestFeed(t, db, "https://example.com/lsf-initial.xml", time.Now().Add(-1*time.Minute), model.FetchStatusActive)
+
+		t1 := time.Now().UTC().Truncate(time.Microsecond)
+
+		// Act
+		if err := repo.UpdateLastSuccessfulFetchAt(ctx, feedID, t1); err != nil {
+			t.Fatalf("UpdateLastSuccessfulFetchAt returned error: %v", err)
+		}
+
+		// Assert: FindByID で再読込し、値が一致する
+		feed, err := repo.FindByID(ctx, feedID)
+		if err != nil {
+			t.Fatalf("FindByID returned error: %v", err)
+		}
+		if feed == nil {
+			t.Fatal("FindByID returned nil feed")
+		}
+		if feed.LastSuccessfulFetchAt == nil {
+			t.Fatal("expected non-nil LastSuccessfulFetchAt, got nil")
+		}
+		if !feed.LastSuccessfulFetchAt.UTC().Truncate(time.Microsecond).Equal(t1) {
+			t.Errorf("LastSuccessfulFetchAt = %v, want %v", feed.LastSuccessfulFetchAt.UTC().Truncate(time.Microsecond), t1)
+		}
+	})
+
+	// Req 1.2: 2 回目呼び出しで上書きされる（冪等性）
+	t.Run("2回目呼び出しで上書きされる", func(t *testing.T) {
+		db := setupListDueTestDB(t)
+		repo := NewPostgresFeedRepo(db)
+
+		feedID := insertTestFeed(t, db, "https://example.com/lsf-overwrite.xml", time.Now().Add(-1*time.Minute), model.FetchStatusActive)
+
+		t1 := time.Now().Add(-10 * time.Minute).UTC().Truncate(time.Microsecond)
+		t2 := time.Now().UTC().Truncate(time.Microsecond)
+
+		// Arrange: 1 回目
+		if err := repo.UpdateLastSuccessfulFetchAt(ctx, feedID, t1); err != nil {
+			t.Fatalf("1回目の UpdateLastSuccessfulFetchAt returned error: %v", err)
+		}
+
+		// Act: 2 回目
+		if err := repo.UpdateLastSuccessfulFetchAt(ctx, feedID, t2); err != nil {
+			t.Fatalf("2回目の UpdateLastSuccessfulFetchAt returned error: %v", err)
+		}
+
+		// Assert: t2 で上書きされている
+		feed, err := repo.FindByID(ctx, feedID)
+		if err != nil {
+			t.Fatalf("FindByID returned error: %v", err)
+		}
+		if feed == nil {
+			t.Fatal("FindByID returned nil feed")
+		}
+		if feed.LastSuccessfulFetchAt == nil {
+			t.Fatal("expected non-nil LastSuccessfulFetchAt, got nil")
+		}
+		if !feed.LastSuccessfulFetchAt.UTC().Truncate(time.Microsecond).Equal(t2) {
+			t.Errorf("LastSuccessfulFetchAt = %v, want %v (overwrite by t2)", feed.LastSuccessfulFetchAt.UTC().Truncate(time.Microsecond), t2)
 		}
 	})
 }

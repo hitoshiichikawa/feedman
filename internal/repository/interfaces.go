@@ -66,6 +66,16 @@ type FeedRepository interface {
 	// UpdateFetchState はフィードのフェッチ状態を更新する。
 	// fetch_status、consecutive_errors、error_message、next_fetch_at、etag、last_modifiedを更新する。
 	UpdateFetchState(ctx context.Context, feed *model.Feed) error
+
+	// LockFeedForUpdateNowait は指定フィード行に対し非ブロッキング排他ロック（FOR UPDATE NOWAIT）を取得する。
+	// 既に別トランザクションがロックを保持している場合は ErrFeedLocked を返し、待機しない。
+	// 取得したロックは tx の COMMIT / ROLLBACK で自動解放される。
+	// 対象 ID のフィードが存在しないときは (nil, nil) を返す（FindByID と同パターン）。
+	LockFeedForUpdateNowait(ctx context.Context, tx *sql.Tx, feedID string) (*model.Feed, error)
+
+	// UpdateLastSuccessfulFetchAt は指定フィードの last_successful_fetch_at を更新する。
+	// 自動ワーカーの成功経路と手動フェッチの成功経路の双方から呼ばれる共有更新メソッド。
+	UpdateLastSuccessfulFetchAt(ctx context.Context, feedID string, at time.Time) error
 }
 
 // SubscriptionRepository は購読データの永続化インターフェース。

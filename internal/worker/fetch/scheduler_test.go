@@ -3,6 +3,7 @@ package fetch
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -74,6 +75,14 @@ func (m *mockFeedRepo) UpdateFetchState(ctx context.Context, feed *model.Feed) e
 	if m.updateFetchStateFunc != nil {
 		return m.updateFetchStateFunc(ctx, feed)
 	}
+	return nil
+}
+
+func (m *mockFeedRepo) LockFeedForUpdateNowait(ctx context.Context, tx *sql.Tx, feedID string) (*model.Feed, error) {
+	return nil, nil
+}
+
+func (m *mockFeedRepo) UpdateLastSuccessfulFetchAt(ctx context.Context, feedID string, at time.Time) error {
 	return nil
 }
 

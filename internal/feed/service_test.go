@@ -2,11 +2,13 @@ package feed
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/hitoshi/feedman/internal/model"
 	"github.com/hitoshi/feedman/internal/repository"
@@ -92,6 +94,14 @@ func (m *mockFeedRepo) ListDueForFetch(_ context.Context) ([]*model.Feed, error)
 }
 
 func (m *mockFeedRepo) UpdateFetchState(_ context.Context, _ *model.Feed) error {
+	return nil
+}
+
+func (m *mockFeedRepo) LockFeedForUpdateNowait(_ context.Context, _ *sql.Tx, _ string) (*model.Feed, error) {
+	return nil, nil
+}
+
+func (m *mockFeedRepo) UpdateLastSuccessfulFetchAt(_ context.Context, _ string, _ time.Time) error {
 	return nil
 }
 
