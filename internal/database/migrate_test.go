@@ -214,20 +214,21 @@ func TestFeedsTable(t *testing.T) {
 	}
 
 	expectedColumns := map[string]string{
-		"id":                 "uuid",
-		"feed_url":           "text",
-		"site_url":           "text",
-		"title":              "character varying",
-		"favicon_data":       "bytea",
-		"favicon_mime":       "character varying",
-		"etag":               "character varying",
-		"last_modified":      "character varying",
-		"fetch_status":       "character varying",
-		"consecutive_errors": "integer",
-		"error_message":      "text",
-		"next_fetch_at":      "timestamp with time zone",
-		"created_at":         "timestamp with time zone",
-		"updated_at":         "timestamp with time zone",
+		"id":                       "uuid",
+		"feed_url":                 "text",
+		"site_url":                 "text",
+		"title":                    "character varying",
+		"favicon_data":             "bytea",
+		"favicon_mime":             "character varying",
+		"etag":                     "character varying",
+		"last_modified":            "character varying",
+		"fetch_status":             "character varying",
+		"consecutive_errors":       "integer",
+		"error_message":            "text",
+		"next_fetch_at":            "timestamp with time zone",
+		"last_successful_fetch_at": "timestamp with time zone",
+		"created_at":               "timestamp with time zone",
+		"updated_at":               "timestamp with time zone",
 	}
 	assertTableColumns(t, db, "feeds", expectedColumns)
 

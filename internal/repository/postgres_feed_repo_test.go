@@ -457,3 +457,93 @@ func TestPostgresFeedRepo_UpdateFetchState(t *testing.T) {
 		}
 	})
 }
+
+// TestPostgresFeedRepo_LastSuccessfulFetchAt_Scan は Issue #115 (Req 2.4) の追加カラム
+// last_successful_fetch_at を FindByID / FindByFeedURL / ListDueForFetch が
+// NULL / 非 NULL の両ケースで正しく Scan して *time.Time に詰めることを検証する。
+// テスト用 PostgreSQL に接続できない場合はスキップする。
+func TestPostgresFeedRepo_LastSuccessfulFetchAt_Scan(t *testing.T) {
+	ctx := context.Background()
+
+	// Req 2.4: 過去成功実績なしのフィードは LastSuccessfulFetchAt が nil で返る
+	t.Run("過去成功実績なしのとき LastSuccessfulFetchAt が nil で返る", func(t *testing.T) {
+		db := setupListDueTestDB(t)
+		repo := NewPostgresFeedRepo(db)
+
+		feedURL := "https://example.com/no-success.xml"
+		feedID := insertTestFeed(t, db, feedURL, time.Now().Add(-1*time.Minute), model.FetchStatusActive)
+
+		// FindByID
+		feed, err := repo.FindByID(ctx, feedID)
+		if err != nil {
+			t.Fatalf("FindByID returned error: %v", err)
+		}
+		if feed == nil {
+			t.Fatal("FindByID: expected feed, got nil")
+		}
+		if feed.LastSuccessfulFetchAt != nil {
+			t.Errorf("FindByID: LastSuccessfulFetchAt = %v, want nil", feed.LastSuccessfulFetchAt)
+		}
+
+		// FindByFeedURL
+		feedByURL, err := repo.FindByFeedURL(ctx, feedURL)
+		if err != nil {
+			t.Fatalf("FindByFeedURL returned error: %v", err)
+		}
+		if feedByURL == nil {
+			t.Fatal("FindByFeedURL: expected feed, got nil")
+		}
+		if feedByURL.LastSuccessfulFetchAt != nil {
+			t.Errorf("FindByFeedURL: LastSuccessfulFetchAt = %v, want nil", feedByURL.LastSuccessfulFetchAt)
+		}
+
+		// ListDueForFetch (購読者が必要)
+		user := insertTestUser(t, db, "lsf-nil@example.com")
+		insertTestSubscription(t, db, user, feedID)
+		feeds, err := repo.ListDueForFetch(ctx)
+		if err != nil {
+			t.Fatalf("ListDueForFetch returned error: %v", err)
+		}
+		found := false
+		for _, f := range feeds {
+			if f.ID == feedID {
+				found = true
+				if f.LastSuccessfulFetchAt != nil {
+					t.Errorf("ListDueForFetch: LastSuccessfulFetchAt = %v, want nil", f.LastSuccessfulFetchAt)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("ListDueForFetch: expected to find feed %q in results", feedID)
+		}
+	})
+
+	// Req 2.4: 過去成功実績ありのフィードは LastSuccessfulFetchAt に時刻が入って返る
+	t.Run("過去成功実績ありのとき LastSuccessfulFetchAt に時刻が入って返る", func(t *testing.T) {
+		db := setupListDueTestDB(t)
+		repo := NewPostgresFeedRepo(db)
+
+		feedURL := "https://example.com/with-success.xml"
+		feedID := insertTestFeed(t, db, feedURL, time.Now().Add(-1*time.Minute), model.FetchStatusActive)
+
+		// 直接 SQL で last_successful_fetch_at を更新する（マイグレーション適用済みである前提を兼ねた確認）
+		successAt := time.Now().Add(-5 * time.Minute).UTC().Truncate(time.Microsecond)
+		if _, err := db.Exec(`UPDATE feeds SET last_successful_fetch_at = $1 WHERE id = $2`, successAt, feedID); err != nil {
+			t.Fatalf("テスト前提の last_successful_fetch_at セットに失敗: %v", err)
+		}
+
+		feed, err := repo.FindByID(ctx, feedID)
+		if err != nil {
+			t.Fatalf("FindByID returned error: %v", err)
+		}
+		if feed == nil {
+			t.Fatal("FindByID: expected feed, got nil")
+		}
+		if feed.LastSuccessfulFetchAt == nil {
+			t.Fatal("FindByID: LastSuccessfulFetchAt = nil, want non-nil")
+		}
+		if !feed.LastSuccessfulFetchAt.UTC().Truncate(time.Microsecond).Equal(successAt) {
+			t.Errorf("FindByID: LastSuccessfulFetchAt = %v, want %v", feed.LastSuccessfulFetchAt.UTC(), successAt)
+		}
+	})
+}

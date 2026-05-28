@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/hitoshi/feedman/internal/model"
 )
@@ -23,18 +24,21 @@ func (r *PostgresFeedRepo) FindByID(ctx context.Context, id string) (*model.Feed
 	feed := &model.Feed{}
 	var faviconData []byte
 	var faviconMime, siteURL, etag, lastModified, errorMessage sql.NullString
+	var lastSuccessfulFetchAt sql.NullTime
 
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, feed_url, site_url, title, favicon_data, favicon_mime,
 		        etag, last_modified, fetch_status, consecutive_errors,
-		        error_message, next_fetch_at, created_at, updated_at
+		        error_message, next_fetch_at, last_successful_fetch_at,
+		        created_at, updated_at
 		 FROM feeds WHERE id = $1`,
 		id,
 	).Scan(
 		&feed.ID, &feed.FeedURL, &siteURL, &feed.Title,
 		&faviconData, &faviconMime,
 		&etag, &lastModified, &feed.FetchStatus, &feed.ConsecutiveErrors,
-		&errorMessage, &feed.NextFetchAt, &feed.CreatedAt, &feed.UpdatedAt,
+		&errorMessage, &feed.NextFetchAt, &lastSuccessfulFetchAt,
+		&feed.CreatedAt, &feed.UpdatedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -50,6 +54,7 @@ func (r *PostgresFeedRepo) FindByID(ctx context.Context, id string) (*model.Feed
 	feed.ETag = nullStringValue(etag)
 	feed.LastModified = nullStringValue(lastModified)
 	feed.ErrorMessage = nullStringValue(errorMessage)
+	feed.LastSuccessfulFetchAt = nullTimeValue(lastSuccessfulFetchAt)
 
 	return feed, nil
 }
@@ -59,18 +64,21 @@ func (r *PostgresFeedRepo) FindByFeedURL(ctx context.Context, feedURL string) (*
 	feed := &model.Feed{}
 	var faviconData []byte
 	var faviconMime, siteURL, etag, lastModified, errorMessage sql.NullString
+	var lastSuccessfulFetchAt sql.NullTime
 
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, feed_url, site_url, title, favicon_data, favicon_mime,
 		        etag, last_modified, fetch_status, consecutive_errors,
-		        error_message, next_fetch_at, created_at, updated_at
+		        error_message, next_fetch_at, last_successful_fetch_at,
+		        created_at, updated_at
 		 FROM feeds WHERE feed_url = $1`,
 		feedURL,
 	).Scan(
 		&feed.ID, &feed.FeedURL, &siteURL, &feed.Title,
 		&faviconData, &faviconMime,
 		&etag, &lastModified, &feed.FetchStatus, &feed.ConsecutiveErrors,
-		&errorMessage, &feed.NextFetchAt, &feed.CreatedAt, &feed.UpdatedAt,
+		&errorMessage, &feed.NextFetchAt, &lastSuccessfulFetchAt,
+		&feed.CreatedAt, &feed.UpdatedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -86,6 +94,7 @@ func (r *PostgresFeedRepo) FindByFeedURL(ctx context.Context, feedURL string) (*
 	feed.ETag = nullStringValue(etag)
 	feed.LastModified = nullStringValue(lastModified)
 	feed.ErrorMessage = nullStringValue(errorMessage)
+	feed.LastSuccessfulFetchAt = nullTimeValue(lastSuccessfulFetchAt)
 
 	return feed, nil
 }
@@ -158,6 +167,16 @@ func nullStringValue(ns sql.NullString) string {
 	return ""
 }
 
+// nullTimeValue はsql.NullTimeから*time.Timeを取得する。
+// Valid=false のときは nil を返し、ドメインモデル側で「未設定」を nil で表現できるようにする。
+func nullTimeValue(nt sql.NullTime) *time.Time {
+	if nt.Valid {
+		t := nt.Time
+		return &t
+	}
+	return nil
+}
+
 // ListDueForFetch はフェッチ対象のフィードを取得する。
 // next_fetch_at <= now() かつ fetch_status = 'active' かつ購読者が存在するフィードを
 // FOR UPDATE SKIP LOCKEDで排他的に取得する。
@@ -171,7 +190,8 @@ func (r *PostgresFeedRepo) ListDueForFetch(ctx context.Context) ([]*model.Feed, 
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT f.id, f.feed_url, f.site_url, f.title, f.favicon_data, f.favicon_mime,
 		        f.etag, f.last_modified, f.fetch_status, f.consecutive_errors,
-		        f.error_message, f.next_fetch_at, f.created_at, f.updated_at
+		        f.error_message, f.next_fetch_at, f.last_successful_fetch_at,
+		        f.created_at, f.updated_at
 		 FROM feeds f
 		 WHERE f.next_fetch_at <= now()
 		   AND f.fetch_status = 'active'
@@ -189,12 +209,14 @@ func (r *PostgresFeedRepo) ListDueForFetch(ctx context.Context) ([]*model.Feed, 
 		feed := &model.Feed{}
 		var faviconData []byte
 		var faviconMime, siteURL, etag, lastModified, errorMessage sql.NullString
+		var lastSuccessfulFetchAt sql.NullTime
 
 		if err := rows.Scan(
 			&feed.ID, &feed.FeedURL, &siteURL, &feed.Title,
 			&faviconData, &faviconMime,
 			&etag, &lastModified, &feed.FetchStatus, &feed.ConsecutiveErrors,
-			&errorMessage, &feed.NextFetchAt, &feed.CreatedAt, &feed.UpdatedAt,
+			&errorMessage, &feed.NextFetchAt, &lastSuccessfulFetchAt,
+			&feed.CreatedAt, &feed.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("フェッチ対象フィードの読み取りに失敗しました: %w", err)
 		}
@@ -205,6 +227,7 @@ func (r *PostgresFeedRepo) ListDueForFetch(ctx context.Context) ([]*model.Feed, 
 		feed.ETag = nullStringValue(etag)
 		feed.LastModified = nullStringValue(lastModified)
 		feed.ErrorMessage = nullStringValue(errorMessage)
+		feed.LastSuccessfulFetchAt = nullTimeValue(lastSuccessfulFetchAt)
 
 		feeds = append(feeds, feed)
 	}
