@@ -156,7 +156,7 @@
   - _Boundary: SearchResults_
   - _Depends: 7.2_
 
-- [ ] 8. `AppShell` / `ItemList` に検索バーと SearchResults の出し分けを統合する
+- [x] 8. `AppShell` / `ItemList` に検索バーと SearchResults の出し分けを統合する
   - `web/src/components/app-shell.tsx` のヘッダー領域に `HeaderSearchBar` を配置する
   - 右ペインを `state.isSearching ? <SearchResults /> : <ItemList .../>` で切替える
   - `web/src/components/item-list.tsx` の既存フィルタ群（「すべて／未読」等）と同列の上部領域に
