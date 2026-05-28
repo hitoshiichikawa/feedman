@@ -347,6 +347,87 @@ learning は改変しない。
     残る」UX を Task 8 の統合テストで確認する必要がある。違和感が出るなら CLEAR_SEARCH
     の reset を追加する（design.md 行 690 への揃え戻し）。
 
+### Task 7
+
+- 採用方針: 子タスク 7.1〜7.5 を順次実装し、検索 UI とフェッチ層を 5 ファイルで構成した
+  （`web/src/types/item.ts` への型追加 / `web/src/hooks/use-item-search.ts` フック /
+  `header-search-bar.tsx` / `feed-search-bar.tsx` / `search-results.tsx` 各コンポーネント
+  + それぞれの `.test.tsx`）。設計は design.md 行 516-655 の `HeaderSearchBar` /
+  `FeedSearchBar` / `SearchResults` / `useItemSearch` 疑似シグネチャに忠実に従い、既存
+  `use-items.ts` / `item-list.tsx` の `ItemRow` / `feed-list.tsx` の favicon パターンを
+  踏襲した。web テスト 30 ファイル / 276 ケース全 pass、ESLint errors 0、Go 全 21 パッケージ
+  green、go vet clean を確認済み。
+- 重要な判断:
+  - **`SearchScope` 型は `app-state.tsx` から re-export する形を採用**（Task 6 残存課題
+    の選択肢 (b)）。理由: UI 状態側の `app-state.tsx` が既に `SearchScope` を canonical
+    として export しており、`types/item.ts` 側で独自定義すると構造的に同一でも別型として
+    扱われるリスクがある。`export type { SearchScope } from "@/contexts/app-state"` で
+    re-export することで定義は 1 つに保たれ、`types/item.ts` を import する側からは
+    API レスポンス型と同じ場所に配置されているように見える利便性も得られる。
+  - **`useItemSearch` の `getNextPageParam` ガード**: design.md 行 650 は
+    `lastPage.has_more ? lastPage.next_cursor : undefined` のみだが、impl-notes Task 4 の
+    判断（NextCursor 末尾項目 PublishedAt がゼロ値のとき空文字を発行）に対応するため
+    `lastPage.has_more && lastPage.next_cursor ? lastPage.next_cursor : undefined` と
+    truthy 判定を追加した。空文字 cursor は無限ループの危険を孕むため、UI 側でガードして
+    「次ページあり判定だが cursor 未発行 = 次ページ取得を諦める」挙動とした。
+  - **`HeaderSearchBar` / `FeedSearchBar` のローカル状態と AppState の同期**: design.md の
+    疑似シグネチャは「ローカル状態に入力を保持し submit で AppState を更新」のみ示すが、
+    検索中にコンポーネントを再 mount したケース（例: 検索中に AppShell が再 render される
+    ケース）で AppState.searchQuery を初期値に反映する `useState(initial...)` パターンを
+    採用した。`HeaderSearchBar` は scope='global' のときのみ、`FeedSearchBar` は
+    scope='feed' かつ searchFeedId が当該 selectedFeedId と一致する場合のみ反映する。
+    これにより「検索バーが空白に戻ってしまうが結果は残っている」という UX 不整合を防ぐ。
+  - **`FeedSearchBar` の早期 return**: React hooks 規約に従い、`useState` を先に呼んでから
+    `if (selectedFeedId === null) return null` を実行する形にした。selectedFeedId が
+    途中で null に戻る再 render では useState の値が破棄されるが、selectedFeedId が
+    null になる経路は「フィードを未選択状態に戻す UI」が現状存在しないため実害なし。
+  - **`SearchResults` の `SearchResultRow` を `ItemList` の `ItemRow` と共通化しない**:
+    `ItemSummary` vs `ItemSearchHit` で構造体が異なり（後者は `feed_title` /
+    `favicon_url` を含み `hatebu_fetched_at` を欠く）、共通化すると generic 化と props
+    呼び分けの複雑度が増す。`design-principles.md` の「投機的抽象化を避ける」方針と
+    design.md 行 596-599 の「初版は重複容認」指針に従い、検索結果専用に
+    `SearchResultRow` を併設した。
+  - **`SearchResultFavicon` を feed-list の `FeedFavicon` と分離**: 検索結果カードは
+    情報密度が高くアイコン領域を最小化したいため、favicon URL が無い / 画像エラーの
+    場合は何も表示しない（feed-list の代替アイコン表示は採用しない）。alt 属性は
+    feed-list と同じ `${feedTitle} のアイコン` パターン。サイズは w-3.5 h-3.5 と
+    feed-list（w-4 h-4）よりやや小さくしている。
+  - **`SearchResultRow` の `published_at` null ハンドリング**: API レスポンス型では
+    `published_at: string | null` を許容するため（impl-notes Task 5 で確定）、null の
+    ケースで `new Date(null)` が `1970-01-01` になる事故を避けるべく明示的に分岐し、
+    `<time>` 要素を省略 +「日付不明」表示にフォールバックする。テストでも境界値として
+    1 ケース追加した。
+  - **テスト構造**: `header-search-bar` / `feed-search-bar` / `search-results` で
+    AppStateProvider 配下に Probe コンポーネントを置き、`useDispatchOnce` ヘルパーで
+    初回 mount 時に dispatch を 1 度だけ流すパターンを採用。`renderHook` で
+    AppState と HeaderSearchBar を別 Provider に分離する従来パターンよりも、
+    実際の使用に近い形でテストできる。
+  - **`<img>` の Next.js Image 警告**: `search-results.tsx:373` で `<img>` を使用しており
+    ESLint warning が出るが、既存の `feed-list.tsx:124` も同じ警告を残置している
+    （favicon は data URL であり Next.js Image による最適化対象外）。先行 task と
+    同一の判断として許容し、エラーは 0 件を維持。
+- 残存課題（次 task に影響する事項）:
+  - **Task 8 で `AppShell` / `ItemList` への統合**: 本 task では `HeaderSearchBar` /
+    `FeedSearchBar` / `SearchResults` の単体コンポーネントを作成しただけで、これらは
+    まだ `AppShell` / `ItemList` から呼ばれていない。Task 8 で
+    (a) `AppShell` のヘッダーに `HeaderSearchBar` を配置、(b) `AppShell` 右ペインを
+    `state.isSearching ? <SearchResults /> : <ItemList .../>` で切替、
+    (c) `ItemList` の Tabs の同列に `<FeedSearchBar />` を配置する統合作業が必要。
+  - **Task 8 の統合テストで `expandedItemId` の扱いに注意**: impl-notes Task 6 の判断で
+    `CLEAR_SEARCH` は `expandedItemId` を保持する（design.md 行 690 とは異なる挙動）
+    ため、検索解除後に展開状態が残ったまま `ItemList` に戻る UX が成立するかを Task 8
+    の統合テストで確認する。違和感が出るなら CLEAR_SEARCH の reducer に
+    `expandedItemId = null` を追加して揃え戻す判断もありうる。
+  - **Task 8 で `useItemSearch` の発火条件確認**: `SearchResults` は
+    `useItemSearch(state.searchQuery, state.searchScope, state.searchFeedId)` を
+    無条件で呼ぶが、`enabled` ガードで空クエリ / scope='feed' かつ feedId 不在では
+    fetch を発火しない。`AppShell` が `state.isSearching` で `SearchResults` を表示する
+    フロー（Task 8）と整合する。
+  - **Task 9（NFR 1.2 パフォーマンス測定）**: 本 task の `useItemSearch` は TanStack
+    Query の即時 `isLoading=true` により NFR 1.1（1 秒以内のローディング表示）を
+    満たすが、NFR 1.2 の体感応答性は Task 9 の `EXPLAIN ANALYZE` 計測タスクで別途
+    検証する（本 task のスコープ外、deferrable `- [ ]*`）。
+
 ## 確認事項
 
 - **`SET_SEARCH_QUERY` の `searchFeedId` 計算**: 本 task では `action.feedId ?? null`
