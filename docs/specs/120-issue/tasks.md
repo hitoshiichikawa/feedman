@@ -110,7 +110,7 @@
   - _Requirements: 1.5, 1.6, NFR 2.1, NFR 2.2_
 
 - [ ] 7. Web フロントエンドの検索 UI とフェッチ層を実装する
-- [ ] 7.1 `web/src/types/item.ts` に検索用の型を追加する (P)
+- [x] 7.1 `web/src/types/item.ts` に検索用の型を追加する (P)
   - `SearchScope = 'global' | 'feed'`
   - `ItemSearchHit`（`ItemSummary` 相当 + `feed_title: string` + `favicon_url: string | null`）
   - `ItemSearchResponse`（`items: ItemSearchHit[]`, `next_cursor: string | null`, `has_more: boolean`）
