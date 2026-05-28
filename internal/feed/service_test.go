@@ -182,6 +182,10 @@ func (m *mockFaviconFetcher) FetchFaviconForSite(_ context.Context, _ string) ([
 	return m.faviconData, m.faviconMime, m.err
 }
 
+func (m *mockFaviconFetcher) FetchFaviconWithFallback(_ context.Context, _ string) ([]byte, string, error) {
+	return m.faviconData, m.faviconMime, m.err
+}
+
 // mockDetector はテスト用のFeedDetectorモック。
 type mockDetector struct {
 	feedURL string
