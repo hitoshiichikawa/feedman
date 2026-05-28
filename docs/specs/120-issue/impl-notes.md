@@ -213,3 +213,71 @@ learning は改変しない。
   - **Task 5.5 の `app.go` wiring で、`itemsearch.NewSearchService(itemRepo, subRepo)`
     を呼び出す**形になる。`itemRepo` は `repository.ItemSearchRepository`（Task 3.1
     で追加済み）、`subRepo` は既存 `repository.SubscriptionRepository`（変更不要）。
+
+### Task 5
+
+- 採用方針: `GET /api/items/search` のハンドラ層 5 ファイル
+  （`item_search_handler.go` / `item_search_handler_test.go` / `router.go` /
+  `service_adapter.go` / `app.go`）を子タスク 5.1〜5.5 で順次実装し、
+  既存 `item_handler.go` の `UserIDFromContext` パターン・`subscription_handler.go` の
+  `data:<mime>;base64,...` data URL 化パターン・`service_adapter.go` の
+  Adapter + compile-time check パターンを全て踏襲した。
+- 重要な判断:
+  - **`ItemSearchServiceInterface` の戻り値型は `*itemSearchResponse`**（HTTP レスポンス型）
+    を採用した。tasks.md Task 5.1 の指示に従い、Service 層のドメイン型（`*itemsearch.SearchResult`）
+    を返すのではなく Adapter 層で API レスポンス型へ変換する。これにより favicon の
+    data URL 化責務（impl-notes Task 2 / Task 4 の決定）を Adapter 層に閉じ込め、
+    handler 層は HTTP 境界の責務（パース・認証・ログ）のみに集中できる。既存
+    `ItemServiceInterface` も同じパターン（`*itemListResult` を返す）で実装されており、
+    既存設計と整合する。
+  - **UUID 形式バリデーションは `github.com/google/uuid` の `uuid.Parse` を使用**。
+    既存コードベースで `uuid.Parse`/`uuid.MustParse` の利用例は無かったが、`go.mod` で
+    既に `github.com/google/uuid v1.6.0` が direct require されているため新規依存追加は
+    不要。なお `uuid.Parse` は dashes 無しの 32 hex 形式（`urn:uuid:` を除いた中身）も
+    妥当として受け付ける挙動があるため、handler テストの「UUID 不正」ケースには
+    `not-a-uuid` / `1234` / `zzzzzzzz-...` のような明確に妥当でない値のみを使用した
+    （実環境でも DB の `$N::uuid` cast が最終的なバリデーションを担うため、handler 層は
+    library に任せる方針で過剰検証しない）。
+  - **`/api/items/search` を `/api/items/{id}` より前に登録**。chi v5 は static segment
+    （`/search`）を `{id}` パターンよりも優先するため明示的な順序付けがなくても動作するが、
+    design.md と tasks.md の指示通り「保険的に明示順序」を採用した。テストでも
+    `withChiURLParam(id, "search")` のような誤発火パターンが起きないことを実装で保証する。
+  - **`limit` クエリのバリデーションを handler 層でも実施**（0 以下 / 非数値で 400）。
+    Service 層の `clampLimit` が 0 以下を `defaultSearchLimit` に倒すため、handler 層で
+    パースエラーを 400 に変換しなくても動作はするが、ユーザーに「明らかな入力ミス」を
+    silent fallback で隠す UX は望ましくないため明示エラーに倒した。`limit > maxSearchLimit`
+    の場合は handler 側で `maxSearchLimit` にクランプ（design.md「API Contract」節と
+    既存 `ListItems` の慣習に整合）。
+  - **空クエリ時の JSON レスポンス**: Service 層は `Items: nil` の `*SearchResult` を返すが、
+    JSON エンコード時に `nil` は `null` になってしまうため、handler 層で `result.Items == nil`
+    のときに `[]itemSearchHitResponse{}` を代入してから encode する。これで JSON は
+    `"items":[]` を返し、UI 側の「空配列分岐」が機械的に動作する（Req 1.5 / Req 4.3 の
+    UX 一貫性）。
+  - **`mockItemSearchService` 設計**: `internal/itemsearch/service_test.go` の
+    `mockItemSearchRepo` と同じ「呼び出し引数を `recordedSearchCall` スライスに記録」
+    パターンを採用。`searchFn` 未指定時は `&itemSearchResponse{Items: []itemSearchHitResponse{}}`
+    を返すデフォルト挙動とし、各テストで必要に応じて挙動を差し替える。これにより
+    「service が呼ばれない」アサート（401 / 400 / feed_id 不正 / limit 不正）が
+    `svc.callCount == 0` で機械的にチェックできる。
+  - **`go test ./...` 全 21 パッケージ green** で確認済み。`go build ./...` / `go vet ./...`
+    も clean。DB 結合テスト（Task 3.3）は `TEST_DATABASE_URL` 未設定で skip された
+    （ローカル環境に CI 用 Postgres が無いため）が、本 Task は mock service ベースで
+    DB 不要なため影響なし。
+- 残存課題（次 task に影響する事項）:
+  - **Task 6〜8 は Web フロントエンド実装**（`web/src/contexts/app-state.tsx` /
+    `web/src/components/header-search-bar.tsx` / `feed-search-bar.tsx` /
+    `search-results.tsx` / `app-shell.tsx` / `item-list.tsx` /
+    `web/src/hooks/use-item-search.ts`）。本 Task で確定した API レスポンス形状
+    （`items[].feed_title` / `items[].favicon_url`（data URL 形式 `*string` /
+    `omitempty`）/ `next_cursor` / `has_more`）と一致する型を `web/src/types/item.ts` に
+    定義する必要がある（Task 7.1）。
+  - 本 Task のクエリパラメータ仕様（`q` 必須に近い / `feed_id` 任意 / `cursor` 任意 /
+    `limit` 任意・既定 50・上限 200）に対し、`use-item-search.ts`（Task 7.2）が
+    `useInfiniteQuery` で `getNextPageParam: (lastPage) => lastPage.has_more ? lastPage.next_cursor : undefined`
+    を実装する前提（design.md ですでに記述）。`next_cursor` が空文字でも `has_more=true` の
+    ケース（末尾項目の `PublishedAt` がゼロ値）がありうるため、UI 側で空文字
+    `next_cursor` を「次ページなし」として扱うガードが必要（Service 層の判断と整合）。
+  - 本 Task の構造化ログ（`slog.Info("item search request", ...)`）は NFR 3.1 を満たすが、
+    クエリ本文は PII / ログ汚染回避のため出していない（長さのみ）。運用観察時に「特定
+    キーワードがヒットしないユーザー」のトラブルシュートを行う場合、別経路（DB 側の
+    `pg_stat_statements` 等）から `pattern` を引く必要がある点を覚えておく。
