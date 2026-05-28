@@ -42,7 +42,7 @@
     専用の scanner を用意する
   - 実装は SELECT 専用であり、items / item_states に UPDATE / INSERT を行わない（Req 5.3 の不変条件）
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.6, 3.1, 3.2, 3.4, 4.1, 4.2, 5.3_
-- [ ] 3.3 Repository 層の DB 結合テスト `internal/repository/postgres_item_repo_search_test.go` を追加する
+- [x] 3.3 Repository 層の DB 結合テスト `internal/repository/postgres_item_repo_search_test.go` を追加する
   - 既存 `postgres_subscription_repo_db_test.go` の Skip ガードパターン
     （`TEST_DATABASE_URL` 未設定時は `t.Skip`）を踏襲する
   - ケース（横断検索）: タイトル一致 / 本文一致 / 両方一致 / どちらも不一致 / 大文字小文字差 /
