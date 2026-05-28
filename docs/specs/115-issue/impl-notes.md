@@ -29,6 +29,19 @@
 
 残存課題: なし。Task 3（fetcher の成功経路で `UpdateLastSuccessfulFetchAt` を呼ぶ）/ Task 4（subscription.Service.ManualFetch オーケストレーション）が後続。
 
+### Task 3
+
+採用方針: `internal/worker/fetch/fetcher.go` の 304 / 200 OK 双方の `ApplySuccess` 呼び出し直後に、新規 private ヘルパ `(*Fetcher).recordLastSuccessfulFetch(ctx, feedID)` を 1 行ずつ呼ぶ形で `UpdateLastSuccessfulFetchAt` を発火。エラー時は `f.logger.Warn` で構造化ログを出力するだけで、フェッチ自体は成功扱いを維持する。
+
+重要な判断:
+- 呼び出しを 2 箇所にインラインで散らさず private ヘルパに集約（304 / 200 で同じ「成功時刻 + 警告ログ」の 5 行を二重に書くのを避け、CLAUDE.md の「単一責務」「処理は直線的に書く」と整合）。`time.Now()` の取得もヘルパ内で 1 箇所に閉じ込めた
+- 既存の `UpdateFetchState` 失敗時の対称構造（`f.logger.Error` + メトリクス記録）に倣わず、`f.logger.Warn` のみで止めた。理由は本機能の design「成功時刻の記録失敗で fetch 自体は成功扱いを維持」（手動経路のクールダウン判定がレガシー値で動作してもユーザー影響は「次回フェッチ可能になる時刻が少し早まる」だけで safe degradation）に従ったため。メトリクス記録は task 5（manual fetch カウンタ追加）の責務であり、自動経路で `update_state` 系の失敗カウンタを既存メトリクスに追加するのはスコープ外
+- 順序は **`ApplySuccess` → `recordLastSuccessfulFetch` → `UpdateFetchState`** とした。design.md「ApplySuccess 呼び出し直後」を字義通り採用。`UpdateFetchState` の前にしたのは、design.md「`UpdateFetchState` のシグネチャを変更しない後方互換最優先」「別クエリで発行する」記述を尊重し、`updated_at = now()` の二重更新は許容（実害なし）と判断したため
+- テスト用 `mockFeedRepo`（`scheduler_test.go` 内）に追加した可観測フィールドは `lastSuccessfulFetchAtCalls int` / `lastSuccessfulFetchAtFeedIDs []string` / `updateLastSuccessfulFetchAtFn func(...)` の 3 つ。`updateLastSuccessfulFetchAtFn` は failure 注入用（task 3.1 で「エラー時もフェッチ成功扱い」を検証するため）。既存テストはこの mock を fail パスから使用していないため後方互換に動作する
+- 異常系テストは 5 種類（バックオフ 500 / 停止 404 / SSRF 失敗 / パース失敗 / DB エラー注入）。`ApplySuccess` 経路を通らない全分岐をカバーし、`UpdateLastSuccessfulFetchAt` が誤って呼ばれないことを境界として明示
+
+残存課題: なし。Task 4（`subscription.Service.ManualFetch` から手動経路でも `UpdateLastSuccessfulFetchAt` を呼ぶ）が後続。本タスクで自動経路の成功時刻記録は確立されたので、手動経路は同じ feedRepo メソッドを再利用するだけで Req 2.4「自動と手動の成功時刻を同等扱い」が成立する。
+
 ## 補足
 
 - 本実装で追加した依存ライブラリはなし。標準 `database/sql` の `sql.NullTime` のみを利用
