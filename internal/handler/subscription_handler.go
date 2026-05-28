@@ -21,6 +21,9 @@ type SubscriptionServiceInterface interface {
 	Unsubscribe(ctx context.Context, userID, subscriptionID string) error
 	// ResumeFetch は停止中フィードのフェッチを再開する。
 	ResumeFetch(ctx context.Context, userID, subscriptionID string) (*subscriptionResponse, error)
+	// ManualFetch は指定購読のフィードを手動で同期フェッチする（Issue #115）。
+	// クールダウン中は FEED_COOLDOWN、行ロック競合時は FEED_FETCH_IN_PROGRESS を返す。
+	ManualFetch(ctx context.Context, userID, subscriptionID string) (*subscriptionResponse, error)
 }
 
 // SubscriptionHandler は購読管理のHTTPハンドラー。
@@ -168,6 +171,37 @@ func (h *SubscriptionHandler) ResumeFetch(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(sub)
 }
 
+// ManualFetch は指定購読のフィードを手動で同期フェッチする（Issue #115）。
+// POST /api/subscriptions/:id/fetch
+//
+// リクエストボディは不要（URL の path param のみで完結 / Req 1.7）。
+// 認証失敗時は 401（Req 1.4）、認可失敗時は 404（Req 1.5 / 1.6）を返す。
+// サービス層が返す APIError は handleServiceError 経由で HTTP マッピングされ、
+// クールダウン中は 429（FEED_COOLDOWN）、行ロック競合時は 409（FEED_FETCH_IN_PROGRESS）になる。
+func (h *SubscriptionHandler) ManualFetch(w http.ResponseWriter, r *http.Request) {
+	userID, err := middleware.UserIDFromContext(r.Context())
+	if err != nil {
+		middleware.WriteErrorResponse(w, http.StatusUnauthorized, &model.APIError{
+			Code:     "UNAUTHORIZED",
+			Message:  "認証が必要です。",
+			Category: "auth",
+			Action:   "ログインしてください。",
+		})
+		return
+	}
+
+	subscriptionID := chi.URLParam(r, "id")
+
+	sub, err := h.service.ManualFetch(r.Context(), userID, subscriptionID)
+	if err != nil {
+		handleServiceError(w, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(sub)
+}
+
 // SetupSubscriptionRoutes は購読管理関連のルーティングを設定したchi.Routerを返す。
 func SetupSubscriptionRoutes(service SubscriptionServiceInterface) http.Handler {
 	r := chi.NewRouter()
@@ -180,6 +214,7 @@ func SetupSubscriptionRoutes(service SubscriptionServiceInterface) http.Handler 
 			r.Delete("/", h.Unsubscribe)
 			r.Put("/settings", h.UpdateSettings)
 			r.Post("/resume", h.ResumeFetch)
+			r.Post("/fetch", h.ManualFetch)
 		})
 	})
 

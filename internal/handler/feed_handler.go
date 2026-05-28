@@ -286,6 +286,15 @@ func mapAPIErrorToHTTPStatus(apiErr *model.APIError) int {
 		return http.StatusBadRequest
 	case model.ErrCodeFeedNotStopped:
 		return http.StatusConflict
+	case model.ErrCodeFeedFetchInProgress:
+		// 行ロック競合（自動ワーカーまたは別手動フェッチが進行中）。
+		// 既存ドメイン衝突系（FEED_NOT_STOPPED / SUBSCRIPTION_LIMIT / DUPLICATE_SUBSCRIPTION）と
+		// 同じ 409 Conflict にマップする（Issue #115 Req 3.2 / design.md 既存慣習との整合）。
+		return http.StatusConflict
+	case model.ErrCodeFeedCooldown:
+		// 10 分クールダウン中の手動フェッチ拒否。HTTP 429 Too Many Requests にマップする
+		// （Issue #115 Req 2.1）。レスポンスボディの Details.retry_after_seconds に残り秒数を含める。
+		return http.StatusTooManyRequests
 	case model.ErrCodeUserNotFound:
 		return http.StatusNotFound
 	default:

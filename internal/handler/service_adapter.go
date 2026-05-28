@@ -60,6 +60,17 @@ func (a *SubscriptionServiceAdapter) ResumeFetch(ctx context.Context, userID, su
 	return &resp, nil
 }
 
+// ManualFetch は手動フェッチを実行し、更新後の購読情報を handler レスポンス型で返す（Issue #115）。
+// クールダウン中 / 行ロック競合時はサービス層が APIError を返し、本アダプタはそのまま透過する。
+func (a *SubscriptionServiceAdapter) ManualFetch(ctx context.Context, userID, subscriptionID string) (*subscriptionResponse, error) {
+	info, err := a.svc.ManualFetch(ctx, userID, subscriptionID)
+	if err != nil {
+		return nil, err
+	}
+	resp := toSubscriptionResponse(*info)
+	return &resp, nil
+}
+
 // toSubscriptionResponse はドメインのSubscriptionInfoをhandlerのレスポンス型に変換する。
 func toSubscriptionResponse(info subscription.SubscriptionInfo) subscriptionResponse {
 	return subscriptionResponse{
