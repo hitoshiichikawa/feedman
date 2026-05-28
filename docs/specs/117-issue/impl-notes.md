@@ -104,6 +104,56 @@ Limit  (cost=56.83..56.84 rows=5 width=1180) (actual time=0.230..0.233 rows=50 l
   （`items` への複合インデックス追加 or マテビュー化）は将来課題として残置可。本 Issue の
   Non-Goals 範囲内。
 
+### Task 2
+
+Service 層 `ListStarredItems` メソッドの追加と単体テスト。
+
+#### 採用方針
+
+- 既存 `ListItems` から `parseItemCursor` / `toItemSummary` / `buildItemListResult` の
+  3 ヘルパー関数を抽出し、両メソッドで共有する。`ListItems` 自身も新ヘルパー経由に
+  書き換えて、横断 API と単一フィード API のカーソル規約・has_more / next_cursor 算出
+  ロジックが恒久的に同一であることを構造的に保証する（NFR 3.1）。
+- `StarredItemSummary` は `ItemSummary` を struct embed し `FeedTitle string` を追加。
+  これにより既存 `ItemSummary` を変更せず、フロントエンド向けの追加フィールドを
+  純粋に「拡張」として表現できる（既存 API の応答スキーマを汚さない）。
+- `StarredItemListResult` は `ItemListResult` と同形（`Items` の型のみ差分）で、
+  handler 層が将来 JSON 化する際に既存型と並列扱いできる構造にした。
+
+#### 重要な判断
+
+- **ヘルパー化の粒度**: `buildItemListResult` は ItemListResult を直接組み立てる形にした
+  （StarredItemListResult 用の汎用化はせず）。理由: StarredItem 側は ItemSummary に
+  FeedTitle を併記する変換が必要で、ジェネリクスや interface 化で抽象化するより、
+  `ListStarredItems` 内で truncate / nextCursor 算出を直接書く方が読みやすいため。
+  共有しているのは「カーソルパース」「ItemWithState→ItemSummary 変換」の 2 点に絞り、
+  「limit+1 → has_more 判定 + nextCursor 算出」のロジックは StarredItemRow から
+  StarredItemSummary を生成する必要があるため ListStarredItems 内に複製した
+  （仕様上完全に同形のコードであり、両系統テストで挙動同一性を担保）。
+- **mockItemRepoForService の拡張**: `listStarredByUserFn` フィールドを追加。Task 1 で
+  upsert_test.go の `mockItemRepo` には固定戻り値 `(nil, nil)` のスタブを既に置いて
+  あったが、サービス層テストでは fixture を切り替える必要があるため、サービス層
+  専用 mock 側でフック関数を持つ形にした。
+- **テストケース構成**: task 指示の (a)〜(e) を以下にマップし、追加でカーソル伝搬を補強:
+  - (a): `TestItemService_ListStarredItems_EmptyCursor`（空カーソルで先頭ページ、
+    limit+1 が repository に渡る、userID が伝搬する、FeedTitle が summary に乗る）
+  - (b): `TestItemService_ListStarredItems_InvalidCursor`（パース失敗で INVALID_FILTER、
+    repository が呼ばれないことも検証）
+  - (c): `TestItemService_ListStarredItems_HasMoreTrue`（limit+1 件で has_more=true、
+    summaries が limit 件に切り詰められる、NextCursor が末尾の RFC3339Nano になる）
+  - (d): `TestItemService_ListStarredItems_HasMoreFalse`（limit 以下で has_more=false、
+    NextCursor が空文字列、複数フィードにまたがる FeedTitle が保持される）
+  - (e): `TestItemService_ListStarredItems_NextCursorRFC3339NanoFormat`
+    （nanosecond 精度で正確に往復可能なフォーマットであることを精密検証 / NFR 3.1）
+  - 追加: `TestItemService_ListStarredItems_CursorPassedToRepo`（cursorStr → time.Time
+    へのパース結果が repository 層にそのまま伝わることを検証 / Req 4.5）
+
+#### 残存課題
+
+- なし。Task 3（Handler 層）は本タスクの `StarredItemListResult` を受け取って
+  `starredItemListResult`（handler 層 JSON 応答型）に変換する予定。`ItemServiceInterface`
+  への `ListStarredItems` 追加は Task 3 の責務範囲。
+
 ## 確認事項
 
 なし（design.md / requirements.md と本実装に矛盾は確認されていない）。
