@@ -57,7 +57,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
   - _Boundary: AppState, StarredNavItem_
 
-- [ ] 7. Web: StarredItemList コンポーネントと AppShell 統合 (P)
+- [x] 7. Web: StarredItemList コンポーネントと AppShell 統合 (P)
   - `web/src/components/item-list.tsx` の `ItemRow` コンポーネントを export して再利用可能にする（既存挙動を変えない非破壊的変更）。`ItemDetailArea` も同様に export 候補
   - `web/src/components/starred-item-list.tsx` を新規作成し、`useStarredItems()` で取得した記事を `ItemRow` で表示する。ヘッダに「お気に入り」タイトル（要件 2.1）、各行に `feed_title` を併記（要件 2.4、タイトル直下に薄い文字色で 1 行）、Intersection Observer による無限スクロール（要件 2.5）、空状態「記事がありません」（要件 2.6）、エラー状態「記事の読み込みに失敗しました」（要件 2.7）、`useAppState().expandedItemId` 連携の排他展開（要件 2.8）を実装する
   - `web/src/components/app-shell.tsx` を修正し、左ペイン先頭に `StarredNavItem` を配置、右ペインを `state.selectedView` で `ItemList` と `StarredItemList` に切替える
