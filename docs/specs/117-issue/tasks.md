@@ -31,7 +31,7 @@
   - _Boundary: ItemHandler, ItemServiceAdapterFromDomain, Router_
   - _Depends: 2_
 
-- [ ] 4. Handler 層: 結合テスト（既存挙動の非干渉確認込み）
+- [x] 4. Handler 層: 結合テスト（既存挙動の非干渉確認込み）
   - `internal/handler/integration_test.go` に新規シナリオを追加する: (a) 認証クッキー付きで `GET /api/feeds/starred/items` を呼び、自ユーザーのスター記事のみが含まれる、(b) 他ユーザーが事前にスターした記事を一切返さない（NFR 2.1）、(c) スター 0 件ユーザーで `200 { items: [], has_more: false }`、(d) 不正 cursor で 400、(e) 未認証で 401
   - 既存 `GET /api/feeds/{id}/items` を `/starred` 追加後も同一フィクスチャで呼び出し、応答が変化しないこと（要件 5.1 / 5.3）を確認する回帰テストを 1 件追加する
   - 既存スター更新エンドポイント `PUT /api/items/{id}/state` の挙動が変化しないこと（要件 5.2）を、既存統合テスト群がそのまま green であることで担保する（追加テスト不要）
