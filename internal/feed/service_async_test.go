@@ -32,6 +32,10 @@ func (c *controllableFaviconFetcher) FetchFavicon(ctx context.Context, _ string)
 	return c.FetchFaviconForSite(ctx, "")
 }
 
+func (c *controllableFaviconFetcher) FetchFaviconWithFallback(ctx context.Context, _ string) ([]byte, string, error) {
+	return c.FetchFaviconForSite(ctx, "")
+}
+
 func (c *controllableFaviconFetcher) FetchFaviconForSite(ctx context.Context, _ string) ([]byte, string, error) {
 	c.mu.Lock()
 	c.called = true
@@ -311,6 +315,10 @@ type deadlineObservingFetcher struct {
 }
 
 func (d *deadlineObservingFetcher) FetchFavicon(ctx context.Context, _ string) ([]byte, string, error) {
+	return d.FetchFaviconForSite(ctx, "")
+}
+
+func (d *deadlineObservingFetcher) FetchFaviconWithFallback(ctx context.Context, _ string) ([]byte, string, error) {
 	return d.FetchFaviconForSite(ctx, "")
 }
 
