@@ -498,3 +498,5 @@ learning は改変しない。
   指示のみに従い `selectedFeedId` / `filter` のみ保持し、`expandedItemId` は触らない
   実装とした。design.md 行 690 は `expandedItemId = null` を含めると記述している
   ため、検索解除後に展開状態を残すか否かは UX レビュー時に再確認したい。
+
+STATUS: complete
