@@ -963,7 +963,7 @@ func TestSubscriptionHandler_ManualFetch_Unauthorized(t *testing.T) {
 // いずれの場合も SUBSCRIPTION_NOT_FOUND（404）を返すことを検証する（Req 1.5 / 1.6）。
 func TestSubscriptionHandler_ManualFetch_NotFound(t *testing.T) {
 	tests := []struct {
-		name string
+		name  string
 		subID string
 	}{
 		{"non-existent subID", "nonexistent"},
