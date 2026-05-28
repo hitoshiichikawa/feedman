@@ -119,7 +119,6 @@ func (m *mockFeedRepo) UpdateLastSuccessfulFetchAt(ctx context.Context, feedID s
 	return nil
 }
 
-
 type mockFeedFetcher struct {
 	fetchFn func(ctx context.Context, feed *model.Feed) error
 }
@@ -166,6 +165,9 @@ func (m *mockManualFetchTxBeginner) BeginManualFetchTx(ctx context.Context) (Man
 	return &mockManualFetchTx{}, nil
 }
 
+// mockManualFetchMetricsRecorder は metrics.MetricsCollector のテスト用モック。
+// ManualFetch が利用する 4 メソッドの呼び出し回数とラベル値（reason）を観測する。
+// 自動フェッチ系の 6 メソッドは ManualFetch から呼ばれないため no-op で interface を充足する。
 type mockManualFetchMetricsRecorder struct {
 	successCount      int
 	failureCount      int
@@ -188,8 +190,16 @@ func (m *mockManualFetchMetricsRecorder) RecordManualFetchLockConflict() {
 	m.lockConflictCount++
 }
 
-// --- テスト ---
+// MetricsCollector の自動フェッチ系メソッドは ManualFetch のコードパスから呼ばれない。
+// interface 充足のための no-op 実装。
+func (m *mockManualFetchMetricsRecorder) RecordFetchSuccess(_ string)        {}
+func (m *mockManualFetchMetricsRecorder) RecordFetchFailure(_, _ string)     {}
+func (m *mockManualFetchMetricsRecorder) RecordParseFailure(_ string)        {}
+func (m *mockManualFetchMetricsRecorder) RecordHTTPStatus(_ int)             {}
+func (m *mockManualFetchMetricsRecorder) RecordFetchLatency(_ time.Duration) {}
+func (m *mockManualFetchMetricsRecorder) RecordItemsUpserted(_ int)          {}
 
+// --- テスト ---
 
 // TestService_ListSubscriptions は購読一覧取得を検証する。
 func TestService_ListSubscriptions(t *testing.T) {
@@ -1156,4 +1166,3 @@ func TestService_ManualFetch_FetchError(t *testing.T) {
 		})
 	}
 }
-

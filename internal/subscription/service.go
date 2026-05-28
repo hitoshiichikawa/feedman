@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hitoshi/feedman/internal/metrics"
 	"github.com/hitoshi/feedman/internal/model"
 	"github.com/hitoshi/feedman/internal/repository"
 	"github.com/hitoshi/feedman/internal/worker/fetch"
@@ -33,16 +34,6 @@ type ManualFetchTx interface {
 	Tx() *sql.Tx
 	Commit() error
 	Rollback() error
-}
-
-// ManualFetchMetricsRecorder は ManualFetch が必要とする 4 種のメトリクス記録口を抽象化する。
-// task 5（metrics package 拡張）完了後、metrics.MetricsCollector を実装する型が自然に
-// 本 interface を充足する。本 task 単独で compile / test 可能にする目的でローカル subinterface を採用。
-type ManualFetchMetricsRecorder interface {
-	RecordManualFetchSuccess()
-	RecordManualFetchFailure(reason string)
-	RecordManualFetchCooldownRejected()
-	RecordManualFetchLockConflict()
 }
 
 // SQLManualFetchTxBeginner は *sql.DB をラップして ManualFetchTxBeginner を実装する。
@@ -96,7 +87,7 @@ type Service struct {
 	feedRepo        repository.FeedRepository
 	feedFetcher     fetch.FeedFetcherService
 	txBeginner      ManualFetchTxBeginner
-	metricsRecorder ManualFetchMetricsRecorder
+	metricsRecorder metrics.MetricsCollector
 }
 
 // NewService はServiceの新しいインスタンスを生成する。
@@ -109,7 +100,7 @@ func NewService(
 	feedRepo repository.FeedRepository,
 	feedFetcher fetch.FeedFetcherService,
 	txBeginner ManualFetchTxBeginner,
-	metricsRecorder ManualFetchMetricsRecorder,
+	metricsRecorder metrics.MetricsCollector,
 ) *Service {
 	return &Service{
 		subRepo:         subRepo,
@@ -312,7 +303,6 @@ func (s *Service) ResumeFetch(ctx context.Context, userID, subscriptionID string
 
 	return nil, model.NewSubscriptionNotFoundError(subscriptionID)
 }
-
 
 // ManualFetch は指定購読のフィードを手動で同期フェッチする。
 // クールダウン中は外部 HTTP を発行せず FEED_COOLDOWN を返し、
