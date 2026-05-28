@@ -112,6 +112,13 @@ func (m *mockMetricsCollector) RecordItemsUpserted(count int) {
 	m.lastItemsUpserted = count
 }
 
+// 手動フェッチ系（Issue #115）は worker fetcher から呼ばれないが、
+// MetricsCollector interface 充足のため no-op 実装する。
+func (m *mockMetricsCollector) RecordManualFetchSuccess()          {}
+func (m *mockMetricsCollector) RecordManualFetchFailure(_ string)  {}
+func (m *mockMetricsCollector) RecordManualFetchCooldownRejected() {}
+func (m *mockMetricsCollector) RecordManualFetchLockConflict()     {}
+
 // mockSSRFGuard はSSRFGuardServiceのテスト用モック。
 type mockSSRFGuard struct {
 	validateErr error

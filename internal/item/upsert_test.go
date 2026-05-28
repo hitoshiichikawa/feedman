@@ -1481,6 +1481,13 @@ func (m *mockMetricsCollector) RecordItemsUpserted(count int) {
 	m.lastItemsUpserted = count
 }
 
+// 手動フェッチ系（Issue #115）は upsert サービスから呼ばれないが、
+// MetricsCollector interface 充足のため no-op 実装する。
+func (m *mockMetricsCollector) RecordManualFetchSuccess()          {}
+func (m *mockMetricsCollector) RecordManualFetchFailure(_ string)  {}
+func (m *mockMetricsCollector) RecordManualFetchCooldownRejected() {}
+func (m *mockMetricsCollector) RecordManualFetchLockConflict()     {}
+
 // TestUpsertItems_Metrics_RecordsUpsertedCount は UPSERT 成功時に
 // 新規 + 更新の件数が RecordItemsUpserted に加算されることを検証する（Requirement 2.6）。
 func TestUpsertItems_Metrics_RecordsUpsertedCount(t *testing.T) {
