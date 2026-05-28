@@ -628,18 +628,112 @@ func bulkUpdateItems(ctx context.Context, tx *sql.Tx, items []*model.Item) error
 	return nil
 }
 
-// SearchByUserAndKeyword は記事検索を実行する。
-// 本実装は Task 3.2 で SQL 本体を実装する。本コミットでは ItemSearchRepository
-// インターフェース充足のためのスタブとして配置する。
+// SearchByUserAndKeyword は当該ユーザーが購読中のフィードに属する記事から
+// title または content がキーワードに部分一致するものを取得する。
+//
+// feedID が nil の場合は横断検索（購読中フィード全体）、非 nil の場合は
+// 当該フィードのみのフィード内検索を行う（SQL 上は `$3::uuid IS NULL` ガードで
+// 同一クエリ内で両モードを表現する）。pattern は ILIKE に渡す '%escaped%'
+// 形式を呼び出し側で組み立てる前提。
+//
+// cursorPublishedAt がゼロ値のときはカーソル条件を WHERE から外し先頭から取得する
+// （`$4::timestamptz IS NULL` ガードで実現）。非ゼロ値時は
+// (published_at, id) < (cursor) のタプル比較で安定したページネーションを行う。
+//
+// 本実装は SELECT 専用であり items / item_states / feeds / subscriptions に
+// UPDATE / INSERT を一切行わない（Req 5.3 の不変条件）。
 func (r *PostgresItemRepo) SearchByUserAndKeyword(
-	_ context.Context,
-	_, _ string,
-	_ *string,
-	_ string,
-	_ time.Time,
-	_ int,
+	ctx context.Context,
+	userID, pattern string,
+	feedID *string,
+	cursorID string,
+	cursorPublishedAt time.Time,
+	limit int,
 ) ([]model.ItemSearchHit, error) {
-	return nil, fmt.Errorf("SearchByUserAndKeyword は未実装です")
+	// $3 (feed_id): feedID == nil なら NULL、非 nil なら *feedID。
+	// SQL 側の `$3::uuid IS NULL OR i.feed_id = $3` ガードで横断 / フィード内を切り替える。
+	var feedIDArg interface{}
+	if feedID != nil {
+		feedIDArg = *feedID
+	} else {
+		feedIDArg = nil
+	}
+
+	// $4 (cursor published_at) / $5 (cursor id): cursorPublishedAt がゼロ値なら NULL。
+	// SQL 側の `$4::timestamptz IS NULL` ガードでカーソル条件を WHERE から外す。
+	var cursorPublishedAtArg interface{}
+	var cursorIDArg interface{}
+	if !cursorPublishedAt.IsZero() {
+		cursorPublishedAtArg = cursorPublishedAt
+		cursorIDArg = cursorID
+	} else {
+		cursorPublishedAtArg = nil
+		cursorIDArg = nil
+	}
+
+	const query = `
+		SELECT
+		    i.id, i.feed_id, i.title, i.link, i.summary,
+		    i.published_at, i.is_date_estimated, i.hatebu_count,
+		    f.title AS feed_title,
+		    f.favicon_data, f.favicon_mime,
+		    COALESCE(st.is_read, false)   AS is_read,
+		    COALESCE(st.is_starred, false) AS is_starred
+		FROM items i
+		JOIN subscriptions s
+		    ON s.feed_id = i.feed_id
+		   AND s.user_id = $1
+		JOIN feeds f
+		    ON f.id = i.feed_id
+		LEFT JOIN item_states st
+		    ON st.item_id = i.id
+		   AND st.user_id = $1
+		WHERE (i.title ILIKE $2 OR i.content ILIKE $2)
+		  AND ($3::uuid IS NULL OR i.feed_id = $3)
+		  AND ($4::timestamptz IS NULL
+		       OR (i.published_at, i.id) < ($4, $5::uuid))
+		ORDER BY i.published_at DESC NULLS LAST, i.id DESC
+		LIMIT $6`
+
+	rows, err := r.db.QueryContext(ctx, query,
+		userID, pattern, feedIDArg, cursorPublishedAtArg, cursorIDArg, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("記事検索の取得に失敗しました: %w", err)
+	}
+	defer rows.Close()
+
+	var hits []model.ItemSearchHit
+	for rows.Next() {
+		var hit model.ItemSearchHit
+		var link, summary, faviconMime sql.NullString
+		var publishedAt sql.NullTime
+
+		if err := rows.Scan(
+			&hit.ID, &hit.FeedID, &hit.Title, &link, &summary,
+			&publishedAt, &hit.IsDateEstimated, &hit.HatebuCount,
+			&hit.FeedTitle,
+			&hit.FaviconData, &faviconMime,
+			&hit.IsRead, &hit.IsStarred,
+		); err != nil {
+			return nil, fmt.Errorf("記事検索結果の走査に失敗しました: %w", err)
+		}
+
+		hit.Link = nullStringValue(link)
+		hit.Summary = nullStringValue(summary)
+		hit.FaviconMime = nullStringValue(faviconMime)
+		// items.published_at は NULLABLE。NULL の場合はゼロ値 time.Time{} を保持する。
+		if publishedAt.Valid {
+			hit.PublishedAt = publishedAt.Time
+		}
+
+		hits = append(hits, hit)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("記事検索結果の走査に失敗しました: %w", err)
+	}
+
+	return hits, nil
 }
 
 // compile-time interface check
