@@ -20,6 +20,7 @@ import (
 	"github.com/hitoshi/feedman/internal/handler"
 	"github.com/hitoshi/feedman/internal/hatebu"
 	"github.com/hitoshi/feedman/internal/item"
+	"github.com/hitoshi/feedman/internal/itemsearch"
 	"github.com/hitoshi/feedman/internal/logger"
 	"github.com/hitoshi/feedman/internal/metrics"
 	"github.com/hitoshi/feedman/internal/middleware"
@@ -130,6 +131,10 @@ func runServe(cfg *config.Config) error {
 
 	itemService := item.NewItemService(itemRepo, itemStateRepo)
 
+	// 記事検索ドメインサービス。itemRepo を ItemSearchRepository として、subRepo を
+	// SubscriptionRepository（feed_id 指定時の購読確認用）として注入する。
+	itemSearchService := itemsearch.NewSearchService(itemRepo, subRepo)
+
 	subService := subscription.NewService(subRepo, itemStateRepo, feedRepo)
 	// 退会処理は単一トランザクションで原子化する（途中失敗時は全ロールバック）。
 	txBeginner := repository.NewSQLTxBeginner(db)
@@ -140,6 +145,7 @@ func runServe(cfg *config.Config) error {
 	userServiceAdapter := handler.NewUserServiceAdapter(userService)
 	itemServiceAdapter := handler.NewItemServiceAdapter(itemService)
 	itemStateServiceAdapter := handler.NewItemStateServiceAdapter(itemStateRepo)
+	itemSearchServiceAdapter := handler.NewItemSearchServiceAdapter(itemSearchService)
 
 	// 6. SubscriptionDeleterアダプタの構築
 	subDeleterAdapter := handler.NewSubscriptionDeleterAdapter(subRepo, itemStateRepo)
@@ -192,6 +198,8 @@ func runServe(cfg *config.Config) error {
 
 		ItemService:      itemServiceAdapter,
 		ItemStateService: itemStateServiceAdapter,
+
+		ItemSearchService: itemSearchServiceAdapter,
 
 		SubscriptionService: subServiceAdapter,
 		UserService:         userServiceAdapter,
