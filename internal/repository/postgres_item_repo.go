@@ -628,6 +628,21 @@ func bulkUpdateItems(ctx context.Context, tx *sql.Tx, items []*model.Item) error
 	return nil
 }
 
+// SearchByUserAndKeyword は記事検索を実行する。
+// 本実装は Task 3.2 で SQL 本体を実装する。本コミットでは ItemSearchRepository
+// インターフェース充足のためのスタブとして配置する。
+func (r *PostgresItemRepo) SearchByUserAndKeyword(
+	_ context.Context,
+	_, _ string,
+	_ *string,
+	_ string,
+	_ time.Time,
+	_ int,
+) ([]model.ItemSearchHit, error) {
+	return nil, fmt.Errorf("SearchByUserAndKeyword は未実装です")
+}
+
 // compile-time interface check
 var _ ItemRepository = (*PostgresItemRepo)(nil)
 var _ HatebuItemRepository = (*PostgresItemRepo)(nil)
+var _ ItemSearchRepository = (*PostgresItemRepo)(nil)

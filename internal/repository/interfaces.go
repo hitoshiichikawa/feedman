@@ -156,6 +156,32 @@ type ExistingItems struct {
 	ByContentHash map[string]*model.Item
 }
 
+// ItemSearchRepository は記事検索向けの DB アクセス（横断検索 / フィード内検索の両モード）を提供する。
+// 既存 ItemRepository とは別インターフェースとして公開し、検索専用の射影モデル
+// model.ItemSearchHit を直接返す。実装上は PostgresItemRepo にメソッドを追加することで
+// 単一の DB ハンドルを共有する。
+type ItemSearchRepository interface {
+	// SearchByUserAndKeyword は当該ユーザーが購読中のフィードに属する記事から、
+	// title または content がキーワードに部分一致するものを取得する。
+	//
+	// feedID が nil の場合は横断検索（購読中フィード全体）、非 nil の場合は当該フィードに
+	// 限定したフィード内検索を行う。pattern は ILIKE に渡す '%escaped%' 形式の文字列を
+	// 呼び出し側で組み立てて渡す（LIKE メタ文字 %, _, \ のエスケープ責務は呼び出し側）。
+	//
+	// cursorPublishedAt がゼロ値の場合はカーソル条件を WHERE から外し先頭から取得する。
+	// 非ゼロ値の場合は (published_at, id) < (cursorPublishedAt, cursorID) のタプル比較で
+	// 安定したページネーションを行う。limit は実取得件数（HasMore 判定は呼び出し側で
+	// limit+1 件取得して行うため、本メソッドはその件数をそのまま LIMIT に適用する）。
+	SearchByUserAndKeyword(
+		ctx context.Context,
+		userID, pattern string,
+		feedID *string,
+		cursorID string,
+		cursorPublishedAt time.Time,
+		limit int,
+	) ([]model.ItemSearchHit, error)
+}
+
 // HatebuItemRepository ははてなブックマーク取得に必要な記事データ操作のインターフェース。
 type HatebuItemRepository interface {
 	// ListNeedingHatebuFetch ははてなブックマーク数の取得が必要な記事を取得する。
