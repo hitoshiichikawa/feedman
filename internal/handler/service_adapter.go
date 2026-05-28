@@ -132,6 +132,41 @@ func (a *ItemServiceAdapterFromDomain) ListItems(ctx context.Context, userID, fe
 	}, nil
 }
 
+// ListStarredItems は全フィード横断スター記事一覧を handler のレスポンス型で返す。
+// ドメイン層 *item.StarredItemListResult を handler 層 *starredItemListResult に変換する。
+// 各記事行に feed_title を併記する（Requirement 2.4 / 4.10）。
+func (a *ItemServiceAdapterFromDomain) ListStarredItems(ctx context.Context, userID, cursorStr string, limit int) (*starredItemListResult, error) {
+	result, err := a.svc.ListStarredItems(ctx, userID, cursorStr, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]starredItemSummaryResponse, len(result.Items))
+	for i, it := range result.Items {
+		items[i] = starredItemSummaryResponse{
+			itemSummaryResponse: itemSummaryResponse{
+				ID:              it.ID,
+				FeedID:          it.FeedID,
+				Title:           it.Title,
+				Link:            it.Link,
+				Summary:         it.Summary,
+				PublishedAt:     it.PublishedAt,
+				IsDateEstimated: it.IsDateEstimated,
+				IsRead:          it.IsRead,
+				IsStarred:       it.IsStarred,
+				HatebuCount:     it.HatebuCount,
+			},
+			FeedTitle: it.FeedTitle,
+		}
+	}
+
+	return &starredItemListResult{
+		Items:      items,
+		NextCursor: result.NextCursor,
+		HasMore:    result.HasMore,
+	}, nil
+}
+
 // GetItem は記事詳細を返す。
 func (a *ItemServiceAdapterFromDomain) GetItem(ctx context.Context, userID, itemID string) (*itemDetailResponse, error) {
 	detail, err := a.svc.GetItem(ctx, userID, itemID)
