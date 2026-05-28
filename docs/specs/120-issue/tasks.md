@@ -116,7 +116,7 @@
   - `ItemSearchResponse`（`items: ItemSearchHit[]`, `next_cursor: string | null`, `has_more: boolean`）
   - _Requirements: 4.2_
   - _Boundary: web/types/item.ts_
-- [ ] 7.2 `web/src/hooks/use-item-search.ts` を新規作成する (P)
+- [x] 7.2 `web/src/hooks/use-item-search.ts` を新規作成する (P)
   - design.md の `useItemSearch(query, scope, feedId)` シグネチャに従い `useInfiniteQuery` で
     `/api/items/search?q=...&limit=50&cursor=...` を呼ぶ（`scope === 'feed'` のとき `&feed_id=...` を付与）
   - `enabled: query.trim().length > 0 && !(scope === 'feed' && !feedId)` で空クエリ / 不正組合せを無効化する
