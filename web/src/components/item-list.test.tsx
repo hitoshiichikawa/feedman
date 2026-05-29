@@ -4,7 +4,25 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ItemList } from "./item-list";
 import type { ItemDetail, ItemListResponse } from "@/types/item";
+import type { Subscription } from "@/types/feed";
 import type { ReactNode } from "react";
+
+/** テスト用の購読一覧（手動更新ボタン用 subscription.id 解決のため） */
+const mockSubscriptions: Subscription[] = [
+  {
+    id: "sub-1",
+    user_id: "user-1",
+    feed_id: "feed-1",
+    feed_title: "テストフィード",
+    feed_url: "https://example.com/feed.xml",
+    favicon_url: null,
+    fetch_interval_minutes: 60,
+    feed_status: "active",
+    error_message: null,
+    unread_count: 1,
+    created_at: "2026-02-27T00:00:00Z",
+  },
+];
 
 // グローバルfetchのモック
 const mockFetch = vi.fn();
@@ -81,6 +99,12 @@ function setupMockFetch(response: ItemListResponse = mockItemsResponse) {
         json: async () => response,
       });
     }
+    if (typeof url === "string" && url === "/api/subscriptions") {
+      return Promise.resolve({
+        ok: true,
+        json: async () => mockSubscriptions,
+      });
+    }
     return Promise.resolve({
       ok: true,
       json: async () => ({}),
@@ -125,6 +149,9 @@ function setupMockFetchWithDetail(options?: {
   mockFetch.mockImplementation((url: string) => {
     if (typeof url === "string" && url.includes("/api/feeds/feed-1/items")) {
       return Promise.resolve({ ok: true, json: async () => mockItemsResponse });
+    }
+    if (typeof url === "string" && url === "/api/subscriptions") {
+      return Promise.resolve({ ok: true, json: async () => mockSubscriptions });
     }
     if (typeof url === "string" && url === `/api/items/${detailItemId}`) {
       if (options?.detailFails) {
@@ -729,6 +756,9 @@ describe("ItemList コンポーネント: 記事詳細の展開表示", () => {
           json: async () => mockItemsResponse,
         });
       }
+      if (typeof url === "string" && url === "/api/subscriptions") {
+        return Promise.resolve({ ok: true, json: async () => mockSubscriptions });
+      }
       if (url === "/api/items/item-1") {
         return Promise.resolve({ ok: true, json: async () => mockItemDetail });
       }
@@ -800,5 +830,356 @@ describe("ItemList コンポーネント: 記事詳細の展開表示", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("item-content")).not.toBeInTheDocument();
     });
+  });
+});
+
+/**
+ * 手動更新ボタン / バナー専用の mockFetch セットアップヘルパー。
+ *
+ * @param options.manualFetch - POST /api/subscriptions/sub-1/fetch のレスポンス制御
+ *   - `success`: 200 OK
+ *   - `cooldown`: 429 + FEED_COOLDOWN（details.retry_after_seconds=480）
+ *   - `inProgress`: 409 + FEED_FETCH_IN_PROGRESS
+ *   - `unauthorized`: 401 + UNAUTHORIZED
+ *   - `serverError`: 503 + INTERNAL_ERROR
+ *   - `networkError`: fetch reject（ネットワーク到達不能）
+ *   - `pending`: 永久 pending（isPending 検証用）
+ */
+function setupMockFetchForManualRefresh(options?: {
+  manualFetch?:
+    | "success"
+    | "cooldown"
+    | "inProgress"
+    | "unauthorized"
+    | "serverError"
+    | "networkError"
+    | "pending";
+}) {
+  const manualFetchKind = options?.manualFetch ?? "success";
+
+  mockFetch.mockImplementation((url: string, init?: RequestInit) => {
+    if (
+      typeof url === "string" &&
+      url === "/api/subscriptions/sub-1/fetch" &&
+      init?.method === "POST"
+    ) {
+      switch (manualFetchKind) {
+        case "success":
+          return Promise.resolve({ ok: true, json: async () => ({ id: "sub-1" }) });
+        case "cooldown":
+          return Promise.resolve({
+            ok: false,
+            status: 429,
+            json: async () => ({
+              error: {
+                code: "FEED_COOLDOWN",
+                message: "cooldown",
+                category: "feed",
+                action: "wait",
+                details: { retry_after_seconds: 480 },
+              },
+            }),
+          });
+        case "inProgress":
+          return Promise.resolve({
+            ok: false,
+            status: 409,
+            json: async () => ({
+              error: {
+                code: "FEED_FETCH_IN_PROGRESS",
+                message: "in progress",
+                category: "feed",
+                action: "wait",
+              },
+            }),
+          });
+        case "unauthorized":
+          return Promise.resolve({
+            ok: false,
+            status: 401,
+            json: async () => ({
+              error: {
+                code: "UNAUTHORIZED",
+                message: "session expired",
+                category: "auth",
+                action: "login",
+              },
+            }),
+          });
+        case "serverError":
+          return Promise.resolve({
+            ok: false,
+            status: 503,
+            json: async () => ({
+              error: {
+                code: "INTERNAL_ERROR",
+                message: "internal",
+                category: "system",
+                action: "retry",
+              },
+            }),
+          });
+        case "networkError":
+          return Promise.reject(new TypeError("Failed to fetch"));
+        case "pending":
+          return new Promise(() => {
+            /* never resolve */
+          });
+      }
+    }
+    if (typeof url === "string" && url.includes("/api/feeds/feed-1/items")) {
+      return Promise.resolve({ ok: true, json: async () => mockItemsResponse });
+    }
+    if (typeof url === "string" && url === "/api/subscriptions") {
+      return Promise.resolve({ ok: true, json: async () => mockSubscriptions });
+    }
+    return Promise.resolve({ ok: true, json: async () => ({}) });
+  });
+}
+
+describe("ItemList コンポーネント: 手動更新ボタン", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("フィード選択時に「フィードを更新」ボタンが表示されること（Req 5.1）", async () => {
+    // Arrange
+    setupMockFetchForManualRefresh();
+
+    // Act
+    render(
+      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      { wrapper: createWrapper() }
+    );
+
+    // Assert: subscription 解決待ちの後、ボタンが描画される
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "フィードを更新" })
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("ボタンクリックで POST /api/subscriptions/:id/fetch が発火すること（Req 5.3）", async () => {
+    // Arrange
+    setupMockFetchForManualRefresh();
+    const user = userEvent.setup();
+
+    render(
+      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      { wrapper: createWrapper() }
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "フィードを更新" })
+      ).toBeInTheDocument();
+    });
+
+    // Act
+    await user.click(screen.getByRole("button", { name: "フィードを更新" }));
+
+    // Assert
+    await waitFor(() => {
+      expect(mockFetch).toHaveBeenCalledWith(
+        "/api/subscriptions/sub-1/fetch",
+        expect.objectContaining({ method: "POST" })
+      );
+    });
+  });
+
+  it("mutation 進行中はボタンが disabled + animate-spin になること（Req 5.4 / 5.6）", async () => {
+    // Arrange: 永久 pending で進行中状態を維持する
+    setupMockFetchForManualRefresh({ manualFetch: "pending" });
+    const user = userEvent.setup();
+
+    render(
+      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      { wrapper: createWrapper() }
+    );
+
+    const button = await waitFor(() =>
+      screen.getByRole("button", { name: "フィードを更新" })
+    );
+
+    // Act
+    await user.click(button);
+
+    // Assert: disabled になり、内部の RotateCw アイコンに animate-spin が付く
+    await waitFor(() => {
+      expect(button).toBeDisabled();
+    });
+    expect(button).toHaveAttribute("aria-busy", "true");
+    const icon = button.querySelector("svg");
+    expect(icon).not.toBeNull();
+    expect(icon?.getAttribute("class") ?? "").toContain("animate-spin");
+  });
+
+  it("初期状態（mutation 未発火）ではバナーが表示されないこと", async () => {
+    // Arrange
+    setupMockFetchForManualRefresh();
+
+    // Act
+    render(
+      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      { wrapper: createWrapper() }
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("最新の記事タイトル")).toBeInTheDocument();
+    });
+
+    // Assert
+    expect(screen.queryByTestId("manual-refresh-banner")).not.toBeInTheDocument();
+  });
+
+  it("成功時にバナーが表示されないこと", async () => {
+    // Arrange
+    setupMockFetchForManualRefresh({ manualFetch: "success" });
+    const user = userEvent.setup();
+
+    render(
+      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      { wrapper: createWrapper() }
+    );
+
+    const button = await waitFor(() =>
+      screen.getByRole("button", { name: "フィードを更新" })
+    );
+
+    // Act
+    await user.click(button);
+    await waitFor(() => expect(button).not.toBeDisabled());
+
+    // Assert
+    expect(screen.queryByTestId("manual-refresh-banner")).not.toBeInTheDocument();
+  });
+
+  it("429 エラー時にクールダウン残り秒数を含むバナーが表示されること（Req 7.1）", async () => {
+    // Arrange
+    setupMockFetchForManualRefresh({ manualFetch: "cooldown" });
+    const user = userEvent.setup();
+
+    render(
+      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      { wrapper: createWrapper() }
+    );
+
+    const button = await waitFor(() =>
+      screen.getByRole("button", { name: "フィードを更新" })
+    );
+
+    // Act
+    await user.click(button);
+
+    // Assert
+    await waitFor(() => {
+      expect(screen.getByTestId("manual-refresh-banner")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("manual-refresh-banner")).toHaveTextContent(
+      /480 秒以内のため再試行できません/
+    );
+  });
+
+  it("409 エラー時に「現在フェッチ中です」バナーが表示されること（Req 7.2）", async () => {
+    setupMockFetchForManualRefresh({ manualFetch: "inProgress" });
+    const user = userEvent.setup();
+
+    render(
+      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      { wrapper: createWrapper() }
+    );
+
+    const button = await waitFor(() =>
+      screen.getByRole("button", { name: "フィードを更新" })
+    );
+
+    await user.click(button);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("manual-refresh-banner")).toHaveTextContent(
+        /現在フェッチ中です/
+      );
+    });
+  });
+
+  it("401 エラー時にセッション切れバナーが表示されること（Req 7.3）", async () => {
+    setupMockFetchForManualRefresh({ manualFetch: "unauthorized" });
+    const user = userEvent.setup();
+
+    render(
+      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      { wrapper: createWrapper() }
+    );
+
+    const button = await waitFor(() =>
+      screen.getByRole("button", { name: "フィードを更新" })
+    );
+
+    await user.click(button);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("manual-refresh-banner")).toHaveTextContent(
+        /セッションが切れました/
+      );
+    });
+  });
+
+  it("5xx エラー時に一時的失敗バナーが表示されること（Req 7.4）", async () => {
+    setupMockFetchForManualRefresh({ manualFetch: "serverError" });
+    const user = userEvent.setup();
+
+    render(
+      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      { wrapper: createWrapper() }
+    );
+
+    const button = await waitFor(() =>
+      screen.getByRole("button", { name: "フィードを更新" })
+    );
+
+    await user.click(button);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("manual-refresh-banner")).toHaveTextContent(
+        /一時的なエラーが発生しました/
+      );
+    });
+  });
+
+  it("ネットワークエラー時に一時的失敗バナーが表示されること（Req 7.4）", async () => {
+    setupMockFetchForManualRefresh({ manualFetch: "networkError" });
+    const user = userEvent.setup();
+
+    render(
+      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      { wrapper: createWrapper() }
+    );
+
+    const button = await waitFor(() =>
+      screen.getByRole("button", { name: "フィードを更新" })
+    );
+
+    await user.click(button);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("manual-refresh-banner")).toHaveTextContent(
+        /一時的なエラーが発生しました/
+      );
+    });
+  });
+
+  it("feedId=null のときはボタンを描画しないこと（Req 5.2）", () => {
+    // Arrange / Act: ItemList は feedId=null で早期 return するため、ボタンは構造的に存在しない
+    setupMockFetchForManualRefresh();
+    render(
+      <ItemList feedId={null} onSelectItem={() => {}} expandedItemId={null} />,
+      { wrapper: createWrapper() }
+    );
+
+    // Assert
+    expect(
+      screen.queryByRole("button", { name: "フィードを更新" })
+    ).not.toBeInTheDocument();
   });
 });
