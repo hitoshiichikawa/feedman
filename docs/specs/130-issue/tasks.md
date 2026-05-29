@@ -47,7 +47,7 @@
   - _Boundary: SubscriptionSettingsDialog_
   - _Depends: 3_
 
-- [ ] 5. AppShell: 設定ダイアログ状態管理と購読解除後の右ペインクリア統合
+- [x] 5. AppShell: 設定ダイアログ状態管理と購読解除後の右ペインクリア統合
   - `web/src/components/app-shell.tsx` に `const [settingsTarget, setSettingsTarget] = useState<Subscription | null>(null)` を追加する
   - `handleOpenSettings = (feed: Subscription) => setSettingsTarget(feed)` を定義し、`<FeedList onOpenSettings={handleOpenSettings} />` に渡す（AC 1.3）
   - `<SubscriptionSettingsDialog open={settingsTarget !== null} subscription={settingsTarget} onOpenChange={(open) => { if (!open) setSettingsTarget(null) }} onUnsubscribed={handleUnsubscribed} />` を 2 ペインの外（`<div data-testid="app-shell">` 直下）に配置する
