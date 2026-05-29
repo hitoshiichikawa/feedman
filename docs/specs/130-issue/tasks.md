@@ -8,7 +8,7 @@
   - _Requirements: 4.2, NFR 1.1_
   - _Boundary: AppState_
 
-- [ ] 2. FeedList: ホバー時ギアアイコン表示と `onOpenSettings` イベント発火
+- [x] 2. FeedList: ホバー時ギアアイコン表示と `onOpenSettings` イベント発火
   - `web/src/components/feed-list.tsx` の `FeedListProps` に `onOpenSettings: (subscription: Subscription) => void` を追加する
   - 行コンテナを既存 `<button>` から `<div role="button" tabIndex={0}>` に変更する。`onClick` で `onSelectFeed(feed.feed_id)` を呼び、`onKeyDown` で Enter / Space に対応する（ネスト button 回避のため。既存 `data-testid="feed-item-${id}"` / `data-selected` 属性は維持）
   - 行末尾に `<button type="button" data-testid="feed-settings-button-${id}" aria-label="${feed.feed_title} の設定">` を追加し、`lucide-react` の `Settings` アイコンを表示する
