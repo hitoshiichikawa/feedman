@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. `FeedSearchBar` の外部 searchQuery 同期 useEffect を追加する
+- [x] 1. `FeedSearchBar` の外部 searchQuery 同期 useEffect を追加する
   - `web/src/components/feed-search-bar.tsx` に `useEffect` を追加し、
     `state.isSearching && state.searchScope === 'feed' && state.searchFeedId === selectedFeedId`
     のとき `state.searchQuery` を `localQuery` に setLocalQuery で反映する（design.md
