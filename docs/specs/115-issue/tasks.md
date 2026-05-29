@@ -117,7 +117,7 @@
   - _Requirements: 5.3, 6.1, 6.2, 6.3, 7.5_
   - _Boundary: web hooks_
 
-- [ ] 7.2 ManualRefreshButton + ManualRefreshBanner を ItemList に統合
+- [x] 7.2 ManualRefreshButton + ManualRefreshBanner を ItemList に統合
   - `web/src/components/manual-refresh-banner.tsx` を新規作成。`error: ApiError | null` を受け取り、
     status / code 別の表示メッセージを返す純粋表示コンポーネント。429 のとき `details.retry_after_seconds` を本文に埋め込む
   - `web/src/components/item-list.tsx` を修正:
