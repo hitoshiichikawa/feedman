@@ -45,6 +45,18 @@
   - `open=false` で内容が render されないことのテストは、Dialog 自体が portal に render するため通常時 DOM に存在しないことを `queryByText` / `queryByTestId` で `not.toBeInTheDocument()` で検証。
 - 残存課題: なし。task 5 で `AppShell` が `settingsTarget` state を保持し本コンポーネントを wire する予定。本 task の Dialog wrapper は AppShell 側の state 設計（`Subscription | null`）と完全に整合している。
 
+### Task 5
+
+- 採用方針: design.md「AppShell（Modified）」節および tasks.md task 5 の指示通り、`web/src/components/app-shell.tsx` に `useState<Subscription | null>(null)` で `settingsTarget` ローカル state を追加し、`handleOpenSettings` / `handleUnsubscribed` ハンドラを実装。`<FeedList>` の `onOpenSettings` を task 2 の no-op から `handleOpenSettings` に差し替え、`<SubscriptionSettingsDialog>` を 2 ペイン領域の外（`<div data-testid="app-shell">` 直下、`</div>` の直前）に配置した。
+- 重要な判断:
+  - `settingsTarget` を `Subscription | null` で保持し、`open` 制御は `settingsTarget !== null` で導出する設計（design.md「Architecture Pattern & Boundary Map」と完全一致）。`subscription` も同 state から渡すことで、open と対象 subscription の状態整合性を 1 つの state で担保する（zombie state を作らない）。
+  - `handleUnsubscribed` 内で `dispatch({ type: "CLEAR_SELECTED_FEED" })` の後に `setSettingsTarget(null)` を呼ぶ順序とした。React の state 更新は同 turn でバッチされるため順序は視覚的影響を与えないが、ロジックの読みやすさとして「先に右ペインクリア判定 → 後にダイアログ閉鎖」というユーザーシナリオ順序に合わせた。
+  - AC 5.3 の構造的保証についてのコメントを `handleUnsubscribed` の JSDoc 内に明記した。SubscriptionSettings → SubscriptionSettingsDialog → AppShell の callback チェーン全体で「mutation `onSuccess` 内でのみ発火」が保たれているため、AppShell 側で明示的なエラー分岐は不要であることを将来の保守者向けに残した。
+  - `onOpenChange` の処理を `(open) => { if (!open) setSettingsTarget(null); }` とし、Esc / 外側クリックでの閉鎖でも `settingsTarget` を null に戻すことで購読解除を経由しない「単にダイアログを閉じる」経路も正しく動作するようにした（AC 2.5）。task 4 で実装した SubscriptionSettingsDialog 側の `onUnsubscribed → onOpenChange(false)` 順序とも整合する。
+  - 既存ハンドラ・2 ペインレイアウト・`ThemeToggle` 等は一切変更せず、追記のみで実装した（NFR 1.1）。既存 16 テスト（app-shell.test.tsx）が破壊されないことを `npm test` で確認済み。
+  - 統合テストは task 6 でカバーするため、本 task では追加テスト不要と判断（tasks.md task 5 の指示通り）。既存テストが全て pass し、AC は task 6 の統合テストで担保される。
+- 残存課題: なし。task 6 で AppShell の統合テスト（ホバー → ダイアログ → 解除 → 右ペインクリア / 非クリア / 失敗時の 5 シナリオ）を追加することで AC 1.3 / 4.2 / 4.3 / 5.3 のランタイム動作が直接検証される予定。
+
 ## 受入基準カバレッジ（task 1 分のみ）
 
 | Requirement | テスト |
