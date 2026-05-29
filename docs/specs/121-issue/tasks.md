@@ -34,7 +34,7 @@
   - _Boundary: crossfeed.Service_
   - _Depends: 2, 3_
 
-- [ ] 5. CrossFeedHandler と ルート登録、DI 配線 (P)
+- [x] 5. CrossFeedHandler と ルート登録、DI 配線 (P)
   - `internal/handler/crossfeed_handler.go` を新規作成: `CrossFeedServiceInterface`（`ListNewItems(ctx, userID, cursorStr, limit, overrideSince) (*NewItemsResult, error)` / `TouchLastSeen`）と `CrossFeedHandler` 構造体、`ListItems`（GET /api/items/cross-feed）/ `TouchLastSeen`（PUT /api/users/me/cross-feed-last-seen）ハンドラを実装。クエリパラメータ `cursor`（省略可）/ `limit`（省略時 50 / 上限 200 にクランプ）/ `since`（省略可、`time.Parse(time.RFC3339, v)` で parse 成功時のみ `overrideSince` として Service に渡す。失敗時は 400 INVALID_REQUEST）をパース。レスポンス DTO `crossFeedItemResponse`（`id, feed_id, feed_title, feed_favicon_url, title, link, summary, published_at, is_date_estimated, is_read, is_starred, hatebu_count`）と `crossFeedListResponse`（`items, next_cursor, has_more, since_time`）を定義。エラーは既存 `handleServiceError` 再利用
   - `internal/handler/service_adapter.go` に `CrossFeedServiceAdapter`（domain `crossfeed.NewItemsResult` → handler DTO 変換、`overrideSince *time.Time` を Service に転送）と compile-time interface check を追加
   - `internal/handler/router.go` の `RouterDeps` に `CrossFeedService CrossFeedServiceInterface` を追加し、認証必須グループ内に `r.Route("/api/items/cross-feed", ...)` と `r.Put("/api/users/me/cross-feed-last-seen", ...)` を登録（既存 `r.Route("/api/users", ...)` の Withdraw と同居）
