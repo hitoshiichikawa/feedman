@@ -38,6 +38,7 @@ func setupTestDB(t *testing.T) (*sql.DB, string) {
 
 	// クリーンアップ: 既存のテーブルとマイグレーション履歴を削除
 	cleanupSQL := `
+		DROP TABLE IF EXISTS user_cross_feed_views CASCADE;
 		DROP TABLE IF EXISTS sessions CASCADE;
 		DROP TABLE IF EXISTS user_settings CASCADE;
 		DROP TABLE IF EXISTS item_states CASCADE;
