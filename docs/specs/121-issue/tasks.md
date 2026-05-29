@@ -61,7 +61,7 @@
   - _Boundary: FeedList_
   - _Depends: 6_
 
-- [ ] 8. Frontend: useCrossFeedItems / useTouchCrossFeedLastSeen フックと型定義 (P)
+- [x] 8. Frontend: useCrossFeedItems / useTouchCrossFeedLastSeen フックと型定義 (P)
   - `web/src/types/crossfeed.ts` を新規作成し `CrossFeedItem`（既存 `ItemSummary` フィールド + `feed_id, feed_title, feed_favicon_url`）と `CrossFeedListResponse`（`items, next_cursor, has_more, since_time`）を定義
   - `web/src/hooks/use-cross-feed-items.ts` を新規作成: `useCrossFeedItems()` で AppStateContext から `crossFeedSessionSince` を読み出し、`useInfiniteQuery({ queryKey: ['cross-feed-items', crossFeedSessionSince ?? 'initial'], queryFn: ({ pageParam }) => apiClient.get<CrossFeedListResponse>('/api/items/cross-feed?limit=50' + (pageParam ? '&cursor=' + encodeURIComponent(pageParam) : '') + (crossFeedSessionSince ? '&since=' + encodeURIComponent(crossFeedSessionSince) : '')), getNextPageParam: (last) => last.has_more ? last.next_cursor : undefined, initialPageParam: null, staleTime: 0 })` を実装（Req 4.7）。`useTouchCrossFeedLastSeen()` で `useMutation({ mutationFn: () => apiClient.put('/api/users/me/cross-feed-last-seen') })` を実装
   - `web/src/hooks/use-cross-feed-items.test.tsx` に hook test 4 件以上: (a) `crossFeedSessionSince === null` のとき URL に `since` が含まれず `/api/items/cross-feed` を呼ぶ、(b) `crossFeedSessionSince !== null` のとき URL に `&since=<encoded>` が含まれる（Req 4.7）、(c) `crossFeedSessionSince` が変化したとき queryKey も変化し refetch が発火する、(d) `useTouchCrossFeedLastSeen` の mutate が PUT を送る（モック確認）
