@@ -10,9 +10,9 @@ import (
 	_ "github.com/lib/pq"
 )
 
-// insertTestItem はテスト用記事を items テーブルに挿入し、生成された ID を返す。
+// insertStarredTestItem はテスト用記事を items テーブルに挿入し、生成された ID を返す。
 // title / published_at を指定でき、スター記事一覧の並び順検証に利用する。
-func insertTestItem(t *testing.T, db *sql.DB, feedID, title string, publishedAt time.Time) string {
+func insertStarredTestItem(t *testing.T, db *sql.DB, feedID, title string, publishedAt time.Time) string {
 	t.Helper()
 	var itemID string
 	err := db.QueryRow(
@@ -26,9 +26,9 @@ func insertTestItem(t *testing.T, db *sql.DB, feedID, title string, publishedAt 
 	return itemID
 }
 
-// insertTestItemState はテスト用 item_states 行を挿入する。
+// insertStarredTestItemState はテスト用 item_states 行を挿入する。
 // is_read / is_starred を指定でき、スター解除済み・既読既スター記事等の状態組合せを表現できる。
-func insertTestItemState(t *testing.T, db *sql.DB, userID, itemID string, isRead, isStarred bool) {
+func insertStarredTestItemState(t *testing.T, db *sql.DB, userID, itemID string, isRead, isStarred bool) {
 	t.Helper()
 	_, err := db.Exec(
 		`INSERT INTO item_states (user_id, item_id, is_read, is_starred)
@@ -69,13 +69,13 @@ func TestPostgresItemRepo_ListStarredByUser(t *testing.T) {
 		feedB := insertTestFeedWithTitle(t, db, "https://example.com/feed-b.xml", "Feed B", "https://example.com/b", model.FetchStatusActive)
 
 		// 公開日時を 3 段階に分けて並び順を検証可能にする。
-		olderItem := insertTestItem(t, db, feedA, "old-article", base.Add(-2*time.Hour))
-		middleItem := insertTestItem(t, db, feedB, "mid-article", base.Add(-1*time.Hour))
-		newerItem := insertTestItem(t, db, feedA, "new-article", base)
+		olderItem := insertStarredTestItem(t, db, feedA, "old-article", base.Add(-2*time.Hour))
+		middleItem := insertStarredTestItem(t, db, feedB, "mid-article", base.Add(-1*time.Hour))
+		newerItem := insertStarredTestItem(t, db, feedA, "new-article", base)
 
-		insertTestItemState(t, db, user, olderItem, false, true)
-		insertTestItemState(t, db, user, middleItem, true, true) // is_read=true でもスターなら返る
-		insertTestItemState(t, db, user, newerItem, false, true)
+		insertStarredTestItemState(t, db, user, olderItem, false, true)
+		insertStarredTestItemState(t, db, user, middleItem, true, true) // is_read=true でもスターなら返る
+		insertStarredTestItemState(t, db, user, newerItem, false, true)
 
 		// Act
 		rows, err := repo.ListStarredByUser(ctx, user, time.Time{}, 50)
@@ -123,12 +123,12 @@ func TestPostgresItemRepo_ListStarredByUser(t *testing.T) {
 		userB := insertTestUser(t, db, "user-b@example.com")
 		feed := insertTestFeedWithTitle(t, db, "https://example.com/shared.xml", "Shared Feed", "", model.FetchStatusActive)
 
-		itemA := insertTestItem(t, db, feed, "article-a", base.Add(-1*time.Hour))
-		itemB := insertTestItem(t, db, feed, "article-b", base)
+		itemA := insertStarredTestItem(t, db, feed, "article-a", base.Add(-1*time.Hour))
+		itemB := insertStarredTestItem(t, db, feed, "article-b", base)
 
 		// userA は itemA のみスター、userB は itemB のみスター。
-		insertTestItemState(t, db, userA, itemA, false, true)
-		insertTestItemState(t, db, userB, itemB, false, true)
+		insertStarredTestItemState(t, db, userA, itemA, false, true)
+		insertStarredTestItemState(t, db, userB, itemB, false, true)
 
 		// Act: userA の一覧を取得する。
 		rows, err := repo.ListStarredByUser(ctx, userA, time.Time{}, 50)
@@ -153,11 +153,11 @@ func TestPostgresItemRepo_ListStarredByUser(t *testing.T) {
 		// Arrange: スター付き 1 件 + スター解除済み 1 件。
 		user := insertTestUser(t, db, "unstarred@example.com")
 		feed := insertTestFeedWithTitle(t, db, "https://example.com/mixed.xml", "Mixed Feed", "", model.FetchStatusActive)
-		starred := insertTestItem(t, db, feed, "starred-article", base)
-		unstarred := insertTestItem(t, db, feed, "unstarred-article", base.Add(-1*time.Hour))
+		starred := insertStarredTestItem(t, db, feed, "starred-article", base)
+		unstarred := insertStarredTestItem(t, db, feed, "unstarred-article", base.Add(-1*time.Hour))
 
-		insertTestItemState(t, db, user, starred, false, true)
-		insertTestItemState(t, db, user, unstarred, false, false) // 既読/スター無しの状態行
+		insertStarredTestItemState(t, db, user, starred, false, true)
+		insertStarredTestItemState(t, db, user, unstarred, false, false) // 既読/スター無しの状態行
 
 		// Act
 		rows, err := repo.ListStarredByUser(ctx, user, time.Time{}, 50)
@@ -187,12 +187,12 @@ func TestPostgresItemRepo_ListStarredByUser(t *testing.T) {
 		pubAtMid := base.Add(-1 * time.Hour)
 		pubAtFuture := base
 
-		past := insertTestItem(t, db, feed, "past", pubAtPast)
-		mid := insertTestItem(t, db, feed, "mid", pubAtMid)
-		future := insertTestItem(t, db, feed, "future", pubAtFuture)
-		insertTestItemState(t, db, user, past, false, true)
-		insertTestItemState(t, db, user, mid, false, true)
-		insertTestItemState(t, db, user, future, false, true)
+		past := insertStarredTestItem(t, db, feed, "past", pubAtPast)
+		mid := insertStarredTestItem(t, db, feed, "mid", pubAtMid)
+		future := insertStarredTestItem(t, db, feed, "future", pubAtFuture)
+		insertStarredTestItemState(t, db, user, past, false, true)
+		insertStarredTestItemState(t, db, user, mid, false, true)
+		insertStarredTestItemState(t, db, user, future, false, true)
 
 		// Act: cursor = pubAtMid を指定（境界条件: i.published_at < pubAtMid のみ返る）
 		rows, err := repo.ListStarredByUser(ctx, user, pubAtMid, 50)
@@ -228,9 +228,9 @@ func TestPostgresItemRepo_ListStarredByUser(t *testing.T) {
 		// Arrange: ユーザーとフィードはあるが、当該ユーザーはスターを付与していない。
 		user := insertTestUser(t, db, "no-star@example.com")
 		feed := insertTestFeedWithTitle(t, db, "https://example.com/no-star.xml", "No Star Feed", "", model.FetchStatusActive)
-		item := insertTestItem(t, db, feed, "article", base)
+		item := insertStarredTestItem(t, db, feed, "article", base)
 		// スターを付与しない（item_states を挿入しない or is_starred=false を挿入する）。
-		insertTestItemState(t, db, user, item, false, false)
+		insertStarredTestItemState(t, db, user, item, false, false)
 
 		// Act
 		rows, err := repo.ListStarredByUser(ctx, user, time.Time{}, 50)
@@ -251,12 +251,12 @@ func TestPostgresItemRepo_ListStarredByUser(t *testing.T) {
 
 		user := insertTestUser(t, db, "limit@example.com")
 		feed := insertTestFeedWithTitle(t, db, "https://example.com/limit.xml", "Limit Feed", "", model.FetchStatusActive)
-		item1 := insertTestItem(t, db, feed, "limit-item1", base)
-		item2 := insertTestItem(t, db, feed, "limit-item2", base.Add(-1*time.Hour))
-		item3 := insertTestItem(t, db, feed, "limit-item3", base.Add(-2*time.Hour))
-		insertTestItemState(t, db, user, item1, false, true)
-		insertTestItemState(t, db, user, item2, false, true)
-		insertTestItemState(t, db, user, item3, false, true)
+		item1 := insertStarredTestItem(t, db, feed, "limit-item1", base)
+		item2 := insertStarredTestItem(t, db, feed, "limit-item2", base.Add(-1*time.Hour))
+		item3 := insertStarredTestItem(t, db, feed, "limit-item3", base.Add(-2*time.Hour))
+		insertStarredTestItemState(t, db, user, item1, false, true)
+		insertStarredTestItemState(t, db, user, item2, false, true)
+		insertStarredTestItemState(t, db, user, item3, false, true)
 
 		// Act: limit=2 を指定
 		rows, err := repo.ListStarredByUser(ctx, user, time.Time{}, 2)
