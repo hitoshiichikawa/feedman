@@ -234,8 +234,10 @@ interface ManualRefreshButtonProps {
  *
  * 進行中は `aria-busy=true` / `disabled` で重複起動を防止し、Lucide `RotateCw`
  * アイコンに `animate-spin` を当てて視覚的なローディングを継続する（Req 5.4 / 5.5 / 5.6）。
+ *
+ * `FeedPaneHeader`（フィードペイン上部ヘッダ）から再利用するため export する（Issue #145 / Task 2.1）。
  */
-function ManualRefreshButton({
+export function ManualRefreshButton({
   subscriptionId,
   isPending,
   onClick,
