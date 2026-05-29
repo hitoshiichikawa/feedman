@@ -7,6 +7,7 @@ import { FeedList } from "@/components/feed-list";
 import { FeedRegisterDialog } from "@/components/feed-register-dialog";
 import { HeaderSearchBar } from "@/components/header-search-bar";
 import { ItemList } from "@/components/item-list";
+import { FeedPaneHeader } from "@/components/feed-pane-header";
 import { CrossFeedItemList } from "@/components/cross-feed-item-list";
 import { StarredItemList } from "@/components/starred-item-list";
 import { StarredNavItem } from "@/components/starred-nav-item";
@@ -140,22 +141,55 @@ export function AppShell() {
         {/* 右ペイン: 記事一覧 + 記事詳細（検索モード時は SearchResults に切り替わり、通常時は selectedView で切替 / Req 1.3 / 2.x / 4.7） */}
         <main data-testid="right-pane" className="flex-1 overflow-hidden">
           <div className="flex flex-col h-full">
-            {/* 右ペイン分岐の優先順位（Issue #121 / impl-notes Task 6 確認事項に従う）:
+            {/* 右ペイン分岐の優先順位（Issue #145 / design.md「`app-shell.tsx`（修正）」節）:
                 isSearching > selectedView==='starred' > viewMode==='cross-feed' > 既存 ItemList
                 viewMode==='cross-feed' は SELECT_ALL_NEW_ITEMS によって selectedView='feed' に
-                倒されているため、本分岐は selectedView==='feed' 文脈で評価される。 */}
+                倒されているため、本分岐は selectedView==='feed' 文脈で評価される。
+
+                Issue #145 追加: isSearching && searchScope === 'feed' && searchFeedId !== null
+                の枝で <FeedPaneHeader mode="search-feed" ...> を <SearchResults /> の上に挿入し、
+                フィード内検索結果表示中もフィード内検索バーを画面に残す（Req 1.1）。
+                isSearching && searchScope === 'global' は従来どおり <SearchResults /> のみ（Req 2.1）。
+                selectedFeedId !== null の通常一覧枝では <FeedPaneHeader mode="normal" ...> を
+                <ItemList /> の上に挿入し、従来 ItemList 内部にあったフィードヘッダ要素群を
+                FeedPaneHeader に移譲した責務に対応する（Req 3.4 / NFR 1.2）。 */}
             {state.isSearching ? (
-              <SearchResults />
+              state.searchScope === "feed" && state.searchFeedId !== null ? (
+                <>
+                  <FeedPaneHeader
+                    mode="search-feed"
+                    feedId={state.searchFeedId}
+                  />
+                  <SearchResults />
+                </>
+              ) : (
+                <SearchResults />
+              )
             ) : state.selectedView === "starred" ? (
               <StarredItemList />
             ) : state.viewMode === "cross-feed" ? (
               <CrossFeedItemList />
+            ) : state.selectedFeedId !== null ? (
+              <>
+                <FeedPaneHeader
+                  mode="normal"
+                  feedId={state.selectedFeedId}
+                  filter={state.filter}
+                  onFilterChange={(filter) =>
+                    dispatch({ type: "SET_FILTER", filter })
+                  }
+                />
+                <ItemList
+                  feedId={state.selectedFeedId}
+                  onSelectItem={handleSelectItem}
+                  expandedItemId={state.expandedItemId}
+                  filter={state.filter}
+                />
+              </>
             ) : (
-              <ItemList
-                feedId={state.selectedFeedId}
-                onSelectItem={handleSelectItem}
-                expandedItemId={state.expandedItemId}
-              />
+              <div className="flex items-center justify-center h-full text-sm text-muted-foreground">
+                フィードを選択してください
+              </div>
             )}
             {/* 記事詳細は ItemList / StarredItemList / SearchResults 内の展開で表示する。
                 展開記事の詳細表示はItemDetailコンポーネントとして

@@ -737,6 +737,378 @@ describe("AppShell コンポーネント", () => {
     ).not.toBeInTheDocument();
   });
 
+  // -----------------------------------------------------------------------
+  // フィード内検索の連続操作統合テスト（Task 5 / Issue #145）
+  //
+  // フィード内検索の結果表示中もフィード内検索バーが画面に残り、再編集 → 再検索の
+  // 連続操作が単一画面で完結することを 9 ケースで検証する。fetch モックは既存
+  // `setupMockFetch` を踏襲し、`/api/feeds/:id/items` / `/api/items/search` は空応答を
+  // 返す前提（描画されるリスト本体は空状態 / 空 SearchResults）。
+  //
+  // テスト戦略:
+  // - `feed-search-bar` testid の有無で「フィード内検索バーが画面上にあるか」を判定
+  //   （Req 1.1 / 2.1 / 2.3）
+  // - `feed-search-input` の DOM value で「現在の検索キーワード反映」を判定（Req 1.2）
+  // - mockFetch.mock.calls の URL 引数の `q=<キーワード>` 有無で「新しい検索が発火されたか」
+  //   を判定（Req 1.3, 1.4）
+  // - クリアボタン押下後に `search-results-empty` が消えて「全て」タブが復活することで
+  //   「通常一覧に戻った」を判定（Req 1.6, NFR 1.1）
+  // -----------------------------------------------------------------------
+  describe("フィード内検索の連続操作（Task 5 / Issue #145）", () => {
+    /**
+     * 直近の `/api/items/search` リクエスト URL から `q=` パラメータを抽出する。
+     * fetch モックの呼び出し履歴から検索キーワード遷移を観測するヘルパ。
+     */
+    function lastSearchQuery(): string | null {
+      const calls = mockFetch.mock.calls
+        .map(([url]) => url as string)
+        .filter(
+          (url) =>
+            typeof url === "string" && url.startsWith("/api/items/search")
+        );
+      if (calls.length === 0) return null;
+      const last = calls[calls.length - 1];
+      const queryString = last.substring(last.indexOf("?") + 1);
+      const params = new URLSearchParams(queryString);
+      return params.get("q");
+    }
+
+    it("(1) フィード選択 → キーワード入力 → Enter で SearchResults と feed-search-bar が同時に表示されること（Req 1.1）", async () => {
+      const user = userEvent.setup();
+      render(<AppShell />, { wrapper: createWrapper() });
+
+      // フィード Tech Blog を選択
+      await waitFor(() => {
+        expect(screen.getByText("Tech Blog")).toBeInTheDocument();
+      });
+      await user.click(screen.getByText("Tech Blog"));
+
+      // 通常一覧（FeedPaneHeader normal モード）が描画される
+      await waitFor(() => {
+        expect(screen.getByRole("tab", { name: "全て" })).toBeInTheDocument();
+      });
+
+      // フィード内検索バーで「typescript」を入力 → Enter で検索実行
+      const feedSearchInput = screen.getByTestId("feed-search-input");
+      await user.type(feedSearchInput, "typescript");
+      await user.keyboard("{Enter}");
+
+      // SearchResults が表示される（空結果なので空状態 testid）
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("search-results-empty")
+        ).toBeInTheDocument();
+      });
+
+      // 同時に feed-search-bar testid も画面上に残っている（Req 1.1）
+      expect(screen.getByTestId("feed-search-bar")).toBeInTheDocument();
+    });
+
+    it("(2) 検索結果表示中に feed-search-input の value が現在の検索キーワードを反映していること（Req 1.2）", async () => {
+      const user = userEvent.setup();
+      render(<AppShell />, { wrapper: createWrapper() });
+
+      await waitFor(() => {
+        expect(screen.getByText("Tech Blog")).toBeInTheDocument();
+      });
+      await user.click(screen.getByText("Tech Blog"));
+
+      await waitFor(() => {
+        expect(screen.getByRole("tab", { name: "全て" })).toBeInTheDocument();
+      });
+
+      const feedSearchInput = screen.getByTestId("feed-search-input");
+      await user.type(feedSearchInput, "kubernetes");
+      await user.keyboard("{Enter}");
+
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("search-results-empty")
+        ).toBeInTheDocument();
+      });
+
+      // 検索結果表示中に再度 input を取得し、value が "kubernetes" を反映している
+      const inputAfter = screen.getByTestId(
+        "feed-search-input"
+      ) as HTMLInputElement;
+      expect(inputAfter.value).toBe("kubernetes");
+    });
+
+    it("(3) 検索結果表示中に input を編集 → Enter で useItemSearch の queryKey が更新され新キーワードで fetch される（Req 1.3, 1.4）", async () => {
+      const user = userEvent.setup();
+      render(<AppShell />, { wrapper: createWrapper() });
+
+      await waitFor(() => {
+        expect(screen.getByText("Tech Blog")).toBeInTheDocument();
+      });
+      await user.click(screen.getByText("Tech Blog"));
+
+      await waitFor(() => {
+        expect(screen.getByRole("tab", { name: "全て" })).toBeInTheDocument();
+      });
+
+      // 初回検索: "typescript"
+      const feedSearchInput = screen.getByTestId("feed-search-input");
+      await user.type(feedSearchInput, "typescript");
+      await user.keyboard("{Enter}");
+
+      await waitFor(() => {
+        expect(lastSearchQuery()).toBe("typescript");
+      });
+
+      // 検索結果表示中に input を編集（既存値を一旦クリアしてから上書き）
+      const inputDuringSearch = screen.getByTestId(
+        "feed-search-input"
+      ) as HTMLInputElement;
+      await user.clear(inputDuringSearch);
+      await user.type(inputDuringSearch, "kubernetes");
+
+      // onChange が追随していること（Req 1.3）
+      expect(inputDuringSearch.value).toBe("kubernetes");
+
+      // Enter で新しい検索を実行
+      await user.keyboard("{Enter}");
+
+      // mockFetch の最新 search 呼び出しが新キーワード "kubernetes" を含む（Req 1.4）
+      await waitFor(() => {
+        expect(lastSearchQuery()).toBe("kubernetes");
+      });
+    });
+
+    it("(4) 検索結果表示中に input を空にして Enter → 検索結果表示が維持されること（Req 1.5）", async () => {
+      const user = userEvent.setup();
+      render(<AppShell />, { wrapper: createWrapper() });
+
+      await waitFor(() => {
+        expect(screen.getByText("Tech Blog")).toBeInTheDocument();
+      });
+      await user.click(screen.getByText("Tech Blog"));
+
+      await waitFor(() => {
+        expect(screen.getByRole("tab", { name: "全て" })).toBeInTheDocument();
+      });
+
+      // 検索を実行 → SearchResults 表示
+      const feedSearchInput = screen.getByTestId("feed-search-input");
+      await user.type(feedSearchInput, "typescript");
+      await user.keyboard("{Enter}");
+
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("search-results-empty")
+        ).toBeInTheDocument();
+      });
+
+      // 入力欄を空にして Enter（空入力 submit は dispatch されない / Req 1.5）
+      const inputDuringSearch = screen.getByTestId(
+        "feed-search-input"
+      ) as HTMLInputElement;
+      await user.clear(inputDuringSearch);
+      expect(inputDuringSearch.value).toBe("");
+
+      await user.keyboard("{Enter}");
+
+      // 検索結果表示は維持される（SearchResults 空状態が依然として表示されている）
+      // 通常一覧のフィルタタブは再表示されない（モードが切り替わっていないことの裏付け）
+      expect(screen.getByTestId("search-results-empty")).toBeInTheDocument();
+      expect(screen.queryByRole("tab", { name: "全て" })).not.toBeInTheDocument();
+      // feed-search-bar 自体は引き続き存在
+      expect(screen.getByTestId("feed-search-bar")).toBeInTheDocument();
+    });
+
+    it("(5) 検索結果表示中にクリアボタン押下 → 通常一覧（ItemList）に戻り選択フィードと filter が保持されること（Req 1.6, NFR 1.1）", async () => {
+      const user = userEvent.setup();
+      render(<AppShell />, { wrapper: createWrapper() });
+
+      await waitFor(() => {
+        expect(screen.getByText("Tech Blog")).toBeInTheDocument();
+      });
+      await user.click(screen.getByText("Tech Blog"));
+
+      await waitFor(() => {
+        expect(screen.getByRole("tab", { name: "全て" })).toBeInTheDocument();
+      });
+
+      // 通常一覧で filter を "未読" に切替（filter 保持の検証準備）
+      await user.click(screen.getByRole("tab", { name: "未読" }));
+      await waitFor(() => {
+        expect(screen.getByRole("tab", { name: "未読" })).toHaveAttribute(
+          "data-state",
+          "active"
+        );
+      });
+
+      // フィード内検索を実行
+      const feedSearchInput = screen.getByTestId("feed-search-input");
+      await user.type(feedSearchInput, "typescript");
+      await user.keyboard("{Enter}");
+
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("search-results-empty")
+        ).toBeInTheDocument();
+      });
+
+      // クリアボタン押下（× アイコン）→ 通常一覧へ戻る（Req 1.6）
+      await user.click(screen.getByTestId("feed-search-clear"));
+
+      await waitFor(() => {
+        // フィルタタブが再表示される = ItemList（通常一覧）に戻った
+        expect(screen.getByRole("tab", { name: "全て" })).toBeInTheDocument();
+      });
+
+      // SearchResults は撤去された
+      expect(
+        screen.queryByTestId("search-results-empty")
+      ).not.toBeInTheDocument();
+
+      // 選択フィードが保持されている（feed-1 = Tech Blog / sub-1）
+      expect(screen.getByTestId("feed-item-sub-1")).toHaveAttribute(
+        "data-selected",
+        "true"
+      );
+
+      // filter "未読" が保持されている（NFR 1.1 の通常利用挙動の非回帰）
+      expect(screen.getByRole("tab", { name: "未読" })).toHaveAttribute(
+        "data-state",
+        "active"
+      );
+    });
+
+    it("(6) 横断検索結果表示中（HeaderSearchBar から submit）に feed-search-bar testid が画面上に存在しないこと（Req 2.1）", async () => {
+      const user = userEvent.setup();
+      render(<AppShell />, { wrapper: createWrapper() });
+
+      // フィード未選択のままヘッダー横断検索バーから submit
+      await waitFor(() => {
+        expect(screen.getByTestId("header-search-input")).toBeInTheDocument();
+      });
+
+      const headerInput = screen.getByTestId("header-search-input");
+      await user.type(headerInput, "typescript");
+      await user.keyboard("{Enter}");
+
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("search-results-empty")
+        ).toBeInTheDocument();
+      });
+
+      // フィード内検索バーは表示されない（横断検索結果中なので Req 2.1）
+      expect(
+        screen.queryByTestId("feed-search-bar")
+      ).not.toBeInTheDocument();
+    });
+
+    it("(7) フィード内検索結果表示中に左ペインで別フィードを選択 → 検索解除 → 選択先フィードの通常一覧が表示されること（Req 2.2）", async () => {
+      const user = userEvent.setup();
+      render(<AppShell />, { wrapper: createWrapper() });
+
+      await waitFor(() => {
+        expect(screen.getByText("Tech Blog")).toBeInTheDocument();
+        expect(screen.getByText("News Feed")).toBeInTheDocument();
+      });
+
+      // フィード A (Tech Blog) を選択し、フィード内検索を実行
+      await user.click(screen.getByText("Tech Blog"));
+      await waitFor(() => {
+        expect(screen.getByRole("tab", { name: "全て" })).toBeInTheDocument();
+      });
+
+      const feedSearchInput = screen.getByTestId("feed-search-input");
+      await user.type(feedSearchInput, "typescript");
+      await user.keyboard("{Enter}");
+
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("search-results-empty")
+        ).toBeInTheDocument();
+      });
+      expect(screen.getByTestId("feed-search-bar")).toBeInTheDocument();
+
+      // 左ペインで別フィード (News Feed / feed-2) を選択 → SELECT_FEED で検索状態は解除される
+      await user.click(screen.getByText("News Feed"));
+
+      // 選択先フィードの通常一覧（フィルタタブ + feed-search-bar）が再表示される
+      await waitFor(() => {
+        expect(screen.getByRole("tab", { name: "全て" })).toBeInTheDocument();
+      });
+      expect(screen.getByTestId("feed-search-bar")).toBeInTheDocument();
+
+      // 検索結果表示は解除される
+      expect(
+        screen.queryByTestId("search-results-empty")
+      ).not.toBeInTheDocument();
+
+      // 選択先フィード（sub-2）が選択中になっている
+      expect(screen.getByTestId("feed-item-sub-2")).toHaveAttribute(
+        "data-selected",
+        "true"
+      );
+    });
+
+    it("(8) 初期状態（フィード未選択）で feed-search-bar testid が存在しないこと（Req 2.3）", async () => {
+      render(<AppShell />, { wrapper: createWrapper() });
+
+      // 初期状態の右ペインが描画されるのを待つ
+      await waitFor(() => {
+        expect(
+          screen.getByText("フィードを選択してください")
+        ).toBeInTheDocument();
+      });
+
+      // フィード未選択時はフィード内検索バーが画面に存在しない（Req 2.3）
+      expect(
+        screen.queryByTestId("feed-search-bar")
+      ).not.toBeInTheDocument();
+
+      // ヘッダー横断検索バーは別物なので引き続き存在する（既存 Req 3.1 の非回帰確認）
+      expect(screen.getByTestId("header-search-bar")).toBeInTheDocument();
+    });
+
+    it("(9) フィード内検索結果表示中の SearchResults 空状態 DOM 構造が本変更導入前と同一であること（NFR 1.2）", async () => {
+      const user = userEvent.setup();
+      render(<AppShell />, { wrapper: createWrapper() });
+
+      await waitFor(() => {
+        expect(screen.getByText("Tech Blog")).toBeInTheDocument();
+      });
+      await user.click(screen.getByText("Tech Blog"));
+
+      await waitFor(() => {
+        expect(screen.getByRole("tab", { name: "全て" })).toBeInTheDocument();
+      });
+
+      // フィード内検索を実行
+      const feedSearchInput = screen.getByTestId("feed-search-input");
+      await user.type(feedSearchInput, "typescript");
+      await user.keyboard("{Enter}");
+
+      // SearchResults 空状態の DOM 構造を確認（NFR 1.2: 検索結果画面の本変更導入前との同一性）
+      const empty = await screen.findByTestId("search-results-empty");
+
+      // 1. 空状態のメッセージ文言が変更されていない（search-results.tsx L135 と一致）
+      expect(empty).toHaveTextContent("検索結果はありません");
+
+      // 2. 空状態は SearchResults の代替表示として div ノードで描画される
+      //    （カード一覧の data-testid="search-results" は出現しない）
+      expect(empty.tagName).toBe("DIV");
+      expect(screen.queryByTestId("search-results")).not.toBeInTheDocument();
+
+      // 3. ローディング / エラー表示の testid は同時に出現しない（出し分けが排他）
+      expect(
+        screen.queryByTestId("search-results-loading")
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByTestId("search-results-error")
+      ).not.toBeInTheDocument();
+
+      // 4. SearchResults の親 DOM 構造（FeedPaneHeader + SearchResults が右ペイン内に同居）は
+      //    feed-search-bar testid と search-results-empty testid が同時に存在することで担保
+      expect(screen.getByTestId("feed-search-bar")).toBeInTheDocument();
+    });
+  });
+
   it("横断 → 個別 → 横断 の遷移後に crossFeedSessionSince が保持され同一 baseline で fetch されること（Req 4.7）", async () => {
     const user = userEvent.setup();
     render(<AppShell />, { wrapper: createWrapper() });

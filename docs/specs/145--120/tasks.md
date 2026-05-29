@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. `FeedSearchBar` の外部 searchQuery 同期 useEffect を追加する
+- [x] 1. `FeedSearchBar` の外部 searchQuery 同期 useEffect を追加する
   - `web/src/components/feed-search-bar.tsx` に `useEffect` を追加し、
     `state.isSearching && state.searchScope === 'feed' && state.searchFeedId === selectedFeedId`
     のとき `state.searchQuery` を `localQuery` に setLocalQuery で反映する（design.md
@@ -17,8 +17,8 @@
       （新規ケース、Req 1.2 の一般化）
   - _Requirements: 1.2, 1.3, NFR 2.1_
 
-- [ ] 2. `FeedPaneHeader` コンポーネントを新規作成する
-- [ ] 2.1 `web/src/components/feed-pane-header.tsx` を新規作成する
+- [x] 2. `FeedPaneHeader` コンポーネントを新規作成する
+- [x] 2.1 `web/src/components/feed-pane-header.tsx` を新規作成する
   - design.md の `FeedPaneHeaderProps` 型に従ったコンポーネントを実装する
     （`mode: 'normal' | 'search-feed'`, `feedId: string`, `filter?: ItemFilter`,
     `onFilterChange?: (filter: ItemFilter) => void`）
@@ -38,7 +38,7 @@
   - `useFeeds` / `useManualRefresh` の wiring は `FeedPaneHeader` 内部で完結する
     （`item-list.tsx` から移譲。`feedId` 経由で `subscriptionId` を解決する）
   - _Requirements: 1.1, 2.1, 2.3, 3.4_
-- [ ] 2.2 `web/src/components/feed-pane-header.test.tsx` を新規作成する (P)
+- [x] 2.2 `web/src/components/feed-pane-header.test.tsx` を新規作成する (P)
   - `mode="normal"` で FilterTabs / FeedSearchBar / ManualRefreshButton が描画されること
   - `mode="normal"` で `onFilterChange` がタブ切替で呼ばれること
   - `mode="search-feed"` で FeedSearchBar のみ描画され、FilterTabs / ManualRefreshButton が
@@ -51,7 +51,7 @@
   - _Boundary: web/components/feed-pane-header.tsx_
   - _Depends: 2.1_
 
-- [ ] 3. `ItemList` から責務を縮退してフィードヘッダ要素を撤去する
+- [x] 3. `ItemList` から責務を縮退してフィードヘッダ要素を撤去する
   - `web/src/components/item-list.tsx` の以下を撤去する:
     - フィードヘッダ DOM（L143-169 の `<div className="flex flex-shrink-0 ...">` 配下）
     - `FeedSearchBar` import / 配置
@@ -74,7 +74,7 @@
     - 記事リスト描画・ローディング/エラー/空状態・無限スクロール sentinel のテストは保持する
   - _Requirements: 3.3, 3.4, NFR 1.1_
 
-- [ ] 4. `AppShell` の右ペイン分岐に `FeedPaneHeader` 挿入ロジックを統合する
+- [x] 4. `AppShell` の右ペイン分岐に `FeedPaneHeader` 挿入ロジックを統合する
   - `web/src/components/app-shell.tsx` の右ペイン分岐（L147-159 付近）を design.md
     「`app-shell.tsx`（修正）」節の擬似コードに従って書き換える:
     - `isSearching && searchScope === 'feed' && searchFeedId !== null` の枝で
@@ -98,7 +98,7 @@
   - _Requirements: 1.1, 2.1, 2.2, 2.3, 3.1, 3.2, 3.3, 3.4, NFR 1.2_
   - _Depends: 1, 2.1, 3_
 
-- [ ] 5. `AppShell` 統合テストでフィード内検索の連続操作を検証する
+- [x] 5. `AppShell` 統合テストでフィード内検索の連続操作を検証する
   - `web/src/components/app-shell.test.tsx` に統合テストを追加する。fetch モックは既存パターン
     を踏襲し、`/api/feeds`, `/api/items/search`, `/api/items` のレスポンスを差し替える:
     1. フィード選択 → キーワード入力 → Enter で `SearchResults` が表示され、同時に
