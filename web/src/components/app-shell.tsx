@@ -4,8 +4,12 @@ import { useAppState, useAppDispatch } from "@/contexts/app-state";
 import { useFeeds } from "@/hooks/use-feeds";
 import { FeedList } from "@/components/feed-list";
 import { FeedRegisterDialog } from "@/components/feed-register-dialog";
+import { HeaderSearchBar } from "@/components/header-search-bar";
 import { ItemList } from "@/components/item-list";
+import { StarredItemList } from "@/components/starred-item-list";
+import { StarredNavItem } from "@/components/starred-nav-item";
 import { LogoutButton } from "@/components/logout-button";
+import { SearchResults } from "@/components/search-results";
 import { useTheme } from "@/components/theme-provider";
 import { Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -42,8 +46,10 @@ export function AppShell() {
   return (
     <div data-testid="app-shell" className="flex flex-col h-screen">
       {/* ヘッダー */}
-      <header className="flex items-center justify-between border-b px-4 py-2 flex-shrink-0">
+      <header className="flex items-center justify-between gap-3 border-b px-4 py-2 flex-shrink-0">
         <h1 className="text-lg font-bold">Feedman</h1>
+        {/* Req 1.1: 横断検索バーをヘッダー領域に常設する */}
+        <HeaderSearchBar />
         <div className="flex items-center gap-2">
           <ThemeToggle />
           <LogoutButton />
@@ -57,7 +63,13 @@ export function AppShell() {
           data-testid="left-pane"
           className="w-64 flex-shrink-0 border-r overflow-y-auto"
         >
-          <div className="flex items-center justify-between px-3 py-2 border-b">
+          {/* お気に入り（横断スター記事一覧）固定ナビ項目（Req 1.1, 1.3）。
+              フィード一覧の先頭に常時 1 件表示する。 */}
+          <div className="px-2 pt-2">
+            <StarredNavItem />
+          </div>
+
+          <div className="flex items-center justify-between px-3 py-2 border-b mt-2">
             <span className="text-sm font-medium text-muted-foreground">
               フィード
             </span>
@@ -77,17 +89,23 @@ export function AppShell() {
           )}
         </aside>
 
-        {/* 右ペイン: 記事一覧 + 記事詳細 */}
+        {/* 右ペイン: 記事一覧 + 記事詳細（検索モード時は SearchResults に切り替わり、通常時は selectedView で切替 / Req 1.3 / 2.x / 4.7） */}
         <main data-testid="right-pane" className="flex-1 overflow-hidden">
           <div className="flex flex-col h-full">
-            <ItemList
-              feedId={state.selectedFeedId}
-              onSelectItem={handleSelectItem}
-              expandedItemId={state.expandedItemId}
-            />
-            {/* 記事詳細は ItemList 内の展開で表示する。
+            {state.isSearching ? (
+              <SearchResults />
+            ) : state.selectedView === "starred" ? (
+              <StarredItemList />
+            ) : (
+              <ItemList
+                feedId={state.selectedFeedId}
+                onSelectItem={handleSelectItem}
+                expandedItemId={state.expandedItemId}
+              />
+            )}
+            {/* 記事詳細は ItemList / StarredItemList / SearchResults 内の展開で表示する。
                 展開記事の詳細表示はItemDetailコンポーネントとして
-                ItemList配下で統合されるため、ここでは別途表示しない */}
+                各リスト配下で統合されるため、ここでは別途表示しない */}
           </div>
         </main>
       </div>

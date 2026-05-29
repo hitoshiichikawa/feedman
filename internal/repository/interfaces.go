@@ -136,6 +136,13 @@ type ItemRepository interface {
 	// filter: "all"=全件, "unread"=未読のみ, "starred"=スターのみ
 	ListByFeed(ctx context.Context, feedID, userID string, filter model.ItemFilter, cursor time.Time, limit int) ([]model.ItemWithState, error)
 
+	// ListStarredByUser は指定ユーザーがスター付与した記事を全フィード横断・published_at降順で取得する。
+	// items と item_states と feeds を INNER JOIN し、feed_title を付与する。
+	// cursor がゼロ値の場合は先頭から取得する。
+	// 返却スライス内の全行は s.user_id = userID AND s.is_starred = true を満たし、
+	// 他ユーザーのスター記事は一切含まれない（NFR 2.1）。
+	ListStarredByUser(ctx context.Context, userID string, cursor time.Time, limit int) ([]StarredItemRow, error)
+
 	// Create は新規記事を作成する。
 	Create(ctx context.Context, item *model.Item) error
 
@@ -155,6 +162,16 @@ type ItemRepository interface {
 	BulkUpsert(ctx context.Context, toCreate, toUpdate []*model.Item) error
 }
 
+// StarredItemRow は全フィード横断スター記事一覧の 1 行分のデータを表す。
+// model.ItemWithState（記事 + ユーザー状態）にフィードタイトルを併記する。
+// Requirement 2.4 / 4.10 によりフロントエンドで「どのフィードの記事か」を表示するため、
+// items と feeds の INNER JOIN で feed_title を 1 段で取得する。
+type StarredItemRow struct {
+	model.ItemWithState
+	// FeedTitle は当該記事が所属するフィードのタイトル（feeds.title）。
+	FeedTitle string
+}
+
 // ExistingItems は同一性判定のための既存記事を guid_or_id / link / content_hash 別に索引した結果。
 // いずれのマップも feed_id 単位で取得済みの既存記事を保持する。
 type ExistingItems struct {
@@ -164,6 +181,32 @@ type ExistingItems struct {
 	ByLink map[string]*model.Item
 	// ByContentHash は content_hash をキーとする既存記事マップ。
 	ByContentHash map[string]*model.Item
+}
+
+// ItemSearchRepository は記事検索向けの DB アクセス（横断検索 / フィード内検索の両モード）を提供する。
+// 既存 ItemRepository とは別インターフェースとして公開し、検索専用の射影モデル
+// model.ItemSearchHit を直接返す。実装上は PostgresItemRepo にメソッドを追加することで
+// 単一の DB ハンドルを共有する。
+type ItemSearchRepository interface {
+	// SearchByUserAndKeyword は当該ユーザーが購読中のフィードに属する記事から、
+	// title または content がキーワードに部分一致するものを取得する。
+	//
+	// feedID が nil の場合は横断検索（購読中フィード全体）、非 nil の場合は当該フィードに
+	// 限定したフィード内検索を行う。pattern は ILIKE に渡す '%escaped%' 形式の文字列を
+	// 呼び出し側で組み立てて渡す（LIKE メタ文字 %, _, \ のエスケープ責務は呼び出し側）。
+	//
+	// cursorPublishedAt がゼロ値の場合はカーソル条件を WHERE から外し先頭から取得する。
+	// 非ゼロ値の場合は (published_at, id) < (cursorPublishedAt, cursorID) のタプル比較で
+	// 安定したページネーションを行う。limit は実取得件数（HasMore 判定は呼び出し側で
+	// limit+1 件取得して行うため、本メソッドはその件数をそのまま LIMIT に適用する）。
+	SearchByUserAndKeyword(
+		ctx context.Context,
+		userID, pattern string,
+		feedID *string,
+		cursorID string,
+		cursorPublishedAt time.Time,
+		limit int,
+	) ([]model.ItemSearchHit, error)
 }
 
 // HatebuItemRepository ははてなブックマーク取得に必要な記事データ操作のインターフェース。

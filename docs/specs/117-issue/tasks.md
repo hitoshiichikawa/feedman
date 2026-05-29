@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. Repository 層: `ListStarredByUser` メソッドの追加と DB 結合テスト
+- [x] 1. Repository 層: `ListStarredByUser` メソッドの追加と DB 結合テスト
   - `internal/repository/interfaces.go` の `ItemRepository` インターフェースに `ListStarredByUser(ctx, userID, cursor, limit)` メソッドを追加する
   - `internal/repository/postgres_item_repo.go` に同メソッドの実装を追加する。SQL は `items i INNER JOIN item_states s ON i.id = s.item_id INNER JOIN feeds f ON i.feed_id = f.id WHERE s.user_id = $1 AND s.is_starred = true [AND i.published_at < $cursor] ORDER BY i.published_at DESC LIMIT $limit` とし、`f.title AS feed_title` を SELECT に含める
   - 戻り値の型は `[]repository.StarredItemRow`（または `[]model.ItemWithStateAndFeed`）として feed_title を保持する構造体を新設する
@@ -10,7 +10,7 @@
   - _Requirements: 2.2, 2.4, 4.1, 4.2, 4.9, 4.10, NFR 1.1, NFR 1.2, NFR 2.1_
   - _Boundary: ItemRepository, PostgresItemRepo_
 
-- [ ] 2. Service 層: `ListStarredItems` メソッドの追加と単体テスト
+- [x] 2. Service 層: `ListStarredItems` メソッドの追加と単体テスト
   - `internal/item/service.go` の `ItemService` に `ListStarredItems(ctx, userID, cursorStr, limit)` メソッドを追加する
   - 既存 `ListItems` のカーソルパース・`limit+1` 取得・`has_more` 判定・`next_cursor` 算出・サマリー変換のロジックを**ヘルパー関数として抽出**して再利用する（`parseItemCursor` / `buildItemListResult` 等）。既存 `ListItems` の挙動は変えないこと
   - 横断スター用の `StarredItemSummary`（既存 `ItemSummary` に `FeedTitle string` を追加）を新設し、サービス層レスポンス `StarredItemListResult` を返す
@@ -20,7 +20,7 @@
   - _Boundary: ItemService_
   - _Depends: 1_
 
-- [ ] 3. Handler 層: `ListStarredItems` ハンドラ + アダプタ + ルート登録
+- [x] 3. Handler 層: `ListStarredItems` ハンドラ + アダプタ + ルート登録
   - `internal/handler/item_handler.go` の `ItemServiceInterface` に `ListStarredItems(ctx, userID, cursorStr, limit) (*starredItemListResult, error)` を追加する
   - `starredItemSummaryResponse` 型（`itemSummaryResponse` の全フィールド + `FeedTitle string \`json:"feed_title"\``）と `starredItemListResult` 型を新設する
   - `(h *ItemHandler).ListStarredItems` を実装する。`UserIDFromContext` 失敗で 401、`cursor` / `limit` クエリパラメータをパース、`handleServiceError` で `model.APIError` を HTTP status にマップ
@@ -31,7 +31,7 @@
   - _Boundary: ItemHandler, ItemServiceAdapterFromDomain, Router_
   - _Depends: 2_
 
-- [ ] 4. Handler 層: 結合テスト（既存挙動の非干渉確認込み）
+- [x] 4. Handler 層: 結合テスト（既存挙動の非干渉確認込み）
   - `internal/handler/integration_test.go` に新規シナリオを追加する: (a) 認証クッキー付きで `GET /api/feeds/starred/items` を呼び、自ユーザーのスター記事のみが含まれる、(b) 他ユーザーが事前にスターした記事を一切返さない（NFR 2.1）、(c) スター 0 件ユーザーで `200 { items: [], has_more: false }`、(d) 不正 cursor で 400、(e) 未認証で 401
   - 既存 `GET /api/feeds/{id}/items` を `/starred` 追加後も同一フィクスチャで呼び出し、応答が変化しないこと（要件 5.1 / 5.3）を確認する回帰テストを 1 件追加する
   - 既存スター更新エンドポイント `PUT /api/items/{id}/state` の挙動が変化しないこと（要件 5.2）を、既存統合テスト群がそのまま green であることで担保する（追加テスト不要）
@@ -40,7 +40,7 @@
   - _Boundary: ItemHandler, Router, Integration_
   - _Depends: 3_
 
-- [ ] 5. Web: 型定義と `useStarredItems` フック
+- [x] 5. Web: 型定義と `useStarredItems` フック
   - `web/src/types/item.ts` に `StarredItemSummary extends ItemSummary { feed_title: string }` と `StarredItemListResponse` を追加する
   - `web/src/hooks/use-starred-items.ts` を新規作成し、`useInfiniteQuery` で `GET /api/feeds/starred/items?limit=50[&cursor=...]` を呼び出す。queryKey は `["items", "starred"]`（前置キー `"items"` を共有して既存 `useToggleStar` の invalidate に乗る）
   - `web/src/hooks/use-starred-items.test.tsx` を新規作成し、(a) 初回リクエストの URL クエリ検証、(b) `next_cursor` を pageParam として送る、(c) `has_more=false` のとき `getNextPageParam` が `undefined` を返す、を検証する
@@ -48,7 +48,7 @@
   - _Boundary: useStarredItems_
   - _Depends: 3_
 
-- [ ] 6. Web: AppState 拡張と StarredNavItem コンポーネント (P)
+- [x] 6. Web: AppState 拡張と StarredNavItem コンポーネント (P)
   - `web/src/contexts/app-state.tsx` の `AppState` に `selectedView: "feed" | "starred"` を追加する（初期値 `"feed"`）
   - 新規アクション `SELECT_STARRED` を追加。reducer は `selectedView="starred"`, `selectedFeedId=null`, `expandedItemId=null`, `filter="all"` に遷移する。既存 `SELECT_FEED` も `selectedView="feed"` を設定するよう修正する
   - `web/src/contexts/app-state.test.tsx` に reducer 遷移テストを追加する: (a) 初期 view が `"feed"`、(b) `SELECT_STARRED` で `selectedView` が遷移し他フィールドがリセット、(c) `SELECT_FEED` で `selectedView` が `"feed"` に戻る
@@ -57,7 +57,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
   - _Boundary: AppState, StarredNavItem_
 
-- [ ] 7. Web: StarredItemList コンポーネントと AppShell 統合 (P)
+- [x] 7. Web: StarredItemList コンポーネントと AppShell 統合 (P)
   - `web/src/components/item-list.tsx` の `ItemRow` コンポーネントを export して再利用可能にする（既存挙動を変えない非破壊的変更）。`ItemDetailArea` も同様に export 候補
   - `web/src/components/starred-item-list.tsx` を新規作成し、`useStarredItems()` で取得した記事を `ItemRow` で表示する。ヘッダに「お気に入り」タイトル（要件 2.1）、各行に `feed_title` を併記（要件 2.4、タイトル直下に薄い文字色で 1 行）、Intersection Observer による無限スクロール（要件 2.5）、空状態「記事がありません」（要件 2.6）、エラー状態「記事の読み込みに失敗しました」（要件 2.7）、`useAppState().expandedItemId` 連携の排他展開（要件 2.8）を実装する
   - `web/src/components/app-shell.tsx` を修正し、左ペイン先頭に `StarredNavItem` を配置、右ペインを `state.selectedView` で `ItemList` と `StarredItemList` に切替える

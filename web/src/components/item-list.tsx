@@ -8,6 +8,7 @@ import { useItems, useItemDetail } from "@/hooks/use-items";
 import { useMarkAsRead, useToggleStar } from "@/hooks/use-item-state";
 import { useManualRefresh } from "@/hooks/use-manual-refresh";
 import { useFeeds } from "@/hooks/use-feeds";
+import { FeedSearchBar } from "@/components/feed-search-bar";
 import { ItemDetail } from "@/components/item-detail";
 import { ManualRefreshBanner } from "@/components/manual-refresh-banner";
 import type {
@@ -140,19 +141,23 @@ export function ItemList({ feedId, onSelectItem, expandedItemId }: ItemListProps
 
   return (
     <div className="flex flex-col h-full">
-      {/* フィルタタブ + 手動更新ボタン */}
-      <div className="flex-shrink-0 border-b px-4 py-2">
-        <div className="flex items-center justify-between">
-          <Tabs
-            value={filter}
-            onValueChange={(value) => setFilter(value as ItemFilter)}
-          >
-            <TabsList>
-              <TabsTrigger value="all">全て</TabsTrigger>
-              <TabsTrigger value="unread">未読</TabsTrigger>
-              <TabsTrigger value="starred">スター</TabsTrigger>
-            </TabsList>
-          </Tabs>
+      {/* フィルタタブ + フィード内検索バー + 手動更新ボタン
+          FeedSearchBar は selectedFeedId === null のとき内部で null を返すため、
+          本領域に到達する時点（feedId !== null）では常に描画される（Req 1.2 / NFR 2.3）。
+          ManualRefreshButton は subscriptionId 解決時のみ描画する（Issue #115 Req 5.x）。 */}
+      <div className="flex flex-shrink-0 flex-wrap items-center justify-between gap-2 border-b px-4 py-2">
+        <Tabs
+          value={filter}
+          onValueChange={(value) => setFilter(value as ItemFilter)}
+        >
+          <TabsList>
+            <TabsTrigger value="all">全て</TabsTrigger>
+            <TabsTrigger value="unread">未読</TabsTrigger>
+            <TabsTrigger value="starred">スター</TabsTrigger>
+          </TabsList>
+        </Tabs>
+        <div className="flex items-center gap-2">
+          <FeedSearchBar />
           {subscriptionId !== null && (
             <ManualRefreshButton
               subscriptionId={subscriptionId}
@@ -279,8 +284,11 @@ interface ItemDetailAreaProps {
  * 記事行クリック直後に枠を表示し、取得状態に応じてローディング表示／エラー表示／
  * ItemDetail（本文）を出し分ける。詳細データの取得完了を待たずに同期的に枠を描画する
  * ことで、クリックから 200ms 以内に展開表示を開始する（NFR 2.1）。
+ *
+ * 横断スター記事一覧 `StarredItemList` でも同じ展開挙動が必要なため、本コンポーネントを
+ * export して再利用する（既存挙動を変えない非破壊的変更 / Req 2.8）。
  */
-function ItemDetailArea({
+export function ItemDetailArea({
   isLoading,
   isError,
   detail,
@@ -334,8 +342,11 @@ interface ItemRowProps {
  *
  * 記事タイトル、概要、日付（推定フラグ付き）、既読/スター状態を表示する。
  * 公開日時はタイトルと同一行の右側に、概要はタイトル直下に表示する。
+ *
+ * 横断スター記事一覧 `StarredItemList` でも同じ行レイアウトを再利用するため、
+ * 本コンポーネントを export する（既存挙動を変えない非破壊的変更 / Req 2.3）。
  */
-function ItemRow({ item, isExpanded, onClick }: ItemRowProps) {
+export function ItemRow({ item, isExpanded, onClick }: ItemRowProps) {
   const date = new Date(item.published_at);
   const formattedDate = formatDate(date);
   const hasSummary = item.summary.trim().length > 0;

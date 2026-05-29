@@ -76,6 +76,9 @@ type RouterDeps struct {
 	ItemService      ItemServiceInterface
 	ItemStateService ItemStateServiceInterface
 
+	// 記事検索
+	ItemSearchService ItemSearchServiceInterface
+
 	// 購読
 	SubscriptionService SubscriptionServiceInterface
 
@@ -120,6 +123,7 @@ func NewRouter(deps *RouterDeps) http.Handler {
 	authHandler := NewAuthHandler(deps.AuthService, deps.AuthConfig)
 	feedHandler := NewFeedHandler(deps.FeedService, deps.SubscriptionDeleter)
 	itemHandler := NewItemHandler(deps.ItemService, deps.ItemStateService)
+	itemSearchHandler := NewItemSearchHandler(deps.ItemSearchService)
 	subHandler := NewSubscriptionHandler(deps.SubscriptionService)
 	userHandler := NewUserHandler(deps.UserService)
 
@@ -192,6 +196,12 @@ func NewRouter(deps *RouterDeps) http.Handler {
 			// POST /api/feeds - フィード登録（登録専用レート制限を追加）
 			r.With(deps.RateLimiter.FeedRegistrationMiddleware()).Post("/", feedHandler.RegisterFeed)
 
+			// GET /api/feeds/starred/items - 全フィード横断スター記事一覧（Issue #117）
+			// chi v5 のトライ木は静的セグメント `starred` を動的パラメータ `{id}` より優先するため、
+			// 登録順を問わず `/api/feeds/{id}/items` と衝突しない。可読性のため `/{id}` ブロックの
+			// 直前に置く。
+			r.Get("/starred/items", itemHandler.ListStarredItems)
+
 			r.Route("/{id}", func(r chi.Router) {
 				r.Get("/", feedHandler.GetFeed)
 				r.Patch("/", feedHandler.UpdateFeedURL)
@@ -201,6 +211,11 @@ func NewRouter(deps *RouterDeps) http.Handler {
 				r.Get("/items", itemHandler.ListItems)
 			})
 		})
+
+		// 記事検索（/api/items/{id} よりも前に登録する必要がある。
+		// chi は static segment `/search` を `{id}` よりも優先するが、明示的に
+		// 先に登録することで `search` が `{id}` の捕捉に吸われる可能性を確実に排除する）。
+		r.Get("/api/items/search", itemSearchHandler.Search)
 
 		// 記事管理
 		r.Route("/api/items/{id}", func(r chi.Router) {

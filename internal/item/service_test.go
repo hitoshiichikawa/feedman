@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/hitoshi/feedman/internal/model"
+	"github.com/hitoshi/feedman/internal/repository"
 )
 
 // --- テスト用モック（サービス層用） ---
@@ -13,8 +14,9 @@ import (
 // mockItemRepoForService はサービステスト用のItemRepositoryモック。
 type mockItemRepoForService struct {
 	*mockItemRepo
-	listByFeedFn func(ctx context.Context, feedID, userID string, filter model.ItemFilter, cursor time.Time, limit int) ([]model.ItemWithState, error)
-	findByIDFn   func(ctx context.Context, id string) (*model.Item, error)
+	listByFeedFn        func(ctx context.Context, feedID, userID string, filter model.ItemFilter, cursor time.Time, limit int) ([]model.ItemWithState, error)
+	listStarredByUserFn func(ctx context.Context, userID string, cursor time.Time, limit int) ([]repository.StarredItemRow, error)
+	findByIDFn          func(ctx context.Context, id string) (*model.Item, error)
 }
 
 func newMockItemRepoForService() *mockItemRepoForService {
@@ -26,6 +28,13 @@ func newMockItemRepoForService() *mockItemRepoForService {
 func (m *mockItemRepoForService) ListByFeed(ctx context.Context, feedID, userID string, filter model.ItemFilter, cursor time.Time, limit int) ([]model.ItemWithState, error) {
 	if m.listByFeedFn != nil {
 		return m.listByFeedFn(ctx, feedID, userID, filter, cursor, limit)
+	}
+	return nil, nil
+}
+
+func (m *mockItemRepoForService) ListStarredByUser(ctx context.Context, userID string, cursor time.Time, limit int) ([]repository.StarredItemRow, error) {
+	if m.listStarredByUserFn != nil {
+		return m.listStarredByUserFn(ctx, userID, cursor, limit)
 	}
 	return nil, nil
 }
@@ -370,6 +379,280 @@ func TestItemService_ListItems_StarredFilter(t *testing.T) {
 
 	if receivedFilter != model.ItemFilterStarred {
 		t.Errorf("filter = %q, want %q", receivedFilter, model.ItemFilterStarred)
+	}
+}
+
+// --- ItemService ListStarredItems テスト ---
+
+// makeStarredRow はテスト用の StarredItemRow を組み立てるヘルパ。
+func makeStarredRow(id, feedID, feedTitle string, pubAt time.Time) repository.StarredItemRow {
+	pubCopy := pubAt
+	return repository.StarredItemRow{
+		ItemWithState: model.ItemWithState{
+			Item: model.Item{
+				ID:          id,
+				FeedID:      feedID,
+				Title:       "starred-" + id,
+				Link:        "https://example.com/" + id,
+				PublishedAt: &pubCopy,
+			},
+			IsRead:    false,
+			IsStarred: true,
+		},
+		FeedTitle: feedTitle,
+	}
+}
+
+// TestItemService_ListStarredItems_EmptyCursor は空カーソルで先頭ページが取得され、
+// fetchLimit が limit+1 で repository に渡ることを検証する。
+// 対応 AC: Req 4.4（cursor なしで先頭ページ）
+func TestItemService_ListStarredItems_EmptyCursor(t *testing.T) {
+	// Arrange
+	now := time.Now().UTC().Truncate(time.Second)
+	var receivedCursor time.Time
+	var receivedLimit int
+	var receivedUserID string
+	repo := newMockItemRepoForService()
+	repo.listStarredByUserFn = func(_ context.Context, userID string, cursor time.Time, limit int) ([]repository.StarredItemRow, error) {
+		receivedCursor = cursor
+		receivedLimit = limit
+		receivedUserID = userID
+		return []repository.StarredItemRow{
+			makeStarredRow("item-1", "feed-1", "Feed A", now),
+		}, nil
+	}
+	svc := NewItemService(repo, newMockItemStateRepoForService())
+
+	// Act
+	result, err := svc.ListStarredItems(context.Background(), "user-123", "", 50)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("ListStarredItems returned error: %v", err)
+	}
+	if !receivedCursor.IsZero() {
+		t.Errorf("expected zero cursor for empty cursorStr, got %v", receivedCursor)
+	}
+	if receivedLimit != 51 {
+		t.Errorf("limit = %d, want 51 (limit+1)", receivedLimit)
+	}
+	if receivedUserID != "user-123" {
+		t.Errorf("userID = %q, want %q", receivedUserID, "user-123")
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("items count = %d, want 1", len(result.Items))
+	}
+	if result.HasMore {
+		t.Error("expected HasMore=false when only 1 item returned")
+	}
+	if result.NextCursor != "" {
+		t.Errorf("expected empty NextCursor when HasMore=false, got %q", result.NextCursor)
+	}
+	if result.Items[0].FeedTitle != "Feed A" {
+		t.Errorf("FeedTitle = %q, want %q", result.Items[0].FeedTitle, "Feed A")
+	}
+	if result.Items[0].ID != "item-1" {
+		t.Errorf("ID = %q, want %q", result.Items[0].ID, "item-1")
+	}
+}
+
+// TestItemService_ListStarredItems_InvalidCursor は不正なカーソル文字列で
+// INVALID_FILTER エラーが返されることを検証する。
+// 対応 AC: Req 4.8（不正カーソルで既存と同等の 400 相当）
+func TestItemService_ListStarredItems_InvalidCursor(t *testing.T) {
+	// Arrange
+	repo := newMockItemRepoForService()
+	repoCalled := false
+	repo.listStarredByUserFn = func(_ context.Context, _ string, _ time.Time, _ int) ([]repository.StarredItemRow, error) {
+		repoCalled = true
+		return nil, nil
+	}
+	svc := NewItemService(repo, newMockItemStateRepoForService())
+
+	// Act
+	_, err := svc.ListStarredItems(context.Background(), "user-123", "not-a-timestamp", 50)
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected error for invalid cursor")
+	}
+	apiErr, ok := err.(*model.APIError)
+	if !ok {
+		t.Fatalf("expected *model.APIError, got %T", err)
+	}
+	if apiErr.Code != model.ErrCodeInvalidFilter {
+		t.Errorf("error code = %q, want %q", apiErr.Code, model.ErrCodeInvalidFilter)
+	}
+	if repoCalled {
+		t.Error("repository should not be called when cursor parse fails")
+	}
+}
+
+// TestItemService_ListStarredItems_HasMoreTrue は limit+1 件を取得したとき
+// HasMore=true となり末尾の余分な 1 件が切り詰められ、NextCursor が
+// RFC3339Nano フォーマットで設定されることを検証する。
+// 対応 AC: Req 4.3（has_more / next_cursor を含む）、Req 4.5（next_cursor で継続）、NFR 3.1
+func TestItemService_ListStarredItems_HasMoreTrue(t *testing.T) {
+	// Arrange
+	base := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	repo := newMockItemRepoForService()
+	repo.listStarredByUserFn = func(_ context.Context, _ string, _ time.Time, limit int) ([]repository.StarredItemRow, error) {
+		// limit+1 件（51 件）返却して HasMore を発火させる
+		rows := make([]repository.StarredItemRow, limit)
+		for i := 0; i < limit; i++ {
+			pubAt := base.Add(-time.Duration(i) * time.Hour)
+			rows[i] = makeStarredRow(
+				"item-"+string(rune('A'+i%26)),
+				"feed-1",
+				"Feed A",
+				pubAt,
+			)
+		}
+		return rows, nil
+	}
+	svc := NewItemService(repo, newMockItemStateRepoForService())
+
+	// Act
+	result, err := svc.ListStarredItems(context.Background(), "user-123", "", 50)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("ListStarredItems returned error: %v", err)
+	}
+	if !result.HasMore {
+		t.Error("expected HasMore=true when limit+1 rows returned")
+	}
+	if len(result.Items) != 50 {
+		t.Errorf("items count = %d, want 50 (truncated from limit+1)", len(result.Items))
+	}
+	if result.NextCursor == "" {
+		t.Fatal("expected NextCursor to be set when HasMore=true")
+	}
+	// NextCursor は最後尾（index 49）の PublishedAt を RFC3339Nano でフォーマットしたもの
+	wantCursor := base.Add(-49 * time.Hour).Format(time.RFC3339Nano)
+	if result.NextCursor != wantCursor {
+		t.Errorf("NextCursor = %q, want %q", result.NextCursor, wantCursor)
+	}
+	// RFC3339Nano としてパースできること
+	if _, perr := time.Parse(time.RFC3339Nano, result.NextCursor); perr != nil {
+		t.Errorf("NextCursor %q is not valid RFC3339Nano: %v", result.NextCursor, perr)
+	}
+}
+
+// TestItemService_ListStarredItems_HasMoreFalse は limit 以下の件数で
+// HasMore=false かつ NextCursor が空文字列となることを検証する。
+// 対応 AC: Req 4.7（スター 0 件で空 + has_more=false）の境界補完、Req 4.3 の has_more=false 形
+func TestItemService_ListStarredItems_HasMoreFalse(t *testing.T) {
+	// Arrange
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := newMockItemRepoForService()
+	repo.listStarredByUserFn = func(_ context.Context, _ string, _ time.Time, _ int) ([]repository.StarredItemRow, error) {
+		return []repository.StarredItemRow{
+			makeStarredRow("item-1", "feed-1", "Feed A", now),
+			makeStarredRow("item-2", "feed-2", "Feed B", now.Add(-time.Hour)),
+		}, nil
+	}
+	svc := NewItemService(repo, newMockItemStateRepoForService())
+
+	// Act
+	result, err := svc.ListStarredItems(context.Background(), "user-123", "", 50)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("ListStarredItems returned error: %v", err)
+	}
+	if result.HasMore {
+		t.Error("expected HasMore=false when fewer than limit+1 rows returned")
+	}
+	if result.NextCursor != "" {
+		t.Errorf("expected empty NextCursor when HasMore=false, got %q", result.NextCursor)
+	}
+	if len(result.Items) != 2 {
+		t.Fatalf("items count = %d, want 2", len(result.Items))
+	}
+	// 複数フィードにまたがる FeedTitle が保持されている
+	if result.Items[0].FeedTitle != "Feed A" {
+		t.Errorf("Items[0].FeedTitle = %q, want %q", result.Items[0].FeedTitle, "Feed A")
+	}
+	if result.Items[1].FeedTitle != "Feed B" {
+		t.Errorf("Items[1].FeedTitle = %q, want %q", result.Items[1].FeedTitle, "Feed B")
+	}
+}
+
+// TestItemService_ListStarredItems_NextCursorRFC3339NanoFormat は NextCursor が
+// RFC3339Nano フォーマットで返されることを精密に検証する（nanosecond 精度を含む）。
+// 対応 AC: Req 4.5 の cursor 送り規約一貫性、NFR 3.1（既存 API と区別不能）
+func TestItemService_ListStarredItems_NextCursorRFC3339NanoFormat(t *testing.T) {
+	// Arrange: nanosecond 精度を含む時刻を、保持される末尾（外部 limit=50 → index 49）に置く
+	const outerLimit = 50
+	tailTime := time.Date(2026, 5, 29, 12, 34, 56, 123456789, time.UTC)
+	repo := newMockItemRepoForService()
+	repo.listStarredByUserFn = func(_ context.Context, _ string, _ time.Time, limit int) ([]repository.StarredItemRow, error) {
+		// fetchLimit (=outerLimit+1) 件返却して HasMore=true を発火させる。
+		// インデックス outerLimit-1 (=49) が truncate 後の末尾になり、ここに tailTime を置く。
+		// それ以前のインデックスは tailTime より後の時刻（公開日時降順を維持）。
+		// インデックス outerLimit (=50) は HasMore で切り捨てられる余分行。
+		rows := make([]repository.StarredItemRow, limit)
+		for i := 0; i < outerLimit-1; i++ {
+			pubAt := tailTime.Add(time.Duration(outerLimit-i) * time.Hour)
+			rows[i] = makeStarredRow("item-"+string(rune('A'+i%26)), "feed-1", "Feed A", pubAt)
+		}
+		// 保持される末尾（HasMore truncate 後の最終要素）
+		rows[outerLimit-1] = makeStarredRow("item-tail", "feed-1", "Feed A", tailTime)
+		// 切り捨てられる余分行（tailTime より過去の時刻）
+		rows[outerLimit] = makeStarredRow("item-overflow", "feed-1", "Feed A", tailTime.Add(-time.Hour))
+		return rows, nil
+	}
+	svc := NewItemService(repo, newMockItemStateRepoForService())
+
+	// Act
+	result, err := svc.ListStarredItems(context.Background(), "user-123", "", outerLimit)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("ListStarredItems returned error: %v", err)
+	}
+	if !result.HasMore {
+		t.Fatal("expected HasMore=true")
+	}
+	wantCursor := tailTime.Format(time.RFC3339Nano)
+	if result.NextCursor != wantCursor {
+		t.Errorf("NextCursor = %q, want %q (RFC3339Nano)", result.NextCursor, wantCursor)
+	}
+	// 既存 ListItems と完全同一フォーマットで生成されることを再確認（NFR 3.1）
+	parsed, perr := time.Parse(time.RFC3339Nano, result.NextCursor)
+	if perr != nil {
+		t.Fatalf("NextCursor %q failed RFC3339Nano parse: %v", result.NextCursor, perr)
+	}
+	if !parsed.Equal(tailTime) {
+		t.Errorf("parsed cursor = %v, want %v", parsed, tailTime)
+	}
+}
+
+// TestItemService_ListStarredItems_CursorPassedToRepo は受け取った cursorStr が
+// time.Time にパースされて repository 層にそのまま伝搬することを検証する。
+// 対応 AC: Req 4.5（next_cursor を渡したとき後続ページを返す）
+func TestItemService_ListStarredItems_CursorPassedToRepo(t *testing.T) {
+	// Arrange
+	var receivedCursor time.Time
+	repo := newMockItemRepoForService()
+	repo.listStarredByUserFn = func(_ context.Context, _ string, cursor time.Time, _ int) ([]repository.StarredItemRow, error) {
+		receivedCursor = cursor
+		return nil, nil
+	}
+	svc := NewItemService(repo, newMockItemStateRepoForService())
+	cursorStr := "2026-02-27T10:00:00Z"
+
+	// Act
+	_, err := svc.ListStarredItems(context.Background(), "user-123", cursorStr, 50)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("ListStarredItems returned error: %v", err)
+	}
+	expected, _ := time.Parse(time.RFC3339, cursorStr)
+	if !receivedCursor.Equal(expected) {
+		t.Errorf("cursor passed to repo = %v, want %v", receivedCursor, expected)
 	}
 }
 

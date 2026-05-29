@@ -31,6 +31,30 @@ type ItemWithState struct {
 	IsStarred bool
 }
 
+// ItemSearchHit は記事検索結果 1 件の DB レベル射影を表すモデル。
+// items を subscriptions / feeds / item_states と JOIN した SELECT 結果を保持し、
+// 検索結果カードに必要な記事サマリ・所属フィードのタイトル・favicon の生バイトと
+// MIME タイプ・ユーザー固有の既読 / スター状態をまとめて運ぶ。
+//
+// サービス層でアプリケーション向けの表現（例: favicon を data URL に整形した
+// ItemSearchSummary）へ変換する前段の生データを担うのが本構造体の責務であり、
+// 既存 ItemWithState と同様にリポジトリ層が直接生成して返す。
+type ItemSearchHit struct {
+	ID              string
+	FeedID          string
+	FeedTitle       string
+	FaviconData     []byte
+	FaviconMime     string
+	Title           string
+	Link            string
+	Summary         string // サニタイズ済みの概要テキスト
+	PublishedAt     time.Time
+	IsDateEstimated bool
+	IsRead          bool
+	IsStarred       bool
+	HatebuCount     int
+}
+
 // ItemFilter は記事一覧のフィルタ種別を表す。
 type ItemFilter string
 

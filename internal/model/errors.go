@@ -23,20 +23,22 @@ func (e *APIError) Error() string {
 
 // 定義済みエラーコード
 const (
-	ErrCodeFeedNotDetected       = "FEED_NOT_DETECTED"
-	ErrCodeInvalidURL            = "INVALID_URL"
-	ErrCodeSSRFBlocked           = "SSRF_BLOCKED"
-	ErrCodeFetchFailed           = "FETCH_FAILED"
-	ErrCodeParseFailed           = "PARSE_FAILED"
-	ErrCodeSubscriptionLimit     = "SUBSCRIPTION_LIMIT"
-	ErrCodeItemNotFound          = "ITEM_NOT_FOUND"
-	ErrCodeInvalidFilter         = "INVALID_FILTER"
-	ErrCodeSubscriptionNotFound  = "SUBSCRIPTION_NOT_FOUND"
-	ErrCodeInvalidFetchInterval  = "INVALID_FETCH_INTERVAL"
-	ErrCodeFeedNotStopped        = "FEED_NOT_STOPPED"
-	ErrCodeUserNotFound          = "USER_NOT_FOUND"
-	ErrCodeFeedFetchInProgress   = "FEED_FETCH_IN_PROGRESS"
-	ErrCodeFeedCooldown          = "FEED_COOLDOWN"
+	ErrCodeFeedNotDetected      = "FEED_NOT_DETECTED"
+	ErrCodeInvalidURL           = "INVALID_URL"
+	ErrCodeSSRFBlocked          = "SSRF_BLOCKED"
+	ErrCodeFetchFailed          = "FETCH_FAILED"
+	ErrCodeParseFailed          = "PARSE_FAILED"
+	ErrCodeSubscriptionLimit    = "SUBSCRIPTION_LIMIT"
+	ErrCodeItemNotFound         = "ITEM_NOT_FOUND"
+	ErrCodeInvalidFilter        = "INVALID_FILTER"
+	ErrCodeSubscriptionNotFound = "SUBSCRIPTION_NOT_FOUND"
+	ErrCodeInvalidFetchInterval = "INVALID_FETCH_INTERVAL"
+	ErrCodeFeedNotStopped       = "FEED_NOT_STOPPED"
+	ErrCodeUserNotFound         = "USER_NOT_FOUND"
+	ErrCodeFeedFetchInProgress  = "FEED_FETCH_IN_PROGRESS"
+	ErrCodeFeedCooldown         = "FEED_COOLDOWN"
+	ErrCodeInvalidSearchQuery   = "INVALID_SEARCH_QUERY"
+	ErrCodeFeedNotSubscribed    = "FEED_NOT_SUBSCRIBED"
 )
 
 // NewItemNotFoundError は記事未検出エラーを生成する。
@@ -192,5 +194,29 @@ func NewFeedCooldownError(retryAfterSeconds int) *APIError {
 		Details: map[string]any{
 			"retry_after_seconds": retryAfterSeconds,
 		},
+	}
+}
+
+// NewInvalidSearchQueryError は記事検索のクエリパラメータが不正な場合のエラーを生成する。
+// reason には cursor 形式不正 / feed_id UUID パース失敗 / クエリ長超過などの具体的な
+// 原因を渡す。Category は "validation" であり、handler 層で 400 BadRequest に変換される。
+func NewInvalidSearchQueryError(reason string) *APIError {
+	return &APIError{
+		Code:     ErrCodeInvalidSearchQuery,
+		Message:  fmt.Sprintf("検索クエリが無効です: %s", reason),
+		Category: "validation",
+		Action:   "検索キーワードや検索条件を見直してください。",
+	}
+}
+
+// NewFeedNotSubscribedError は記事検索の feed_id 指定先を当該ユーザーが
+// 購読していない場合のエラーを生成する。Category は "authorization" であり、
+// handler 層で 403 Forbidden に変換される。
+func NewFeedNotSubscribedError(feedID string) *APIError {
+	return &APIError{
+		Code:     ErrCodeFeedNotSubscribed,
+		Message:  fmt.Sprintf("指定されたフィードを購読していません: %s", feedID),
+		Category: "authorization",
+		Action:   "購読中のフィードを指定するか、横断検索を利用してください。",
 	}
 }
