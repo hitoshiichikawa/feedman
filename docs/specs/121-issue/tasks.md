@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. DB マイグレーション追加（`user_cross_feed_views` 表）
+- [x] 1. DB マイグレーション追加（`user_cross_feed_views` 表）
   - `internal/database/migrations/20260528120000_add_user_cross_feed_views.up.sql` を新規作成し、`user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE` / `last_seen_at TIMESTAMPTZ NOT NULL` / `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()` を含む CREATE TABLE を記述
   - 対となる `.down.sql` に `DROP TABLE IF EXISTS user_cross_feed_views;` を記述
   - `internal/model/crossfeed.go` を新規作成し `UserCrossFeedView struct { UserID string; LastSeenAt time.Time; UpdatedAt time.Time }` を定義
