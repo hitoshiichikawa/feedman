@@ -74,7 +74,7 @@
     - 記事リスト描画・ローディング/エラー/空状態・無限スクロール sentinel のテストは保持する
   - _Requirements: 3.3, 3.4, NFR 1.1_
 
-- [ ] 4. `AppShell` の右ペイン分岐に `FeedPaneHeader` 挿入ロジックを統合する
+- [x] 4. `AppShell` の右ペイン分岐に `FeedPaneHeader` 挿入ロジックを統合する
   - `web/src/components/app-shell.tsx` の右ペイン分岐（L147-159 付近）を design.md
     「`app-shell.tsx`（修正）」節の擬似コードに従って書き換える:
     - `isSearching && searchScope === 'feed' && searchFeedId !== null` の枝で
