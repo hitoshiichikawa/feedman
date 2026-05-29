@@ -89,6 +89,15 @@ type SetSearchQueryAction = {
 /** 検索解除アクション: 検索状態のみリセットし、selectedFeedId と filter は保持する */
 type ClearSearchAction = { type: "CLEAR_SEARCH" };
 
+/**
+ * 選択フィードクリアアクション:
+ * `selectedFeedId` を null に戻し、`expandedItemId` と `filter` を初期値にリセットする。
+ * 購読解除完了時に「選択中フィードが解除対象だった」場合に AppShell から dispatch される
+ * （要件 4.2）。`SELECT_FEED` と同じ副作用パターン（展開記事・フィルタ・検索状態リセット）
+ * を踏襲しつつ、`selectedFeedId` のみ null に倒す点が異なる。
+ */
+type ClearSelectedFeedAction = { type: "CLEAR_SELECTED_FEED" };
+
 /** 全アクションのユニオン型 */
 export type AppAction =
   | SelectFeedAction
@@ -96,7 +105,8 @@ export type AppAction =
   | ExpandItemAction
   | SetFilterAction
   | SetSearchQueryAction
-  | ClearSearchAction;
+  | ClearSearchAction
+  | ClearSelectedFeedAction;
 
 // --- Reducer ---
 
@@ -150,6 +160,18 @@ function appReducer(state: AppState, action: AppAction): AppState {
     case "CLEAR_SEARCH":
       return {
         ...state,
+        searchQuery: "",
+        isSearching: false,
+        searchScope: "global",
+        searchFeedId: null,
+      };
+    case "CLEAR_SELECTED_FEED":
+      return {
+        ...state,
+        selectedView: "feed",
+        selectedFeedId: null,
+        expandedItemId: null,
+        filter: "all",
         searchQuery: "",
         isSearching: false,
         searchScope: "global",
