@@ -235,6 +235,17 @@ type ItemStateRepository interface {
 	DeleteByUserID(ctx context.Context, userID string) error
 }
 
+// UserCrossFeedViewRepository は「最後にフィード横断新着一覧を開いた時刻」の永続化インターフェース。
+// ユーザーごとに 1 行を保持し、未読判定の基準時刻として用いる（Issue #121 / Req 4.1, 4.3, 4.5）。
+type UserCrossFeedViewRepository interface {
+	// Get は当該ユーザーの記録を取得する。未登録の場合は (nil, nil) を返す。
+	Get(ctx context.Context, userID string) (*model.UserCrossFeedView, error)
+
+	// Upsert は user_id をキーに last_seen_at を冪等に上書き保存する。
+	// 既存行が存在しなければ新規挿入し、存在すれば last_seen_at と updated_at を更新する。
+	Upsert(ctx context.Context, userID string, lastSeenAt time.Time) error
+}
+
 // SubscriptionWithFeedInfo は購読とフィード情報、未読数を結合した構造体。
 type SubscriptionWithFeedInfo struct {
 	model.Subscription
