@@ -1,8 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Star } from "lucide-react";
+import { useCallback, useEffect, useRef } from "react";
+import { RotateCw, Star } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useItems, useItemDetail } from "@/hooks/use-items";
 import { useMarkAsRead, useToggleStar } from "@/hooks/use-item-state";
@@ -21,16 +20,36 @@ interface ItemListProps {
   onSelectItem: (itemId: string) => void;
   /** 現在展開中の記事ID（null = 未展開） */
   expandedItemId: string | null;
+  /**
+   * 現在のフィルタ値（"all" | "unread" | "starred"）。
+   *
+   * Issue #145 / Task 3 でフィードヘッダ領域（フィルタタブを含む）の責務を
+   * `FeedPaneHeader` へ移譲したため、フィルタ値は呼び出し側（`AppShell`）で
+   * 保持し props 経由で受け取る形に変更した。
+   *
+   * 後方互換のため optional とし、未指定時は `"all"` を fallback として用いる
+   * （`AppShell` 側で本 props を渡す改修が Task 4 で完了するまでのビルド非破壊の橋渡し）。
+   */
+  filter?: ItemFilter;
 }
 
 /**
  * 記事一覧パネル（右ペイン）
  *
  * フィード選択に応じた記事一覧をpublished_at降順で表示する。
- * 推定フラグ付き日付の表示、無限スクロール、フィルタ切替UIを提供する。
+ * 推定フラグ付き日付の表示、無限スクロール、記事詳細展開を提供する。
+ *
+ * Issue #145 / Task 3: フィードヘッダ領域（フィルタタブ / FeedSearchBar /
+ * ManualRefreshButton / ManualRefreshBanner）の描画責務は `FeedPaneHeader` へ
+ * 移譲した。本コンポーネントは記事リスト本体（取得・ローディング/エラー/空状態・
+ * 無限スクロール・詳細展開）のみを担う（Req 3.3 / NFR 1.1 の非回帰担保）。
  */
-export function ItemList({ feedId, onSelectItem, expandedItemId }: ItemListProps) {
-  const [filter, setFilter] = useState<ItemFilter>("all");
+export function ItemList({
+  feedId,
+  onSelectItem,
+  expandedItemId,
+  filter = "all",
+}: ItemListProps) {
   const sentinelRef = useRef<HTMLDivElement>(null);
 
   const {
@@ -66,11 +85,6 @@ export function ItemList({ feedId, onSelectItem, expandedItemId }: ItemListProps
     },
     [toggleStar]
   );
-
-  // フィード切替時にフィルタをリセット
-  useEffect(() => {
-    setFilter("all");
-  }, [feedId]);
 
   // Intersection Observerによる無限スクロール
   const handleObserver = useCallback(
@@ -128,21 +142,10 @@ export function ItemList({ feedId, onSelectItem, expandedItemId }: ItemListProps
 
   return (
     <div className="flex flex-col h-full">
-      {/* フィルタタブ */}
-      <div className="flex-shrink-0 border-b px-4 py-2">
-        <Tabs
-          value={filter}
-          onValueChange={(value) => setFilter(value as ItemFilter)}
-        >
-          <TabsList>
-            <TabsTrigger value="all">全て</TabsTrigger>
-            <TabsTrigger value="unread">未読</TabsTrigger>
-            <TabsTrigger value="starred">スター</TabsTrigger>
-          </TabsList>
-        </Tabs>
-      </div>
-
-      {/* 記事一覧 */}
+      {/* 記事一覧
+          Issue #145 / Task 3: フィードヘッダ領域（フィルタタブ / FeedSearchBar /
+          ManualRefreshButton / ManualRefreshBanner）は `FeedPaneHeader` 側に移譲済み。
+          本領域は記事リスト本体のみを担う。 */}
       <div className="flex-1 overflow-y-auto">
         {allItems.length === 0 ? (
           <div className="flex items-center justify-center h-32 text-sm text-muted-foreground">
@@ -190,6 +193,51 @@ export function ItemList({ feedId, onSelectItem, expandedItemId }: ItemListProps
   );
 }
 
+/** ManualRefreshButton のプロパティ */
+interface ManualRefreshButtonProps {
+  /** 対象の購読 ID（mutation 引数として再送するため保持） */
+  subscriptionId: string;
+  /** mutation 進行中フラグ。true の間は disabled + 回転アニメーション */
+  isPending: boolean;
+  /** クリックハンドラ（呼び出し側で mutate を発火） */
+  onClick: () => void;
+}
+
+/**
+ * 記事一覧ヘッダー（フィルタタブ群の右隣）に配置する手動更新ボタン。
+ *
+ * 進行中は `aria-busy=true` / `disabled` で重複起動を防止し、Lucide `RotateCw`
+ * アイコンに `animate-spin` を当てて視覚的なローディングを継続する（Req 5.4 / 5.5 / 5.6）。
+ *
+ * `FeedPaneHeader`（フィードペイン上部ヘッダ）から再利用するため export する（Issue #145 / Task 2.1）。
+ */
+export function ManualRefreshButton({
+  subscriptionId,
+  isPending,
+  onClick,
+}: ManualRefreshButtonProps) {
+  return (
+    <button
+      type="button"
+      aria-label="フィードを更新"
+      aria-busy={isPending}
+      disabled={isPending}
+      onClick={onClick}
+      data-testid={`manual-refresh-button-${subscriptionId}`}
+      className={cn(
+        "inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors",
+        "hover:bg-accent hover:text-foreground",
+        "disabled:cursor-not-allowed disabled:opacity-60"
+      )}
+    >
+      <RotateCw
+        aria-hidden="true"
+        className={cn("w-4 h-4", isPending && "animate-spin")}
+      />
+    </button>
+  );
+}
+
 /** ItemDetailArea コンポーネントのプロパティ */
 interface ItemDetailAreaProps {
   /** 記事詳細の取得中フラグ */
@@ -212,8 +260,11 @@ interface ItemDetailAreaProps {
  * 記事行クリック直後に枠を表示し、取得状態に応じてローディング表示／エラー表示／
  * ItemDetail（本文）を出し分ける。詳細データの取得完了を待たずに同期的に枠を描画する
  * ことで、クリックから 200ms 以内に展開表示を開始する（NFR 2.1）。
+ *
+ * 横断スター記事一覧 `StarredItemList` でも同じ展開挙動が必要なため、本コンポーネントを
+ * export して再利用する（既存挙動を変えない非破壊的変更 / Req 2.8）。
  */
-function ItemDetailArea({
+export function ItemDetailArea({
   isLoading,
   isError,
   detail,
@@ -267,8 +318,11 @@ interface ItemRowProps {
  *
  * 記事タイトル、概要、日付（推定フラグ付き）、既読/スター状態を表示する。
  * 公開日時はタイトルと同一行の右側に、概要はタイトル直下に表示する。
+ *
+ * 横断スター記事一覧 `StarredItemList` でも同じ行レイアウトを再利用するため、
+ * 本コンポーネントを export する（既存挙動を変えない非破壊的変更 / Req 2.3）。
  */
-function ItemRow({ item, isExpanded, onClick }: ItemRowProps) {
+export function ItemRow({ item, isExpanded, onClick }: ItemRowProps) {
   const date = new Date(item.published_at);
   const formattedDate = formatDate(date);
   const hasSummary = item.summary.trim().length > 0;

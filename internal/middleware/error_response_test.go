@@ -146,3 +146,68 @@ func TestErrorResponseBody_AllFieldsPresent(t *testing.T) {
 		}
 	}
 }
+
+// TestWriteErrorResponse_WithDetails は APIError.Details が non-nil のとき
+// JSON レスポンスに details フィールドが含まれることを検証する（Issue #115 Req 2.2）。
+func TestWriteErrorResponse_WithDetails(t *testing.T) {
+	// Arrange
+	w := httptest.NewRecorder()
+	apiErr := &model.APIError{
+		Code:     "FEED_COOLDOWN",
+		Message:  "クールダウン中です。",
+		Category: "feed",
+		Action:   "再試行までお待ちください。",
+		Details: map[string]any{
+			"retry_after_seconds": 480,
+		},
+	}
+
+	// Act
+	WriteErrorResponse(w, http.StatusTooManyRequests, apiErr)
+
+	// Assert
+	var raw map[string]interface{}
+	if err := json.NewDecoder(w.Result().Body).Decode(&raw); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+
+	details, ok := raw["details"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("details field missing or wrong type, raw=%v", raw)
+	}
+	retryAfter, ok := details["retry_after_seconds"].(float64)
+	if !ok {
+		t.Fatalf("retry_after_seconds missing or wrong type, details=%v", details)
+	}
+	if int(retryAfter) != 480 {
+		t.Errorf("retry_after_seconds = %v, want 480", retryAfter)
+	}
+}
+
+// TestWriteErrorResponse_NilDetailsOmitted は APIError.Details が nil のとき
+// JSON レスポンスから details フィールドが出力されないこと（omitempty 相当）を検証する。
+// これは既存 APIError の wire format の後方互換性を担保する（Issue #115）。
+func TestWriteErrorResponse_NilDetailsOmitted(t *testing.T) {
+	// Arrange
+	w := httptest.NewRecorder()
+	apiErr := &model.APIError{
+		Code:     "UNAUTHORIZED",
+		Message:  "認証が必要です。",
+		Category: "auth",
+		Action:   "ログインしてください。",
+		// Details: nil
+	}
+
+	// Act
+	WriteErrorResponse(w, http.StatusUnauthorized, apiErr)
+
+	// Assert
+	var raw map[string]interface{}
+	if err := json.NewDecoder(w.Result().Body).Decode(&raw); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+
+	if _, ok := raw["details"]; ok {
+		t.Errorf("details field should be omitted when nil, got raw=%v", raw)
+	}
+}

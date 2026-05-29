@@ -112,6 +112,13 @@ func (m *mockMetricsCollector) RecordItemsUpserted(count int) {
 	m.lastItemsUpserted = count
 }
 
+// 手動フェッチ系（Issue #115）は worker fetcher から呼ばれないが、
+// MetricsCollector interface 充足のため no-op 実装する。
+func (m *mockMetricsCollector) RecordManualFetchSuccess()          {}
+func (m *mockMetricsCollector) RecordManualFetchFailure(_ string)  {}
+func (m *mockMetricsCollector) RecordManualFetchCooldownRejected() {}
+func (m *mockMetricsCollector) RecordManualFetchLockConflict()     {}
+
 // mockSSRFGuard はSSRFGuardServiceのテスト用モック。
 type mockSSRFGuard struct {
 	validateErr error
@@ -1154,5 +1161,258 @@ func TestNewFetcher_DefaultMetricsIsNopAndNilSafe(t *testing.T) {
 	// Act + Assert: option 未指定でも nil 参照で panic せず正常完了する
 	if err := f.Fetch(context.Background(), feed); err != nil {
 		t.Fatalf("option 未指定の Fetch() がエラーを返した: %v", err)
+	}
+}
+
+// --- Task 3.1: ApplySuccess 直後の UpdateLastSuccessfulFetchAt 反映テスト ---
+
+// TestFetcher_Fetch_RecordsLastSuccessfulFetchAt_200 は 200 OK 成功時に
+// UpdateLastSuccessfulFetchAt が feed.ID 付きで 1 回呼ばれることを検証する
+// （Issue #115 Req 2.4 / 自動経路の成功時刻記録）。
+func TestFetcher_Fetch_RecordsLastSuccessfulFetchAt_200(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		fmt.Fprint(w, `<?xml version="1.0"?>
+<rss version="2.0">
+  <channel><title>T</title><item><title>A</title><guid>g1</guid></item></channel>
+</rss>`)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	feedRepo := &mockFeedRepo{
+		updateFetchStateFunc: func(_ context.Context, _ *model.Feed) error { return nil },
+	}
+	f := NewFetcher(
+		feedRepo,
+		&mockSubRepo{minInterval: 60},
+		&mockUpsertService{insertCount: 1},
+		&mockSSRFGuard{},
+		newTestLogger(&buf),
+		10*time.Second,
+		5*1024*1024,
+	)
+	feed := &model.Feed{ID: "feed-1", FeedURL: server.URL, FetchStatus: model.FetchStatusActive}
+
+	// Act
+	if err := f.Fetch(context.Background(), feed); err != nil {
+		t.Fatalf("Fetch() がエラーを返した: %v", err)
+	}
+
+	// Assert: 200 成功で UpdateLastSuccessfulFetchAt が 1 回 / feed.ID 引数で呼ばれる
+	if feedRepo.lastSuccessfulFetchAtCalls != 1 {
+		t.Errorf("UpdateLastSuccessfulFetchAt 呼び出し回数 = %d, want 1", feedRepo.lastSuccessfulFetchAtCalls)
+	}
+	if len(feedRepo.lastSuccessfulFetchAtFeedIDs) != 1 || feedRepo.lastSuccessfulFetchAtFeedIDs[0] != "feed-1" {
+		t.Errorf("UpdateLastSuccessfulFetchAt に渡された feedID = %v, want [feed-1]", feedRepo.lastSuccessfulFetchAtFeedIDs)
+	}
+}
+
+// TestFetcher_Fetch_RecordsLastSuccessfulFetchAt_304 は 304 Not Modified 成功時に
+// UpdateLastSuccessfulFetchAt が 1 回呼ばれることを検証する（Issue #115 Req 2.4）。
+func TestFetcher_Fetch_RecordsLastSuccessfulFetchAt_304(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	feedRepo := &mockFeedRepo{
+		updateFetchStateFunc: func(_ context.Context, _ *model.Feed) error { return nil },
+	}
+	f := NewFetcher(
+		feedRepo,
+		&mockSubRepo{minInterval: 60},
+		&mockUpsertService{},
+		&mockSSRFGuard{},
+		newTestLogger(&buf),
+		10*time.Second,
+		5*1024*1024,
+	)
+	feed := &model.Feed{ID: "feed-1", FeedURL: server.URL, ETag: `"abc"`}
+
+	// Act
+	if err := f.Fetch(context.Background(), feed); err != nil {
+		t.Fatalf("Fetch() がエラーを返した: %v", err)
+	}
+
+	// Assert: 304 成功で UpdateLastSuccessfulFetchAt が 1 回呼ばれる
+	if feedRepo.lastSuccessfulFetchAtCalls != 1 {
+		t.Errorf("304 時の UpdateLastSuccessfulFetchAt 呼び出し回数 = %d, want 1", feedRepo.lastSuccessfulFetchAtCalls)
+	}
+}
+
+// TestFetcher_Fetch_DoesNotRecordOnBackoff は 429 / 5xx バックオフ経路で
+// UpdateLastSuccessfulFetchAt が呼ばれないことを検証する（Issue #115 Req 2.4: 成功時刻は ApplySuccess 経由のみ）。
+func TestFetcher_Fetch_DoesNotRecordOnBackoff(t *testing.T) {
+	// Arrange: 500 を返してバックオフ経路に入れる
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	feedRepo := &mockFeedRepo{
+		updateFetchStateFunc: func(_ context.Context, _ *model.Feed) error { return nil },
+	}
+	f := NewFetcher(
+		feedRepo,
+		&mockSubRepo{minInterval: 60},
+		&mockUpsertService{},
+		&mockSSRFGuard{},
+		newTestLogger(&buf),
+		10*time.Second,
+		5*1024*1024,
+	)
+	feed := &model.Feed{ID: "feed-1", FeedURL: server.URL, FetchStatus: model.FetchStatusActive}
+
+	// Act
+	_ = f.Fetch(context.Background(), feed)
+
+	// Assert: バックオフ経路では成功時刻を記録しない
+	if feedRepo.lastSuccessfulFetchAtCalls != 0 {
+		t.Errorf("バックオフ時の UpdateLastSuccessfulFetchAt 呼び出し回数 = %d, want 0", feedRepo.lastSuccessfulFetchAtCalls)
+	}
+}
+
+// TestFetcher_Fetch_DoesNotRecordOnStopFeed は 404 等の停止経路で
+// UpdateLastSuccessfulFetchAt が呼ばれないことを検証する。
+func TestFetcher_Fetch_DoesNotRecordOnStopFeed(t *testing.T) {
+	// Arrange: 404 を返して停止経路に入れる
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	feedRepo := &mockFeedRepo{
+		updateFetchStateFunc: func(_ context.Context, _ *model.Feed) error { return nil },
+	}
+	f := NewFetcher(
+		feedRepo,
+		&mockSubRepo{minInterval: 60},
+		&mockUpsertService{},
+		&mockSSRFGuard{},
+		newTestLogger(&buf),
+		10*time.Second,
+		5*1024*1024,
+	)
+	feed := &model.Feed{ID: "feed-1", FeedURL: server.URL, FetchStatus: model.FetchStatusActive}
+
+	// Act
+	_ = f.Fetch(context.Background(), feed)
+
+	// Assert: 停止経路では成功時刻を記録しない
+	if feedRepo.lastSuccessfulFetchAtCalls != 0 {
+		t.Errorf("停止経路時の UpdateLastSuccessfulFetchAt 呼び出し回数 = %d, want 0", feedRepo.lastSuccessfulFetchAtCalls)
+	}
+}
+
+// TestFetcher_Fetch_DoesNotRecordOnSSRFFailure は SSRF 検証失敗経路で
+// UpdateLastSuccessfulFetchAt が呼ばれないことを検証する。
+func TestFetcher_Fetch_DoesNotRecordOnSSRFFailure(t *testing.T) {
+	// Arrange
+	var buf bytes.Buffer
+	feedRepo := &mockFeedRepo{
+		updateFetchStateFunc: func(_ context.Context, _ *model.Feed) error { return nil },
+	}
+	ssrfGuard := &mockSSRFGuard{validateErr: fmt.Errorf("blocked IP address")}
+	f := NewFetcher(
+		feedRepo,
+		&mockSubRepo{minInterval: 60},
+		&mockUpsertService{},
+		ssrfGuard,
+		newTestLogger(&buf),
+		10*time.Second,
+		5*1024*1024,
+	)
+	feed := &model.Feed{ID: "feed-1", FeedURL: "http://192.168.1.1/feed.xml", FetchStatus: model.FetchStatusActive}
+
+	// Act
+	_ = f.Fetch(context.Background(), feed)
+
+	// Assert: SSRF 失敗時は成功時刻を記録しない
+	if feedRepo.lastSuccessfulFetchAtCalls != 0 {
+		t.Errorf("SSRF 失敗時の UpdateLastSuccessfulFetchAt 呼び出し回数 = %d, want 0", feedRepo.lastSuccessfulFetchAtCalls)
+	}
+}
+
+// TestFetcher_Fetch_DoesNotRecordOnParseFailure はパース失敗経路で
+// UpdateLastSuccessfulFetchAt が呼ばれないことを検証する。
+func TestFetcher_Fetch_DoesNotRecordOnParseFailure(t *testing.T) {
+	// Arrange: 不正な XML を返す
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		fmt.Fprint(w, `not valid XML!!!`)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	feedRepo := &mockFeedRepo{
+		updateFetchStateFunc: func(_ context.Context, _ *model.Feed) error { return nil },
+	}
+	f := NewFetcher(
+		feedRepo,
+		&mockSubRepo{minInterval: 60},
+		&mockUpsertService{},
+		&mockSSRFGuard{},
+		newTestLogger(&buf),
+		10*time.Second,
+		5*1024*1024,
+	)
+	feed := &model.Feed{ID: "feed-1", FeedURL: server.URL, FetchStatus: model.FetchStatusActive}
+
+	// Act
+	_ = f.Fetch(context.Background(), feed)
+
+	// Assert: パース失敗時は成功時刻を記録しない
+	if feedRepo.lastSuccessfulFetchAtCalls != 0 {
+		t.Errorf("パース失敗時の UpdateLastSuccessfulFetchAt 呼び出し回数 = %d, want 0", feedRepo.lastSuccessfulFetchAtCalls)
+	}
+}
+
+// TestFetcher_Fetch_LastSuccessfulFetchAtErrorDoesNotFailFetch は
+// UpdateLastSuccessfulFetchAt がエラーを返してもフェッチ自体は成功扱いを維持することを検証する
+// （Issue #115 Req 2.4: 成功時刻の記録失敗は fetch 全体の失敗にしない）。
+func TestFetcher_Fetch_LastSuccessfulFetchAtErrorDoesNotFailFetch(t *testing.T) {
+	// Arrange: 200 + 成功時刻記録だけ失敗するモック
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		fmt.Fprint(w, `<?xml version="1.0"?>
+<rss version="2.0">
+  <channel><title>T</title><item><title>A</title><guid>g1</guid></item></channel>
+</rss>`)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	feedRepo := &mockFeedRepo{
+		updateFetchStateFunc: func(_ context.Context, _ *model.Feed) error { return nil },
+		updateLastSuccessfulFetchAtFn: func(_ context.Context, _ string, _ time.Time) error {
+			return fmt.Errorf("simulated db error")
+		},
+	}
+	f := NewFetcher(
+		feedRepo,
+		&mockSubRepo{minInterval: 60},
+		&mockUpsertService{insertCount: 1},
+		&mockSSRFGuard{},
+		newTestLogger(&buf),
+		10*time.Second,
+		5*1024*1024,
+	)
+	feed := &model.Feed{ID: "feed-1", FeedURL: server.URL, FetchStatus: model.FetchStatusActive}
+
+	// Act
+	err := f.Fetch(context.Background(), feed)
+
+	// Assert: 成功時刻の記録失敗で fetch 自体は失敗扱いしない
+	if err != nil {
+		t.Fatalf("Fetch() は last_successful_fetch_at 更新失敗時もエラーを返さないべき: %v", err)
+	}
+	if feedRepo.lastSuccessfulFetchAtCalls != 1 {
+		t.Errorf("UpdateLastSuccessfulFetchAt 呼び出し回数 = %d, want 1", feedRepo.lastSuccessfulFetchAtCalls)
 	}
 }

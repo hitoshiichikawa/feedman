@@ -5,11 +5,15 @@ import "fmt"
 
 // APIError は統一エラーフォーマットを表す。
 // UIに表示する原因カテゴリと対処方法を含む。
+// Details は任意の構造化追加情報を表し、429（クールダウン中）の retry_after_seconds など
+// 既存 4 フィールド（Code / Message / Category / Action）では表現できない補足情報を載せる。
+// nil の場合は JSON シリアライズ時に出力されない（omitempty 相当）。
 type APIError struct {
-	Code     string // エラーコード
-	Message  string // エラーメッセージ
-	Category string // カテゴリ: auth, validation, feed, system
-	Action   string // ユーザー向け対処方法
+	Code     string         // エラーコード
+	Message  string         // エラーメッセージ
+	Category string         // カテゴリ: auth, validation, feed, system
+	Action   string         // ユーザー向け対処方法
+	Details  map[string]any // 任意の構造化追加情報（429 等で retry_after_seconds 等を載せる）
 }
 
 // Error はerrorインターフェースを実装する。
@@ -19,18 +23,22 @@ func (e *APIError) Error() string {
 
 // 定義済みエラーコード
 const (
-	ErrCodeFeedNotDetected       = "FEED_NOT_DETECTED"
-	ErrCodeInvalidURL            = "INVALID_URL"
-	ErrCodeSSRFBlocked           = "SSRF_BLOCKED"
-	ErrCodeFetchFailed           = "FETCH_FAILED"
-	ErrCodeParseFailed           = "PARSE_FAILED"
-	ErrCodeSubscriptionLimit     = "SUBSCRIPTION_LIMIT"
-	ErrCodeItemNotFound          = "ITEM_NOT_FOUND"
-	ErrCodeInvalidFilter         = "INVALID_FILTER"
-	ErrCodeSubscriptionNotFound  = "SUBSCRIPTION_NOT_FOUND"
-	ErrCodeInvalidFetchInterval  = "INVALID_FETCH_INTERVAL"
-	ErrCodeFeedNotStopped        = "FEED_NOT_STOPPED"
-	ErrCodeUserNotFound          = "USER_NOT_FOUND"
+	ErrCodeFeedNotDetected      = "FEED_NOT_DETECTED"
+	ErrCodeInvalidURL           = "INVALID_URL"
+	ErrCodeSSRFBlocked          = "SSRF_BLOCKED"
+	ErrCodeFetchFailed          = "FETCH_FAILED"
+	ErrCodeParseFailed          = "PARSE_FAILED"
+	ErrCodeSubscriptionLimit    = "SUBSCRIPTION_LIMIT"
+	ErrCodeItemNotFound         = "ITEM_NOT_FOUND"
+	ErrCodeInvalidFilter        = "INVALID_FILTER"
+	ErrCodeSubscriptionNotFound = "SUBSCRIPTION_NOT_FOUND"
+	ErrCodeInvalidFetchInterval = "INVALID_FETCH_INTERVAL"
+	ErrCodeFeedNotStopped       = "FEED_NOT_STOPPED"
+	ErrCodeUserNotFound         = "USER_NOT_FOUND"
+	ErrCodeFeedFetchInProgress  = "FEED_FETCH_IN_PROGRESS"
+	ErrCodeFeedCooldown         = "FEED_COOLDOWN"
+	ErrCodeInvalidSearchQuery   = "INVALID_SEARCH_QUERY"
+	ErrCodeFeedNotSubscribed    = "FEED_NOT_SUBSCRIBED"
 )
 
 // NewItemNotFoundError は記事未検出エラーを生成する。
@@ -160,5 +168,55 @@ func NewUserNotFoundError() *APIError {
 		Message:  "ユーザーが見つかりません。",
 		Category: "auth",
 		Action:   "ログインし直してください。",
+	}
+}
+
+// NewFeedFetchInProgressError は対象フィードが別トランザクションでフェッチ中のため
+// 行ロック取得に失敗したときのエラーを生成する。HTTP 409 にマップされる。
+func NewFeedFetchInProgressError() *APIError {
+	return &APIError{
+		Code:     ErrCodeFeedFetchInProgress,
+		Message:  "現在フェッチが進行中のためしばらく待ってから再試行してください。",
+		Category: "feed",
+		Action:   "現在フェッチが進行中のためしばらく待ってから再試行してください。",
+	}
+}
+
+// NewFeedCooldownError は対象フィードが 10 分クールダウン中のため手動フェッチが
+// 拒否されたときのエラーを生成する。HTTP 429 にマップされ、Details["retry_after_seconds"]
+// に次回フェッチ可能になるまでの残り秒数（int）を載せる。
+func NewFeedCooldownError(retryAfterSeconds int) *APIError {
+	return &APIError{
+		Code:     ErrCodeFeedCooldown,
+		Message:  fmt.Sprintf("クールダウン中です。再試行まで残り %d 秒です。", retryAfterSeconds),
+		Category: "feed",
+		Action:   "最終成功時刻から10分経過するまで手動フェッチは実行できません。",
+		Details: map[string]any{
+			"retry_after_seconds": retryAfterSeconds,
+		},
+	}
+}
+
+// NewInvalidSearchQueryError は記事検索のクエリパラメータが不正な場合のエラーを生成する。
+// reason には cursor 形式不正 / feed_id UUID パース失敗 / クエリ長超過などの具体的な
+// 原因を渡す。Category は "validation" であり、handler 層で 400 BadRequest に変換される。
+func NewInvalidSearchQueryError(reason string) *APIError {
+	return &APIError{
+		Code:     ErrCodeInvalidSearchQuery,
+		Message:  fmt.Sprintf("検索クエリが無効です: %s", reason),
+		Category: "validation",
+		Action:   "検索キーワードや検索条件を見直してください。",
+	}
+}
+
+// NewFeedNotSubscribedError は記事検索の feed_id 指定先を当該ユーザーが
+// 購読していない場合のエラーを生成する。Category は "authorization" であり、
+// handler 層で 403 Forbidden に変換される。
+func NewFeedNotSubscribedError(feedID string) *APIError {
+	return &APIError{
+		Code:     ErrCodeFeedNotSubscribed,
+		Message:  fmt.Sprintf("指定されたフィードを購読していません: %s", feedID),
+		Category: "authorization",
+		Action:   "購読中のフィードを指定するか、横断検索を利用してください。",
 	}
 }

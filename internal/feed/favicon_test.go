@@ -26,8 +26,8 @@ func TestNewFaviconFetcher_Initializes(t *testing.T) {
 
 // TestFaviconFetcher_FetchFavicon_Success はfavicon取得成功時にデータとMIMEタイプを返すことをテストする。
 func TestFaviconFetcher_FetchFavicon_Success(t *testing.T) {
-	// PNG画像のヘッダー（最小限のテストデータ）
-	pngData := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	// Issue #148: 透明判定でデコードされるため有効な PNG を使う（不透明 16x16）
+	pngData := newOpaquePNG(t, 16, 16)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/favicon.ico" {
@@ -96,7 +96,8 @@ func TestFaviconFetcher_FetchFavicon_EmptyURL(t *testing.T) {
 
 // TestFaviconFetcher_FetchFaviconForSite はサイトURLからfaviconを取得することをテストする。
 func TestFaviconFetcher_FetchFaviconForSite_FromFaviconICO(t *testing.T) {
-	icoData := []byte{0x00, 0x00, 0x01, 0x00}
+	// Issue #148: 透明判定で ICO 内 BMP の alpha バイトを走査するため有効な ICO を使う
+	icoData := newOpaqueICO(t, 16, 16)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/favicon.ico" {
@@ -233,7 +234,8 @@ func TestFaviconFetcher_GetHTTPClient_ReusesSameInstanceWithoutGuard(t *testing.
 // 複数回favicon取得しても新しいHTTPクライアントが追加生成されず、結果が一致することをテストする（AC 3.2, 4.1, 3）。
 func TestFaviconFetcher_FetchFavicon_NoAdditionalClientPerRequest(t *testing.T) {
 	// Arrange
-	pngData := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	// Issue #148: 透明判定で有効な PNG が必要
+	pngData := newOpaquePNG(t, 8, 8)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		w.Write(pngData)
@@ -336,7 +338,8 @@ func TestFaviconFetcher_GetHTTPClient_TimeoutPreserved(t *testing.T) {
 // 同時利用してもデータ競合が発生しないことをテストする（NFR 2.1。-race と併用）。
 func TestFaviconFetcher_Concurrent_NoDataRace(t *testing.T) {
 	// Arrange
-	pngData := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	// Issue #148: 透明判定で有効な PNG が必要
+	pngData := newOpaquePNG(t, 4, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		w.Write(pngData)
@@ -367,7 +370,8 @@ func TestFaviconFetcher_Concurrent_NoDataRace(t *testing.T) {
 // 選択する経路を検証する（要件 2.3）。実際の取得まで通して経路が観測可能であることを確認する。
 func TestNewFaviconFetcher_SSRFGuardEnabled_UsesSafeClient(t *testing.T) {
 	// Arrange: favicon を返すテスト用サーバとSSRFガード（有効）を用意する。
-	pngData := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	// Issue #148: 透明判定で有効な PNG が必要
+	pngData := newOpaquePNG(t, 4, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		w.Write(pngData)
@@ -397,7 +401,8 @@ func TestNewFaviconFetcher_SSRFGuardEnabled_UsesSafeClient(t *testing.T) {
 // 既定タイムアウト）を選択する経路を検証する（要件 2.4）。
 func TestNewFaviconFetcher_SSRFGuardDisabled_UsesPlainClient(t *testing.T) {
 	// Arrange: favicon を返すテスト用サーバを用意する（ガードは nil）。
-	pngData := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	// Issue #148: 透明判定で有効な PNG が必要
+	pngData := newOpaquePNG(t, 4, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		w.Write(pngData)

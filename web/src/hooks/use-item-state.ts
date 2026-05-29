@@ -21,6 +21,8 @@ export function useMarkAsRead() {
       // itemsとfeedsの未読数キャッシュを無効化
       queryClient.invalidateQueries({ queryKey: ["items"] });
       queryClient.invalidateQueries({ queryKey: ["feeds"] });
+      // 横断新着一覧（Issue #121 / Req 5.3）も既読同期させる
+      queryClient.invalidateQueries({ queryKey: ["cross-feed-items"] });
     },
   });
 }
@@ -79,6 +81,8 @@ export function useToggleStar() {
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["items"] });
+      // 横断新着一覧（Issue #121 / Req 5.3）もスター同期させる
+      queryClient.invalidateQueries({ queryKey: ["cross-feed-items"] });
     },
   });
 }

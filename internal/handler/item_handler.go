@@ -20,6 +20,10 @@ type ItemServiceInterface interface {
 	ListItems(ctx context.Context, userID, feedID string, filter model.ItemFilter, cursor string, limit int) (*itemListResult, error)
 	// GetItem は記事詳細を返す。
 	GetItem(ctx context.Context, userID, itemID string) (*itemDetailResponse, error)
+	// ListStarredItems はユーザーの全フィード横断スター記事一覧を返す。
+	// cursorStr が空文字列の場合は先頭ページを返す。
+	// 不正な cursorStr は model.APIError（INVALID_FILTER）を返す（Requirement 4.5 / 4.8）。
+	ListStarredItems(ctx context.Context, userID, cursorStr string, limit int) (*starredItemListResult, error)
 }
 
 // ItemStateServiceInterface は記事状態管理サービスのインターフェース。
@@ -64,6 +68,23 @@ type itemListResult struct {
 	Items      []itemSummaryResponse `json:"items"`
 	NextCursor string                `json:"next_cursor,omitempty"`
 	HasMore    bool                  `json:"has_more"`
+}
+
+// starredItemSummaryResponse は全フィード横断スター記事一覧の記事サマリーレスポンス。
+// 既存 itemSummaryResponse の全フィールドに加え、フィードタイトルを併記する
+// （Requirement 2.4 / 4.10）。フィードタイトルはフロントエンドで「どのフィードの記事か」を
+// 表示するためのもので、既存単一フィード API の応答スキーマは一切変更しない（NFR 3.1）。
+type starredItemSummaryResponse struct {
+	itemSummaryResponse
+	FeedTitle string `json:"feed_title"`
+}
+
+// starredItemListResult は全フィード横断スター記事一覧のレスポンス。
+// 形状は itemListResult と同形だが、Items の各要素が feed_title を含む点が異なる。
+type starredItemListResult struct {
+	Items      []starredItemSummaryResponse `json:"items"`
+	NextCursor string                       `json:"next_cursor,omitempty"`
+	HasMore    bool                         `json:"has_more"`
 }
 
 // itemDetailResponse は記事詳細のレスポンス。
@@ -115,6 +136,46 @@ func (h *ItemHandler) ListItems(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		handleServiceError(w, err)
 		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// ListStarredItems はユーザーの全フィード横断スター記事一覧を取得する。
+// GET /api/feeds/starred/items?cursor=xxx
+//
+// 認証必須（UserIDFromContext 失敗で 401 / Requirement 4.6）。
+// cursor クエリパラメータが指定された場合は当該時刻より前の続きページを返し、
+// 指定がない場合は先頭ページを返す（Requirement 4.4 / 4.5）。
+// 不正カーソルは service 層が model.NewInvalidFilterError を返し、handleServiceError で
+// 400 にマップされる（Requirement 4.8）。
+// 応答スキーマは既存 ListItems と同形（items / next_cursor / has_more）に加え、
+// 各記事行に feed_title を併記する（Requirement 4.3 / 4.10 / NFR 3.1）。
+func (h *ItemHandler) ListStarredItems(w http.ResponseWriter, r *http.Request) {
+	userID, err := middleware.UserIDFromContext(r.Context())
+	if err != nil {
+		middleware.WriteErrorResponse(w, http.StatusUnauthorized, &model.APIError{
+			Code:     "UNAUTHORIZED",
+			Message:  "認証が必要です。",
+			Category: "auth",
+			Action:   "ログインしてください。",
+		})
+		return
+	}
+
+	cursor := r.URL.Query().Get("cursor")
+
+	result, err := h.service.ListStarredItems(r.Context(), userID, cursor, defaultItemsPerPage)
+	if err != nil {
+		handleServiceError(w, err)
+		return
+	}
+
+	// Items が nil の場合でも JSON で `"items": []` を返すために空スライスに正規化する
+	// （Requirement 4.7: スター 0 件で items=[] / has_more=false / NFR 3.1）。
+	if result.Items == nil {
+		result.Items = []starredItemSummaryResponse{}
 	}
 
 	w.Header().Set("Content-Type", "application/json")

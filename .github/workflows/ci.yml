@@ -10,6 +10,30 @@ jobs:
   backend:
     name: Backend Tests
     runs-on: ubuntu-latest
+    services:
+      # DB 連動テスト（internal/database / internal/repository）が t.Skipf で silently skip
+      # されず実際に RUN されるよう、テスト側 default と同じ接続情報の PostgreSQL を service
+      # container として起動する（#146 / Related #143）。これが無いと migrate 冪等性・
+      # repository 層の回帰を CI で検知できない。
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: feedman
+          POSTGRES_PASSWORD: feedman
+          POSTGRES_DB: feedman_test
+        # job は runner 上で直接実行されるため、localhost:5432 で到達できるようポートを公開する。
+        ports:
+          - 5432:5432
+        # healthcheck が healthy になるまで GitHub Actions が steps の開始を待機する。
+        options: >-
+          --health-cmd "pg_isready -U feedman -d feedman_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # internal/database/migrate_test.go の testDatabaseURL と同一の接続情報。
+      # 未設定だと各 setup ヘルパーが DB へ接続できず DB 連動テストを skip する。
+      TEST_DATABASE_URL: postgres://feedman:feedman@localhost:5432/feedman_test?sslmode=disable
     steps:
       - uses: actions/checkout@v4
 

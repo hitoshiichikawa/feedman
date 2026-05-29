@@ -12,14 +12,19 @@ global.fetch = mockFetch;
 
 // IntersectionObserverのモック
 const mockIntersectionObserver = vi.fn();
-mockIntersectionObserver.mockImplementation((callback: IntersectionObserverCallback) => ({
+mockIntersectionObserver.mockImplementation(() => ({
   observe: vi.fn(),
   unobserve: vi.fn(),
   disconnect: vi.fn(),
 }));
 global.IntersectionObserver = mockIntersectionObserver;
 
-/** テスト用ラッパー */
+/** テスト用ラッパー
+ *
+ * Issue #145 / Task 3 で `ItemList` からフィードヘッダ責務（FeedSearchBar / ManualRefreshButton
+ * / フィルタタブ等）を切り出したため、AppStateProvider は本テストでは不要になった
+ * （`useItems` は内部で React Query を使うため QueryClientProvider のみ提供する）。
+ */
 function createWrapper() {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -29,9 +34,7 @@ function createWrapper() {
   });
   return function Wrapper({ children }: { children: ReactNode }) {
     return (
-      <QueryClientProvider client={queryClient}>
-        {children}
-      </QueryClientProvider>
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
     );
   };
 }
@@ -160,6 +163,7 @@ describe("ItemList コンポーネント", () => {
         feedId={null}
         onSelectItem={() => {}}
         expandedItemId={null}
+        filter="all"
       />,
       { wrapper: createWrapper() }
     );
@@ -173,6 +177,7 @@ describe("ItemList コンポーネント", () => {
         feedId="feed-1"
         onSelectItem={() => {}}
         expandedItemId={null}
+        filter="all"
       />,
       { wrapper: createWrapper() }
     );
@@ -196,6 +201,7 @@ describe("ItemList コンポーネント", () => {
         feedId="feed-1"
         onSelectItem={() => {}}
         expandedItemId={null}
+        filter="all"
       />,
       { wrapper: createWrapper() }
     );
@@ -209,43 +215,19 @@ describe("ItemList コンポーネント", () => {
     expect(within(estimatedItem).getByTestId("date-estimated")).toBeInTheDocument();
   });
 
-  it("フィルタ切替UI（全て/未読/スター）が表示されること", async () => {
+  it("filter props で渡された値が API リクエストの filter パラメータに反映されること（Req 3.3）", async () => {
+    // Arrange / Act: filter="unread" を渡してマウント
     render(
       <ItemList
         feedId="feed-1"
         onSelectItem={() => {}}
         expandedItemId={null}
+        filter="unread"
       />,
       { wrapper: createWrapper() }
     );
 
-    await waitFor(() => {
-      expect(screen.getByRole("tab", { name: "全て" })).toBeInTheDocument();
-    });
-
-    expect(screen.getByRole("tab", { name: "未読" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "スター" })).toBeInTheDocument();
-  });
-
-  it("フィルタを切り替えるとAPIにフィルタパラメータが送信されること", async () => {
-    const user = userEvent.setup();
-
-    render(
-      <ItemList
-        feedId="feed-1"
-        onSelectItem={() => {}}
-        expandedItemId={null}
-      />,
-      { wrapper: createWrapper() }
-    );
-
-    await waitFor(() => {
-      expect(screen.getByRole("tab", { name: "未読" })).toBeInTheDocument();
-    });
-
-    // 「未読」フィルタをクリック
-    await user.click(screen.getByRole("tab", { name: "未読" }));
-
+    // Assert: API リクエストが filter=unread を含む
     await waitFor(() => {
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining("filter=unread"),
@@ -263,6 +245,7 @@ describe("ItemList コンポーネント", () => {
         feedId="feed-1"
         onSelectItem={onSelectItem}
         expandedItemId={null}
+        filter="all"
       />,
       { wrapper: createWrapper() }
     );
@@ -282,6 +265,7 @@ describe("ItemList コンポーネント", () => {
         feedId="feed-1"
         onSelectItem={() => {}}
         expandedItemId={null}
+        filter="all"
       />,
       { wrapper: createWrapper() }
     );
@@ -305,6 +289,7 @@ describe("ItemList コンポーネント", () => {
         feedId="feed-1"
         onSelectItem={() => {}}
         expandedItemId={null}
+        filter="all"
       />,
       { wrapper: createWrapper() }
     );
@@ -329,6 +314,7 @@ describe("ItemList コンポーネント", () => {
         feedId="feed-1"
         onSelectItem={() => {}}
         expandedItemId={null}
+        filter="all"
       />,
       { wrapper: createWrapper() }
     );
@@ -344,6 +330,7 @@ describe("ItemList コンポーネント", () => {
         feedId="feed-1"
         onSelectItem={() => {}}
         expandedItemId={null}
+        filter="all"
       />,
       { wrapper: createWrapper() }
     );
@@ -367,6 +354,7 @@ describe("ItemList コンポーネント", () => {
         feedId="feed-1"
         onSelectItem={onSelectItem}
         expandedItemId={null}
+        filter="all"
       />,
       { wrapper: createWrapper() }
     );
@@ -382,12 +370,38 @@ describe("ItemList コンポーネント", () => {
     expect(onSelectItem).not.toHaveBeenCalled();
   });
 
+  it("filter props が未指定の場合は 'all' fallback として動作すること（Task 4 までのビルド非破壊橋渡し）", async () => {
+    // Arrange / Act: filter を省略してマウント
+    render(
+      <ItemList
+        feedId="feed-1"
+        onSelectItem={() => {}}
+        expandedItemId={null}
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    // Assert: 一覧描画が成功し、API リクエストが filter=all で発火する（既存挙動の非回帰担保）
+    await waitFor(() => {
+      expect(screen.getByText("最新の記事タイトル")).toBeInTheDocument();
+    });
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("filter=all"),
+      expect.any(Object)
+    );
+  });
+
   // --- 概要表示 (Requirement 2) ---
 
   it("概要があるとき記事行のタイトル直下に概要が表示されること", async () => {
     // Arrange / Act
     render(
-      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      <ItemList
+        feedId="feed-1"
+        onSelectItem={() => {}}
+        expandedItemId={null}
+        filter="all"
+      />,
       { wrapper: createWrapper() }
     );
 
@@ -404,7 +418,12 @@ describe("ItemList コンポーネント", () => {
   it("概要が空のとき概要領域を描画しないこと", async () => {
     // Arrange / Act
     render(
-      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      <ItemList
+        feedId="feed-1"
+        onSelectItem={() => {}}
+        expandedItemId={null}
+        filter="all"
+      />,
       { wrapper: createWrapper() }
     );
 
@@ -420,7 +439,12 @@ describe("ItemList コンポーネント", () => {
   it("概要テキストがタイトルより小さく薄い配色で表示されること", async () => {
     // Arrange / Act
     render(
-      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      <ItemList
+        feedId="feed-1"
+        onSelectItem={() => {}}
+        expandedItemId={null}
+        filter="all"
+      />,
       { wrapper: createWrapper() }
     );
 
@@ -440,7 +464,12 @@ describe("ItemList コンポーネント", () => {
   it("概要が最大2行で省略されるよう line-clamp-2 が適用されること", async () => {
     // Arrange / Act
     render(
-      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      <ItemList
+        feedId="feed-1"
+        onSelectItem={() => {}}
+        expandedItemId={null}
+        filter="all"
+      />,
       { wrapper: createWrapper() }
     );
 
@@ -458,7 +487,12 @@ describe("ItemList コンポーネント", () => {
   it("公開日時がタイトルと同一行の右側に配置されること", async () => {
     // Arrange / Act
     render(
-      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      <ItemList
+        feedId="feed-1"
+        onSelectItem={() => {}}
+        expandedItemId={null}
+        filter="all"
+      />,
       { wrapper: createWrapper() }
     );
 
@@ -481,7 +515,12 @@ describe("ItemList コンポーネント", () => {
   it("推定日付の記事では推定フラグが日時に隣接して表示されること", async () => {
     // Arrange / Act
     render(
-      <ItemList feedId="feed-1" onSelectItem={() => {}} expandedItemId={null} />,
+      <ItemList
+        feedId="feed-1"
+        onSelectItem={() => {}}
+        expandedItemId={null}
+        filter="all"
+      />,
       { wrapper: createWrapper() }
     );
 
@@ -495,6 +534,36 @@ describe("ItemList コンポーネント", () => {
     const estimated = within(row).getByTestId("date-estimated");
     // 推定フラグはタイトル行（=日時のある行）に維持される
     expect(titleRow).toContainElement(estimated as HTMLElement);
+  });
+
+  // --- フィードヘッダ責務移譲後の非描画確認 (Issue #145 / Task 3 / Req 3.3 / NFR 1.1) ---
+
+  it("ItemList 単体ではフィードヘッダ要素（フィルタタブ / FeedSearchBar / ManualRefreshButton）を描画しないこと", async () => {
+    // Arrange / Act: 通常マウント
+    render(
+      <ItemList
+        feedId="feed-1"
+        onSelectItem={() => {}}
+        expandedItemId={null}
+        filter="all"
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("最新の記事タイトル")).toBeInTheDocument();
+    });
+
+    // Assert: フィードヘッダ要素は `FeedPaneHeader` 側に移譲済みで ItemList 単体では描画されない
+    expect(screen.queryByRole("tab", { name: "全て" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "未読" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "スター" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("feed-search-bar")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("feed-search-input")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "フィードを更新" })
+    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("manual-refresh-banner")).not.toBeInTheDocument();
   });
 });
 
@@ -513,6 +582,7 @@ describe("ItemList コンポーネント: 記事詳細の展開表示", () => {
         feedId="feed-1"
         onSelectItem={() => {}}
         expandedItemId="item-1"
+        filter="all"
       />,
       { wrapper: createWrapper() }
     );
@@ -542,6 +612,7 @@ describe("ItemList コンポーネント: 記事詳細の展開表示", () => {
         feedId="feed-1"
         onSelectItem={() => {}}
         expandedItemId="item-1"
+        filter="all"
       />,
       { wrapper: createWrapper() }
     );
@@ -564,6 +635,7 @@ describe("ItemList コンポーネント: 記事詳細の展開表示", () => {
         feedId="feed-1"
         onSelectItem={() => {}}
         expandedItemId={null}
+        filter="all"
       />,
       { wrapper: createWrapper() }
     );
@@ -591,6 +663,7 @@ describe("ItemList コンポーネント: 記事詳細の展開表示", () => {
         feedId="feed-1"
         onSelectItem={() => {}}
         expandedItemId="item-1"
+        filter="all"
       />,
       { wrapper: createWrapper() }
     );
@@ -612,6 +685,7 @@ describe("ItemList コンポーネント: 記事詳細の展開表示", () => {
         feedId="feed-1"
         onSelectItem={() => {}}
         expandedItemId="item-1"
+        filter="all"
       />,
       { wrapper: createWrapper() }
     );
@@ -633,6 +707,7 @@ describe("ItemList コンポーネント: 記事詳細の展開表示", () => {
         feedId="feed-1"
         onSelectItem={() => {}}
         expandedItemId="item-1"
+        filter="all"
       />,
       { wrapper: createWrapper() }
     );
@@ -665,6 +740,7 @@ describe("ItemList コンポーネント: 記事詳細の展開表示", () => {
         feedId="feed-1"
         onSelectItem={() => {}}
         expandedItemId="item-2"
+        filter="all"
       />,
       { wrapper: createWrapper() }
     );
@@ -691,6 +767,7 @@ describe("ItemList コンポーネント: 記事詳細の展開表示", () => {
         feedId="feed-1"
         onSelectItem={() => {}}
         expandedItemId="item-1"
+        filter="all"
       />,
       { wrapper: createWrapper() }
     );
@@ -744,6 +821,7 @@ describe("ItemList コンポーネント: 記事詳細の展開表示", () => {
         feedId="feed-1"
         onSelectItem={() => {}}
         expandedItemId="item-1"
+        filter="all"
       />,
       { wrapper: createWrapper() }
     );
@@ -758,6 +836,7 @@ describe("ItemList コンポーネント: 記事詳細の展開表示", () => {
         feedId="feed-1"
         onSelectItem={() => {}}
         expandedItemId="item-2"
+        filter="all"
       />
     );
 
@@ -779,6 +858,7 @@ describe("ItemList コンポーネント: 記事詳細の展開表示", () => {
         feedId="feed-1"
         onSelectItem={() => {}}
         expandedItemId="item-1"
+        filter="all"
       />,
       { wrapper: createWrapper() }
     );
@@ -793,6 +873,7 @@ describe("ItemList コンポーネント: 記事詳細の展開表示", () => {
         feedId="feed-1"
         onSelectItem={() => {}}
         expandedItemId={null}
+        filter="all"
       />
     );
 

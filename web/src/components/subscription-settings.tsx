@@ -31,8 +31,14 @@ import type { Subscription } from "@/types/feed";
 interface SubscriptionSettingsProps {
   /** 対象の購読データ */
   subscription: Subscription;
-  /** 購読解除完了時のコールバック */
-  onUnsubscribed: () => void;
+  /**
+   * 購読解除完了時のコールバック。
+   *
+   * 解除された subscription の `feed_id` を引数として受け取る。AppShell 側で
+   * 「解除されたフィードが現在右ペインに選択されていれば clear、そうでなければ
+   * 維持」の分岐（AC 4.2 / 4.3）を行うために必要。
+   */
+  onUnsubscribed: (unsubscribedFeedId: string) => void;
 }
 
 /** フェッチ間隔の選択肢（30分刻み、30分-12時間） */
@@ -93,7 +99,7 @@ export function SubscriptionSettings({
     unsubscribe.mutate(subscription.id, {
       onSuccess: () => {
         setShowUnsubscribeDialog(false);
-        onUnsubscribed();
+        onUnsubscribed(subscription.feed_id);
       },
     });
   };

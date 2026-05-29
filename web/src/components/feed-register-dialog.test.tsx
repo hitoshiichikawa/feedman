@@ -108,7 +108,65 @@ describe("FeedRegisterDialog コンポーネント", () => {
     });
   });
 
-  it("登録成功時にフィードURLが表示されユーザーが変更可能であること", async () => {
+  it("登録成功時にダイアログが自動で閉じ onRegistered が 1 回だけ呼ばれること", async () => {
+    const user = userEvent.setup();
+    const onRegistered = vi.fn();
+    const feedResponse = {
+      id: "feed-1",
+      feed_url: "https://example.com/feed.xml",
+      title: "Example Feed",
+      site_url: "https://example.com",
+      favicon_url: null,
+      feed_status: "active",
+      created_at: "2026-01-01T00:00:00Z",
+    };
+
+    mockFetch.mockImplementation((url: string, options?: RequestInit) => {
+      if (url === "/api/feeds" && options?.method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => feedResponse,
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({}),
+      });
+    });
+
+    render(<FeedRegisterDialog onRegistered={onRegistered} />, {
+      wrapper: createWrapper(),
+    });
+
+    await user.click(screen.getByRole("button", { name: "フィード追加" }));
+    await user.type(
+      screen.getByPlaceholderText("https://example.com"),
+      "https://example.com"
+    );
+    await user.click(screen.getByRole("button", { name: "登録" }));
+
+    // 登録成功後、ダイアログが自動で閉じる（要件 1.1 / 2.1〜2.3）
+    await waitFor(() => {
+      expect(
+        screen.queryByPlaceholderText("https://example.com")
+      ).not.toBeInTheDocument();
+    });
+
+    // 「登録完了」UI（タイトル・フィードURL欄・閉じるボタン）が存在しない（要件 2.1〜2.3）
+    expect(screen.queryByText("登録完了")).not.toBeInTheDocument();
+    expect(
+      screen.queryByDisplayValue("https://example.com/feed.xml")
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "閉じる" })
+    ).not.toBeInTheDocument();
+
+    // onRegistered が登録結果と共に 1 回だけ呼ばれる（要件 1.3）
+    expect(onRegistered).toHaveBeenCalledTimes(1);
+    expect(onRegistered).toHaveBeenCalledWith(feedResponse);
+  });
+
+  it("登録成功で閉じた後に再度ダイアログを開いた際 URL 入力欄が空でエラー表示が残っていないこと", async () => {
     const user = userEvent.setup();
 
     mockFetch.mockImplementation((url: string, options?: RequestInit) => {
@@ -136,6 +194,7 @@ describe("FeedRegisterDialog コンポーネント", () => {
       wrapper: createWrapper(),
     });
 
+    // 1 回目: 登録成功 → 自動で閉じる
     await user.click(screen.getByRole("button", { name: "フィード追加" }));
     await user.type(
       screen.getByPlaceholderText("https://example.com"),
@@ -143,14 +202,21 @@ describe("FeedRegisterDialog コンポーネント", () => {
     );
     await user.click(screen.getByRole("button", { name: "登録" }));
 
-    // 登録成功後、フィードURLが表示される
     await waitFor(() => {
-      expect(screen.getByText("登録完了")).toBeInTheDocument();
+      expect(
+        screen.queryByPlaceholderText("https://example.com")
+      ).not.toBeInTheDocument();
     });
 
-    // フィードURL表示欄があること
-    const feedUrlInput = screen.getByDisplayValue("https://example.com/feed.xml");
-    expect(feedUrlInput).toBeInTheDocument();
+    // 2 回目: 再度開いた時に URL 入力欄が空で入力フェーズで表示される（要件 1.4）
+    await user.click(screen.getByRole("button", { name: "フィード追加" }));
+
+    const urlInput = screen.getByPlaceholderText(
+      "https://example.com"
+    ) as HTMLInputElement;
+    expect(urlInput).toBeInTheDocument();
+    expect(urlInput.value).toBe("");
+    expect(screen.getByText("フィードを登録")).toBeInTheDocument();
   });
 
   it("フィード未検出エラー時にエラーメッセージを表示すること", async () => {

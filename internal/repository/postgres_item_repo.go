@@ -279,6 +279,190 @@ func (r *PostgresItemRepo) ListByFeed(
 	return items, nil
 }
 
+// ListStarredByUser は指定ユーザーがスター付与した記事を全フィード横断・published_at降順で取得する。
+// items と item_states と feeds を INNER JOIN し、feed_title を付与する。
+// cursor がゼロ値の場合は先頭から取得する。
+// SQL 形状は既存 idx_item_states_user_starred (user_id, is_starred) WHERE is_starred = true
+// 部分インデックスを利用可能（NFR 1.1 / NFR 1.2）。
+func (r *PostgresItemRepo) ListStarredByUser(
+	ctx context.Context,
+	userID string,
+	cursor time.Time,
+	limit int,
+) ([]StarredItemRow, error) {
+	// ベースクエリ: items INNER JOIN item_states INNER JOIN feeds
+	// INNER JOIN を採用（スター付き = item_states 行存在が前提なので LEFT JOIN は不要）。
+	// f.title AS feed_title を SELECT に含める（Requirement 2.4 / 4.10）。
+	baseQuery := `
+		SELECT i.id, i.feed_id, i.guid_or_id, i.title, i.link, i.summary, i.author,
+		       i.published_at, i.is_date_estimated, i.fetched_at,
+		       i.hatebu_count, i.created_at, i.updated_at,
+		       COALESCE(s.is_read, false) AS is_read,
+		       true AS is_starred,
+		       f.title AS feed_title
+		FROM items i
+		INNER JOIN item_states s ON i.id = s.item_id
+		INNER JOIN feeds f ON i.feed_id = f.id
+		WHERE s.user_id = $1
+		  AND s.is_starred = true`
+
+	args := []interface{}{userID}
+	argIndex := 2
+
+	// カーソルベースページネーション
+	if !cursor.IsZero() {
+		baseQuery += fmt.Sprintf(" AND i.published_at < $%d", argIndex)
+		args = append(args, cursor)
+		argIndex++
+	}
+
+	// ソートとリミット（既存 ListByFeed と同じ published_at DESC）
+	baseQuery += fmt.Sprintf(" ORDER BY i.published_at DESC LIMIT $%d", argIndex)
+	args = append(args, limit)
+
+	rows, err := r.db.QueryContext(ctx, baseQuery, args...)
+	if err != nil {
+		return nil, fmt.Errorf("スター記事一覧の取得に失敗しました: %w", err)
+	}
+	defer rows.Close()
+
+	var items []StarredItemRow
+	for rows.Next() {
+		var row StarredItemRow
+		var publishedAt sql.NullTime
+		var guidOrID, link, summary, author sql.NullString
+
+		if err := rows.Scan(
+			&row.ID, &row.FeedID, &guidOrID, &row.Title, &link,
+			&summary, &author,
+			&publishedAt, &row.IsDateEstimated, &row.FetchedAt,
+			&row.HatebuCount, &row.CreatedAt, &row.UpdatedAt,
+			&row.IsRead, &row.IsStarred,
+			&row.FeedTitle,
+		); err != nil {
+			return nil, fmt.Errorf("スター記事行の読み取りに失敗しました: %w", err)
+		}
+
+		row.GuidOrID = nullStringValue(guidOrID)
+		row.Link = nullStringValue(link)
+		row.Summary = nullStringValue(summary)
+		row.Author = nullStringValue(author)
+		if publishedAt.Valid {
+			row.PublishedAt = &publishedAt.Time
+		}
+
+		items = append(items, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("スター記事一覧の走査に失敗しました: %w", err)
+	}
+
+	return items, nil
+}
+
+// ListNewAcrossFeeds はユーザーの全購読フィードから sinceTime より後の記事を横断取得する。
+// items × subscriptions × feeds × item_states を 1 クエリで JOIN し、
+// (published_at, id) 複合キーによる cursor ベースページングを提供する。
+// cursorPublishedAt がゼロ値かつ cursorItemID が空文字の場合は cursor なし扱いで先頭から取得する。
+// 戻り値は published_at DESC, id DESC で決定論的に並ぶ（Issue #121 / Req 2.1, 2.2, 2.3, 4.2）。
+func (r *PostgresItemRepo) ListNewAcrossFeeds(
+	ctx context.Context,
+	userID string,
+	sinceTime time.Time,
+	cursorPublishedAt time.Time,
+	cursorItemID string,
+	limit int,
+) ([]CrossFeedItem, error) {
+	// cursorPublishedAt / cursorItemID をともに有効値として扱うのは
+	// いずれも非ゼロ値（cursorPublishedAt が非ゼロ、かつ cursorItemID が空文字でない）のときのみ。
+	// 片方のみゼロ値で渡された場合は cursor なし扱い（先頭から取得）にして、
+	// 呼び出し側のバリデーション漏れを安全側に倒す。
+	hasCursor := !cursorPublishedAt.IsZero() && cursorItemID != ""
+
+	// $1: userID（subscriptions.user_id と item_states.user_id の両方に紐づけ）
+	// $2: sinceTime（i.published_at > sinceTime の境界）
+	// cursor あり時: $3 = cursorPublishedAt, $4 = cursorItemID, $5 = limit
+	// cursor なし時: $3 = limit
+	var query string
+	var args []interface{}
+	if hasCursor {
+		query = `
+			SELECT i.id, i.feed_id, i.guid_or_id, i.title, i.link, i.summary, i.author,
+			       i.published_at, i.is_date_estimated, i.fetched_at,
+			       i.hatebu_count, i.created_at, i.updated_at,
+			       COALESCE(st.is_read, false)   AS is_read,
+			       COALESCE(st.is_starred, false) AS is_starred,
+			       f.title AS feed_title,
+			       f.favicon_data, COALESCE(f.favicon_mime, '') AS favicon_mime
+			FROM items i
+			JOIN subscriptions s ON s.feed_id = i.feed_id AND s.user_id = $1
+			JOIN feeds f ON f.id = i.feed_id
+			LEFT JOIN item_states st ON st.item_id = i.id AND st.user_id = $1
+			WHERE i.published_at > $2
+			  AND (i.published_at, i.id) < ($3, $4::uuid)
+			ORDER BY i.published_at DESC, i.id DESC
+			LIMIT $5`
+		args = []interface{}{userID, sinceTime, cursorPublishedAt, cursorItemID, limit}
+	} else {
+		query = `
+			SELECT i.id, i.feed_id, i.guid_or_id, i.title, i.link, i.summary, i.author,
+			       i.published_at, i.is_date_estimated, i.fetched_at,
+			       i.hatebu_count, i.created_at, i.updated_at,
+			       COALESCE(st.is_read, false)   AS is_read,
+			       COALESCE(st.is_starred, false) AS is_starred,
+			       f.title AS feed_title,
+			       f.favicon_data, COALESCE(f.favicon_mime, '') AS favicon_mime
+			FROM items i
+			JOIN subscriptions s ON s.feed_id = i.feed_id AND s.user_id = $1
+			JOIN feeds f ON f.id = i.feed_id
+			LEFT JOIN item_states st ON st.item_id = i.id AND st.user_id = $1
+			WHERE i.published_at > $2
+			ORDER BY i.published_at DESC, i.id DESC
+			LIMIT $3`
+		args = []interface{}{userID, sinceTime, limit}
+	}
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("横断新着記事一覧の取得に失敗しました: %w", err)
+	}
+	defer rows.Close()
+
+	var items []CrossFeedItem
+	for rows.Next() {
+		var row CrossFeedItem
+		var publishedAt sql.NullTime
+		var guidOrID, link, summary, author sql.NullString
+
+		if err := rows.Scan(
+			&row.ID, &row.FeedID, &guidOrID, &row.Title, &link,
+			&summary, &author,
+			&publishedAt, &row.IsDateEstimated, &row.FetchedAt,
+			&row.HatebuCount, &row.CreatedAt, &row.UpdatedAt,
+			&row.IsRead, &row.IsStarred,
+			&row.FeedTitle,
+			&row.FaviconData, &row.FaviconMime,
+		); err != nil {
+			return nil, fmt.Errorf("横断新着記事行の読み取りに失敗しました: %w", err)
+		}
+
+		row.GuidOrID = nullStringValue(guidOrID)
+		row.Link = nullStringValue(link)
+		row.Summary = nullStringValue(summary)
+		row.Author = nullStringValue(author)
+		if publishedAt.Valid {
+			row.PublishedAt = &publishedAt.Time
+		}
+
+		items = append(items, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("横断新着記事一覧の走査に失敗しました: %w", err)
+	}
+
+	return items, nil
+}
+
 // Create は新規記事を作成する。
 func (r *PostgresItemRepo) Create(ctx context.Context, item *model.Item) error {
 	_, err := r.db.ExecContext(ctx,
@@ -628,6 +812,115 @@ func bulkUpdateItems(ctx context.Context, tx *sql.Tx, items []*model.Item) error
 	return nil
 }
 
+// SearchByUserAndKeyword は当該ユーザーが購読中のフィードに属する記事から
+// title または content がキーワードに部分一致するものを取得する。
+//
+// feedID が nil の場合は横断検索（購読中フィード全体）、非 nil の場合は
+// 当該フィードのみのフィード内検索を行う（SQL 上は `$3::uuid IS NULL` ガードで
+// 同一クエリ内で両モードを表現する）。pattern は ILIKE に渡す '%escaped%'
+// 形式を呼び出し側で組み立てる前提。
+//
+// cursorPublishedAt がゼロ値のときはカーソル条件を WHERE から外し先頭から取得する
+// （`$4::timestamptz IS NULL` ガードで実現）。非ゼロ値時は
+// (published_at, id) < (cursor) のタプル比較で安定したページネーションを行う。
+//
+// 本実装は SELECT 専用であり items / item_states / feeds / subscriptions に
+// UPDATE / INSERT を一切行わない（Req 5.3 の不変条件）。
+func (r *PostgresItemRepo) SearchByUserAndKeyword(
+	ctx context.Context,
+	userID, pattern string,
+	feedID *string,
+	cursorID string,
+	cursorPublishedAt time.Time,
+	limit int,
+) ([]model.ItemSearchHit, error) {
+	// $3 (feed_id): feedID == nil なら NULL、非 nil なら *feedID。
+	// SQL 側の `$3::uuid IS NULL OR i.feed_id = $3` ガードで横断 / フィード内を切り替える。
+	var feedIDArg interface{}
+	if feedID != nil {
+		feedIDArg = *feedID
+	} else {
+		feedIDArg = nil
+	}
+
+	// $4 (cursor published_at) / $5 (cursor id): cursorPublishedAt がゼロ値なら NULL。
+	// SQL 側の `$4::timestamptz IS NULL` ガードでカーソル条件を WHERE から外す。
+	var cursorPublishedAtArg interface{}
+	var cursorIDArg interface{}
+	if !cursorPublishedAt.IsZero() {
+		cursorPublishedAtArg = cursorPublishedAt
+		cursorIDArg = cursorID
+	} else {
+		cursorPublishedAtArg = nil
+		cursorIDArg = nil
+	}
+
+	const query = `
+		SELECT
+		    i.id, i.feed_id, i.title, i.link, i.summary,
+		    i.published_at, i.is_date_estimated, i.hatebu_count,
+		    f.title AS feed_title,
+		    f.favicon_data, f.favicon_mime,
+		    COALESCE(st.is_read, false)   AS is_read,
+		    COALESCE(st.is_starred, false) AS is_starred
+		FROM items i
+		JOIN subscriptions s
+		    ON s.feed_id = i.feed_id
+		   AND s.user_id = $1
+		JOIN feeds f
+		    ON f.id = i.feed_id
+		LEFT JOIN item_states st
+		    ON st.item_id = i.id
+		   AND st.user_id = $1
+		WHERE (i.title ILIKE $2 OR i.content ILIKE $2)
+		  AND ($3::uuid IS NULL OR i.feed_id = $3)
+		  AND ($4::timestamptz IS NULL
+		       OR (i.published_at, i.id) < ($4, $5::uuid))
+		ORDER BY i.published_at DESC NULLS LAST, i.id DESC
+		LIMIT $6`
+
+	rows, err := r.db.QueryContext(ctx, query,
+		userID, pattern, feedIDArg, cursorPublishedAtArg, cursorIDArg, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("記事検索の取得に失敗しました: %w", err)
+	}
+	defer rows.Close()
+
+	var hits []model.ItemSearchHit
+	for rows.Next() {
+		var hit model.ItemSearchHit
+		var link, summary, faviconMime sql.NullString
+		var publishedAt sql.NullTime
+
+		if err := rows.Scan(
+			&hit.ID, &hit.FeedID, &hit.Title, &link, &summary,
+			&publishedAt, &hit.IsDateEstimated, &hit.HatebuCount,
+			&hit.FeedTitle,
+			&hit.FaviconData, &faviconMime,
+			&hit.IsRead, &hit.IsStarred,
+		); err != nil {
+			return nil, fmt.Errorf("記事検索結果の走査に失敗しました: %w", err)
+		}
+
+		hit.Link = nullStringValue(link)
+		hit.Summary = nullStringValue(summary)
+		hit.FaviconMime = nullStringValue(faviconMime)
+		// items.published_at は NULLABLE。NULL の場合はゼロ値 time.Time{} を保持する。
+		if publishedAt.Valid {
+			hit.PublishedAt = publishedAt.Time
+		}
+
+		hits = append(hits, hit)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("記事検索結果の走査に失敗しました: %w", err)
+	}
+
+	return hits, nil
+}
+
 // compile-time interface check
 var _ ItemRepository = (*PostgresItemRepo)(nil)
 var _ HatebuItemRepository = (*PostgresItemRepo)(nil)
+var _ ItemSearchRepository = (*PostgresItemRepo)(nil)

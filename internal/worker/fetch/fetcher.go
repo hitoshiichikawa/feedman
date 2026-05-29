@@ -176,6 +176,7 @@ func (f *Fetcher) Fetch(ctx context.Context, feed *model.Feed) error {
 		// 304 は「変更なしで取得成功」として扱い成功数を増加させる（Requirement 2.1）。
 		f.metrics.RecordFetchSuccess(feed.ID)
 		ApplySuccess(feed, interval)
+		f.recordLastSuccessfulFetch(ctx, feed.ID)
 		return f.feedRepo.UpdateFetchState(ctx, feed)
 
 	case FetchResultStop:
@@ -299,6 +300,7 @@ func (f *Fetcher) Fetch(ctx context.Context, feed *model.Feed) error {
 	}
 
 	ApplySuccess(feed, interval)
+	f.recordLastSuccessfulFetch(ctx, feed.ID)
 
 	// フィード状態を更新
 	if updateErr := f.feedRepo.UpdateFetchState(ctx, feed); updateErr != nil {
@@ -324,6 +326,18 @@ func (f *Fetcher) Fetch(ctx context.Context, feed *model.Feed) error {
 	)
 
 	return nil
+}
+
+// recordLastSuccessfulFetch は ApplySuccess 直後にフィードの最終成功時刻を更新する。
+// 更新失敗時は警告ログのみ出力し、フェッチ自体は成功扱いを維持する（手動フェッチ側の
+// クールダウン判定の起点を温存することを目的とし、Issue #115 Req 2.4 を満たす）。
+func (f *Fetcher) recordLastSuccessfulFetch(ctx context.Context, feedID string) {
+	if err := f.feedRepo.UpdateLastSuccessfulFetchAt(ctx, feedID, time.Now()); err != nil {
+		f.logger.Warn("最終成功時刻の更新に失敗しました",
+			slog.String("feed_id", feedID),
+			slog.String("error", err.Error()),
+		)
+	}
 }
 
 // getMinFetchInterval はフィードの全購読者の中で最小のfetch_interval_minutesを取得する。

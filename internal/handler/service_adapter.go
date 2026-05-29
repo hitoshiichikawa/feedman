@@ -2,9 +2,13 @@ package handler
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
 	"time"
 
+	"github.com/hitoshi/feedman/internal/crossfeed"
 	"github.com/hitoshi/feedman/internal/item"
+	"github.com/hitoshi/feedman/internal/itemsearch"
 	"github.com/hitoshi/feedman/internal/model"
 	"github.com/hitoshi/feedman/internal/repository"
 	"github.com/hitoshi/feedman/internal/subscription"
@@ -53,6 +57,17 @@ func (a *SubscriptionServiceAdapter) Unsubscribe(ctx context.Context, userID, su
 // ResumeFetch は停止中フィードのフェッチを再開しhandlerレスポンス型で返す。
 func (a *SubscriptionServiceAdapter) ResumeFetch(ctx context.Context, userID, subscriptionID string) (*subscriptionResponse, error) {
 	info, err := a.svc.ResumeFetch(ctx, userID, subscriptionID)
+	if err != nil {
+		return nil, err
+	}
+	resp := toSubscriptionResponse(*info)
+	return &resp, nil
+}
+
+// ManualFetch は手動フェッチを実行し、更新後の購読情報を handler レスポンス型で返す（Issue #115）。
+// クールダウン中 / 行ロック競合時はサービス層が APIError を返し、本アダプタはそのまま透過する。
+func (a *SubscriptionServiceAdapter) ManualFetch(ctx context.Context, userID, subscriptionID string) (*subscriptionResponse, error) {
+	info, err := a.svc.ManualFetch(ctx, userID, subscriptionID)
 	if err != nil {
 		return nil, err
 	}
@@ -132,6 +147,41 @@ func (a *ItemServiceAdapterFromDomain) ListItems(ctx context.Context, userID, fe
 	}, nil
 }
 
+// ListStarredItems は全フィード横断スター記事一覧を handler のレスポンス型で返す。
+// ドメイン層 *item.StarredItemListResult を handler 層 *starredItemListResult に変換する。
+// 各記事行に feed_title を併記する（Requirement 2.4 / 4.10）。
+func (a *ItemServiceAdapterFromDomain) ListStarredItems(ctx context.Context, userID, cursorStr string, limit int) (*starredItemListResult, error) {
+	result, err := a.svc.ListStarredItems(ctx, userID, cursorStr, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]starredItemSummaryResponse, len(result.Items))
+	for i, it := range result.Items {
+		items[i] = starredItemSummaryResponse{
+			itemSummaryResponse: itemSummaryResponse{
+				ID:              it.ID,
+				FeedID:          it.FeedID,
+				Title:           it.Title,
+				Link:            it.Link,
+				Summary:         it.Summary,
+				PublishedAt:     it.PublishedAt,
+				IsDateEstimated: it.IsDateEstimated,
+				IsRead:          it.IsRead,
+				IsStarred:       it.IsStarred,
+				HatebuCount:     it.HatebuCount,
+			},
+			FeedTitle: it.FeedTitle,
+		}
+	}
+
+	return &starredItemListResult{
+		Items:      items,
+		NextCursor: result.NextCursor,
+		HasMore:    result.HasMore,
+	}, nil
+}
+
 // GetItem は記事詳細を返す。
 func (a *ItemServiceAdapterFromDomain) GetItem(ctx context.Context, userID, itemID string) (*itemDetailResponse, error) {
 	detail, err := a.svc.GetItem(ctx, userID, itemID)
@@ -204,13 +254,140 @@ func (a *SubscriptionDeleterAdapter) DeleteByUserAndFeed(ctx context.Context, us
 	return a.subRepo.Delete(ctx, sub.ID)
 }
 
+// ItemSearchServiceAdapter は itemsearch.SearchService を ItemSearchServiceInterface に
+// 適合させるアダプタ。
+//
+// 主な責務は、サービス層が返す `itemsearch.SearchResult`（ドメイン型）を
+// `itemSearchResponse`（HTTP レスポンス型）に変換すること。favicon は Service 層が
+// `FaviconData []byte` / `FaviconMime string` の生バイト + MIME を pass-through するため、
+// 本アダプタが `data:<mime>;base64,...` 形式の data URL に整形して `FaviconURL` を populate
+// する（subscription.Service.ListSubscriptions と同じ data URL 化パターンを再利用）。
+type ItemSearchServiceAdapter struct {
+	svc *itemsearch.SearchService
+}
+
+// NewItemSearchServiceAdapter は ItemSearchServiceAdapter を生成する。
+func NewItemSearchServiceAdapter(svc *itemsearch.SearchService) *ItemSearchServiceAdapter {
+	return &ItemSearchServiceAdapter{svc: svc}
+}
+
+// Search はサービス層を呼び出し、結果を handler 用レスポンス型に変換して返す。
+//
+// favicon の data URL 化は本メソッドの責務（サービス層は生バイトのまま pass-through する）。
+// 生バイトと MIME のいずれかが空の場合は data URL を生成せず nil を保持し、JSON では
+// `omitempty` でフィールドごと省略される。
+func (a *ItemSearchServiceAdapter) Search(
+	ctx context.Context,
+	userID, rawQuery string,
+	feedID *string,
+	cursorStr string,
+	limit int,
+) (*itemSearchResponse, error) {
+	result, err := a.svc.Search(ctx, userID, rawQuery, feedID, cursorStr, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	hits := make([]itemSearchHitResponse, len(result.Items))
+	for i, it := range result.Items {
+		hit := itemSearchHitResponse{
+			ID:              it.ID,
+			FeedID:          it.FeedID,
+			FeedTitle:       it.FeedTitle,
+			Title:           it.Title,
+			Link:            it.Link,
+			Summary:         it.Summary,
+			PublishedAt:     it.PublishedAt,
+			IsDateEstimated: it.IsDateEstimated,
+			IsRead:          it.IsRead,
+			IsStarred:       it.IsStarred,
+			HatebuCount:     it.HatebuCount,
+		}
+		// favicon の生バイト + MIME が揃っている場合のみ data URL を組み立てる。
+		// 既存 subscription.Service.ListSubscriptions と同じ流儀
+		// （`data:<mime>;base64,<base64>`）で整形し、欠落時は nil を保持する。
+		if len(it.FaviconData) > 0 && it.FaviconMime != "" {
+			dataURL := fmt.Sprintf("data:%s;base64,%s", it.FaviconMime, base64.StdEncoding.EncodeToString(it.FaviconData))
+			hit.FaviconURL = &dataURL
+		}
+		hits[i] = hit
+	}
+
+	return &itemSearchResponse{
+		Items:      hits,
+		NextCursor: result.NextCursor,
+		HasMore:    result.HasMore,
+	}, nil
+}
+
+// CrossFeedServiceAdapter は crossfeed.Service を CrossFeedServiceInterface に適合させる
+// アダプタ。domain 層の crossfeed.NewItemsResult を handler 層 *crossFeedListResult に変換する。
+//
+// favicon_url は service 層が既に `data:<mime>;base64,...` 形式の data URL 文字列まで
+// 構築済（CrossFeedItemSummary.FeedFaviconURL *string）なので、本アダプタは pass-through する。
+type CrossFeedServiceAdapter struct {
+	svc *crossfeed.Service
+}
+
+// NewCrossFeedServiceAdapter は CrossFeedServiceAdapter を生成する。
+func NewCrossFeedServiceAdapter(svc *crossfeed.Service) *CrossFeedServiceAdapter {
+	return &CrossFeedServiceAdapter{svc: svc}
+}
+
+// ListNewItems は service 層を呼び出し、結果を handler 用レスポンス型に変換して返す。
+// overrideSince は service 層へそのまま転送する（Req 4.7）。
+func (a *CrossFeedServiceAdapter) ListNewItems(
+	ctx context.Context,
+	userID string,
+	cursorStr string,
+	limit int,
+	overrideSince *time.Time,
+) (*crossFeedListResult, error) {
+	result, err := a.svc.ListNewItems(ctx, userID, cursorStr, limit, overrideSince)
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]crossFeedItemResponse, len(result.Items))
+	for i, it := range result.Items {
+		items[i] = crossFeedItemResponse{
+			ID:              it.ID,
+			FeedID:          it.FeedID,
+			FeedTitle:       it.FeedTitle,
+			FeedFaviconURL:  it.FeedFaviconURL,
+			Title:           it.Title,
+			Link:            it.Link,
+			Summary:         it.Summary,
+			PublishedAt:     it.PublishedAt,
+			IsDateEstimated: it.IsDateEstimated,
+			IsRead:          it.IsRead,
+			IsStarred:       it.IsStarred,
+			HatebuCount:     it.HatebuCount,
+		}
+	}
+
+	return &crossFeedListResult{
+		Items:      items,
+		NextCursor: result.NextCursor,
+		HasMore:    result.HasMore,
+		SinceTime:  result.SinceTime,
+	}, nil
+}
+
+// TouchLastSeen は service 層へそのまま転送する（Req 4.3）。
+func (a *CrossFeedServiceAdapter) TouchLastSeen(ctx context.Context, userID string) error {
+	return a.svc.TouchLastSeen(ctx, userID)
+}
+
 // --- compile-time interface checks ---
 
 var _ SubscriptionServiceInterface = (*SubscriptionServiceAdapter)(nil)
 var _ UserServiceInterface = (*UserServiceAdapter)(nil)
 var _ ItemServiceInterface = (*ItemServiceAdapterFromDomain)(nil)
 var _ ItemStateServiceInterface = (*ItemStateServiceAdapterFromRepo)(nil)
+var _ ItemSearchServiceInterface = (*ItemSearchServiceAdapter)(nil)
 var _ SubscriptionDeleter = (*SubscriptionDeleterAdapter)(nil)
+var _ CrossFeedServiceInterface = (*CrossFeedServiceAdapter)(nil)
 
 // zeroTime はゼロ値のtime.Time。
 var zeroTime time.Time

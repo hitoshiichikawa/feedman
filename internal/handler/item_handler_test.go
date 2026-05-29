@@ -17,8 +17,9 @@ import (
 
 // mockItemService はItemServiceInterfaceのモック実装。
 type mockItemService struct {
-	listItemsFn func(ctx context.Context, userID, feedID string, filter model.ItemFilter, cursor string, limit int) (*itemListResult, error)
-	getItemFn   func(ctx context.Context, userID, itemID string) (*itemDetailResponse, error)
+	listItemsFn        func(ctx context.Context, userID, feedID string, filter model.ItemFilter, cursor string, limit int) (*itemListResult, error)
+	getItemFn          func(ctx context.Context, userID, itemID string) (*itemDetailResponse, error)
+	listStarredItemsFn func(ctx context.Context, userID, cursor string, limit int) (*starredItemListResult, error)
 }
 
 func (m *mockItemService) ListItems(ctx context.Context, userID, feedID string, filter model.ItemFilter, cursor string, limit int) (*itemListResult, error) {
@@ -33,6 +34,13 @@ func (m *mockItemService) GetItem(ctx context.Context, userID, itemID string) (*
 		return m.getItemFn(ctx, userID, itemID)
 	}
 	return nil, nil
+}
+
+func (m *mockItemService) ListStarredItems(ctx context.Context, userID, cursor string, limit int) (*starredItemListResult, error) {
+	if m.listStarredItemsFn != nil {
+		return m.listStarredItemsFn(ctx, userID, cursor, limit)
+	}
+	return &starredItemListResult{}, nil
 }
 
 // mockItemStateService はItemStateServiceInterfaceのモック実装。
@@ -918,5 +926,297 @@ func TestSetupItemRoutes_UpdateStateEndpoint(t *testing.T) {
 	resp := w.Result()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("PUT /api/items/:id/state status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
+// --- GET /api/feeds/starred/items テスト ---
+
+// TestItemHandler_ListStarredItems_NoUserID_ReturnsUnauthorized は未認証リクエストが
+// HTTP 401 を返し、応答ボディに記事データを含めないことを検証する（Requirement 4.6）。
+func TestItemHandler_ListStarredItems_NoUserID_ReturnsUnauthorized(t *testing.T) {
+	// Arrange
+	h := NewItemHandler(&mockItemService{}, &mockItemStateService{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/feeds/starred/items", nil)
+	// ユーザーIDを注入しない
+	w := httptest.NewRecorder()
+
+	// Act
+	h.ListStarredItems(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+
+	// 応答ボディは APIError 形式で記事データを含まない
+	var result map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode error response: %v", err)
+	}
+	if _, ok := result["items"]; ok {
+		t.Error("expected no items field in 401 response")
+	}
+}
+
+// TestItemHandler_ListStarredItems_Success は認証ありで service 層が
+// starredItemListResult を返したときに 200 で JSON 形状（items / next_cursor /
+// has_more / 各 item に feed_title）を返すことを検証する。
+// Requirement 4.1 / 4.3 / 4.10 / NFR 3.1 に対応。
+func TestItemHandler_ListStarredItems_Success(t *testing.T) {
+	// Arrange
+	now := time.Now().UTC().Truncate(time.Second)
+	svc := &mockItemService{
+		listStarredItemsFn: func(ctx context.Context, userID, cursor string, limit int) (*starredItemListResult, error) {
+			if userID != "user-123" {
+				t.Errorf("userID = %q, want %q", userID, "user-123")
+			}
+			if limit != 50 {
+				t.Errorf("limit = %d, want %d", limit, 50)
+			}
+			return &starredItemListResult{
+				Items: []starredItemSummaryResponse{
+					{
+						itemSummaryResponse: itemSummaryResponse{
+							ID:              "item-a",
+							FeedID:          "feed-1",
+							Title:           "テスト記事A",
+							Link:            "https://example.com/a",
+							Summary:         "サマリーA",
+							PublishedAt:     now,
+							IsDateEstimated: false,
+							IsRead:          false,
+							IsStarred:       true,
+							HatebuCount:     5,
+						},
+						FeedTitle: "Feed One",
+					},
+					{
+						itemSummaryResponse: itemSummaryResponse{
+							ID:          "item-b",
+							FeedID:      "feed-2",
+							Title:       "テスト記事B",
+							Link:        "https://example.com/b",
+							PublishedAt: now.Add(-time.Hour),
+							IsStarred:   true,
+						},
+						FeedTitle: "Feed Two",
+					},
+				},
+				NextCursor: now.Add(-time.Hour).Format(time.RFC3339Nano),
+				HasMore:    true,
+			}, nil
+		},
+	}
+
+	h := NewItemHandler(svc, &mockItemStateService{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/feeds/starred/items", nil)
+	req = withUserID(req, "user-123")
+	w := httptest.NewRecorder()
+
+	// Act
+	h.ListStarredItems(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want %q", ct, "application/json")
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	items, ok := result["items"].([]interface{})
+	if !ok {
+		t.Fatal("expected items array in response")
+	}
+	if len(items) != 2 {
+		t.Fatalf("items length = %d, want 2", len(items))
+	}
+
+	hasMore, ok := result["has_more"].(bool)
+	if !ok || !hasMore {
+		t.Error("expected has_more=true in response")
+	}
+	if _, ok := result["next_cursor"]; !ok {
+		t.Error("expected next_cursor in response")
+	}
+
+	// 各 item に feed_title が含まれる（Requirement 4.10 / 2.4）
+	first, ok := items[0].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected items[0] to be an object")
+	}
+	if first["feed_title"] != "Feed One" {
+		t.Errorf("items[0].feed_title = %v, want %q", first["feed_title"], "Feed One")
+	}
+	if first["feed_id"] != "feed-1" {
+		t.Errorf("items[0].feed_id = %v, want %q", first["feed_id"], "feed-1")
+	}
+	if first["is_starred"] != true {
+		t.Errorf("items[0].is_starred = %v, want true", first["is_starred"])
+	}
+
+	second, ok := items[1].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected items[1] to be an object")
+	}
+	if second["feed_title"] != "Feed Two" {
+		t.Errorf("items[1].feed_title = %v, want %q", second["feed_title"], "Feed Two")
+	}
+}
+
+// TestItemHandler_ListStarredItems_WithCursor は ?cursor= クエリパラメータが
+// そのまま service 層に伝搬することを検証する（Requirement 4.5）。
+func TestItemHandler_ListStarredItems_WithCursor(t *testing.T) {
+	// Arrange
+	receivedCursor := ""
+	svc := &mockItemService{
+		listStarredItemsFn: func(ctx context.Context, userID, cursor string, limit int) (*starredItemListResult, error) {
+			receivedCursor = cursor
+			return &starredItemListResult{Items: []starredItemSummaryResponse{}}, nil
+		},
+	}
+
+	h := NewItemHandler(svc, &mockItemStateService{})
+
+	cursorValue := "2026-02-27T10:00:00Z"
+	req := httptest.NewRequest(http.MethodGet, "/api/feeds/starred/items?cursor="+cursorValue, nil)
+	req = withUserID(req, "user-123")
+	w := httptest.NewRecorder()
+
+	// Act
+	h.ListStarredItems(w, req)
+
+	// Assert
+	if w.Result().StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Result().StatusCode, http.StatusOK)
+	}
+	if receivedCursor != cursorValue {
+		t.Errorf("cursor = %q, want %q", receivedCursor, cursorValue)
+	}
+}
+
+// TestItemHandler_ListStarredItems_InvalidCursor_ReturnsBadRequest は service 層が
+// model.NewInvalidFilterError を返したときに 400 にマップされることを検証する
+// （Requirement 4.8）。
+func TestItemHandler_ListStarredItems_InvalidCursor_ReturnsBadRequest(t *testing.T) {
+	// Arrange
+	svc := &mockItemService{
+		listStarredItemsFn: func(ctx context.Context, userID, cursor string, limit int) (*starredItemListResult, error) {
+			return nil, model.NewInvalidFilterError("無効なカーソル値: " + cursor)
+		},
+	}
+
+	h := NewItemHandler(svc, &mockItemStateService{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/feeds/starred/items?cursor=not-a-date", nil)
+	req = withUserID(req, "user-123")
+	w := httptest.NewRecorder()
+
+	// Act
+	h.ListStarredItems(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+
+	errResp := parseAPIErrorResponse(t, w)
+	if errResp["code"] != model.ErrCodeInvalidFilter {
+		t.Errorf("code = %q, want %q", errResp["code"], model.ErrCodeInvalidFilter)
+	}
+}
+
+// TestItemHandler_ListStarredItems_EmptyResult はスター 0 件で
+// items=[] / has_more=false が返ることを検証する（Requirement 4.7）。
+func TestItemHandler_ListStarredItems_EmptyResult(t *testing.T) {
+	// Arrange
+	svc := &mockItemService{
+		listStarredItemsFn: func(ctx context.Context, userID, cursor string, limit int) (*starredItemListResult, error) {
+			return &starredItemListResult{
+				Items:   []starredItemSummaryResponse{},
+				HasMore: false,
+			}, nil
+		},
+	}
+
+	h := NewItemHandler(svc, &mockItemStateService{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/feeds/starred/items", nil)
+	req = withUserID(req, "user-123")
+	w := httptest.NewRecorder()
+
+	// Act
+	h.ListStarredItems(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	items, ok := result["items"].([]interface{})
+	if !ok {
+		t.Fatal("expected items array in response")
+	}
+	if len(items) != 0 {
+		t.Errorf("items length = %d, want 0", len(items))
+	}
+
+	hasMore, ok := result["has_more"].(bool)
+	if !ok || hasMore {
+		t.Error("expected has_more=false in response")
+	}
+
+	// next_cursor は has_more=false のとき omit される（omitempty）
+	if v, ok := result["next_cursor"]; ok && v != "" {
+		t.Errorf("expected next_cursor to be absent or empty, got %v", v)
+	}
+}
+
+// TestItemHandler_ListStarredItems_EmptyResult_NilItems は service 層が
+// Items=nil の starredItemListResult を返したときも、JSON では空配列として
+// `"items": []` を返すことを検証する（Requirement 4.7 / NFR 3.1: 既存応答スキーマと
+// 区別不能 = items は常に配列であり null にならない）。
+func TestItemHandler_ListStarredItems_EmptyResult_NilItems(t *testing.T) {
+	// Arrange
+	svc := &mockItemService{
+		listStarredItemsFn: func(ctx context.Context, userID, cursor string, limit int) (*starredItemListResult, error) {
+			return &starredItemListResult{Items: nil, HasMore: false}, nil
+		},
+	}
+
+	h := NewItemHandler(svc, &mockItemStateService{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/feeds/starred/items", nil)
+	req = withUserID(req, "user-123")
+	w := httptest.NewRecorder()
+
+	// Act
+	h.ListStarredItems(w, req)
+
+	// Assert
+	if w.Result().StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Result().StatusCode, http.StatusOK)
+	}
+
+	// JSON 上 items は null でなく [] であること
+	bodyBytes := w.Body.Bytes()
+	if !bytes.Contains(bodyBytes, []byte(`"items":[]`)) {
+		t.Errorf("expected items=[] in JSON, got %s", string(bodyBytes))
 	}
 }

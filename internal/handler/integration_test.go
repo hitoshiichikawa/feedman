@@ -1,11 +1,13 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +27,14 @@ type integrationState struct {
 	itemStates    map[string]*model.ItemState
 	users         map[string]*model.User
 	subsByUser    map[string][]string // userID -> []subscriptionID
+
+	// 横断スター記事一覧（/api/feeds/starred/items）取得時に
+	// service 層に渡された cursor / userID を記録するためのトレーシング用フィールド。
+	// router 経由でハンドラに正しくディスパッチされたことを検証する用途に使う。
+	lastStarredUserID string
+	lastStarredCursor string
+	lastStarredLimit  int
+	starredCallCount  int
 }
 
 func newIntegrationState() *integrationState {
@@ -158,6 +168,115 @@ func createIntegrationRouter(state *integrationState) http.Handler {
 						Link:  "https://example.com/article/1",
 					},
 					Content: "<p>Integration test content</p>",
+				}, nil
+			},
+			// listStarredItemsFn は state.itemStates / state.items / state.feeds をスキャンして
+			// 当該ユーザーがスター付与した記事を published_at 降順で返す。これにより
+			// router 経由で /api/feeds/starred/items が ListStarredItems ハンドラに
+			// 到達すること、および user_id によるフィルタが期待通り行われることを
+			// 統合的に検証できる。state.items が空の既存テストでは空一覧が返るため、
+			// 既存テストの挙動は変化しない（後方互換）。
+			listStarredItemsFn: func(ctx context.Context, userID, cursor string, limit int) (*starredItemListResult, error) {
+				state.lastStarredUserID = userID
+				state.lastStarredCursor = cursor
+				state.lastStarredLimit = limit
+				state.starredCallCount++
+
+				// 不正カーソルのパース: 既存単一フィード API と同等の RFC3339Nano → RFC3339
+				// フォールバックパース（不正なら model.NewInvalidFilterError を返す）。
+				var cursorTime time.Time
+				if cursor != "" {
+					t, err := time.Parse(time.RFC3339Nano, cursor)
+					if err != nil {
+						t, err = time.Parse(time.RFC3339, cursor)
+						if err != nil {
+							return nil, model.NewInvalidFilterError("無効なカーソル値: " + cursor)
+						}
+					}
+					cursorTime = t
+				}
+
+				// state.itemStates から userID の is_starred=true な行を集める。
+				type starredEntry struct {
+					item      *model.Item
+					feedTitle string
+				}
+				var entries []starredEntry
+				for _, is := range state.itemStates {
+					if is.UserID != userID || !is.IsStarred {
+						continue
+					}
+					item, ok := state.items[is.ItemID]
+					if !ok {
+						continue
+					}
+					if !cursorTime.IsZero() {
+						if item.PublishedAt == nil || !item.PublishedAt.Before(cursorTime) {
+							continue
+						}
+					}
+					feedTitle := ""
+					if f, ok := state.feeds[item.FeedID]; ok && f != nil {
+						feedTitle = f.Title
+					}
+					entries = append(entries, starredEntry{item: item, feedTitle: feedTitle})
+				}
+
+				// published_at 降順にソート。
+				sort.Slice(entries, func(i, j int) bool {
+					var ti, tj time.Time
+					if entries[i].item.PublishedAt != nil {
+						ti = *entries[i].item.PublishedAt
+					}
+					if entries[j].item.PublishedAt != nil {
+						tj = *entries[j].item.PublishedAt
+					}
+					return ti.After(tj)
+				})
+
+				// limit+1 取得相当の has_more 判定。
+				hasMore := false
+				if limit > 0 && len(entries) > limit {
+					entries = entries[:limit]
+					hasMore = true
+				}
+
+				items := make([]starredItemSummaryResponse, 0, len(entries))
+				for _, e := range entries {
+					pubAt := time.Time{}
+					if e.item.PublishedAt != nil {
+						pubAt = *e.item.PublishedAt
+					}
+					isRead := false
+					key := userID + ":" + e.item.ID
+					if is, ok := state.itemStates[key]; ok && is != nil {
+						isRead = is.IsRead
+					}
+					items = append(items, starredItemSummaryResponse{
+						itemSummaryResponse: itemSummaryResponse{
+							ID:          e.item.ID,
+							FeedID:      e.item.FeedID,
+							Title:       e.item.Title,
+							Link:        e.item.Link,
+							Summary:     e.item.Summary,
+							PublishedAt: pubAt,
+							IsRead:      isRead,
+							IsStarred:   true,
+							HatebuCount: e.item.HatebuCount,
+						},
+						FeedTitle: e.feedTitle,
+					})
+				}
+
+				nextCursor := ""
+				if hasMore && len(items) > 0 {
+					nextCursor = items[len(items)-1].PublishedAt.Format(time.RFC3339Nano)
+				}
+
+				return &starredItemListResult{
+					Items:      items,
+					NextCursor: nextCursor,
+					HasMore:    hasMore,
 				}, nil
 			},
 		},
@@ -589,6 +708,8 @@ func TestIntegration_ProtectedEndpoints_RequireAuth(t *testing.T) {
 		{http.MethodGet, "/api/feeds/feed-1", ""},
 		{http.MethodPost, "/api/feeds", `{"url": "https://example.com"}`},
 		{http.MethodGet, "/api/feeds/feed-1/items", ""},
+		// /api/feeds/starred/items も認証必須であることを検証する（Requirement 4.6）。
+		{http.MethodGet, "/api/feeds/starred/items", ""},
 		{http.MethodGet, "/api/items/item-1", ""},
 		{http.MethodPut, "/api/items/item-1/state", `{"is_read": true}`},
 		{http.MethodDelete, "/api/feeds/feed-1", ""},
@@ -614,3 +735,467 @@ func TestIntegration_ProtectedEndpoints_RequireAuth(t *testing.T) {
 	}
 }
 
+// --- 横断スター記事一覧（Issue #117 / Task 4）の結合テスト ---
+
+// seedStarredFixture は横断スター記事一覧の結合テスト用フィクスチャを state に積む。
+// user-test（メインユーザー）と other-user（クロスユーザー汚染検証用）を作成し、
+// 複数フィードに記事と is_starred=true の state 行を配置する。
+// 返り値は user-test 用のセッション ID。
+func seedStarredFixture(state *integrationState) string {
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// セッションとユーザー（user-test = 検証対象、other-user = クロスユーザー）。
+	state.sessions["session-user-test"] = &model.Session{
+		ID:        "session-user-test",
+		UserID:    "user-test",
+		ExpiresAt: now.Add(1 * time.Hour),
+	}
+	state.users["user-test"] = &model.User{
+		ID:    "user-test",
+		Email: "user-test@example.com",
+		Name:  "User Test",
+	}
+	state.users["other-user"] = &model.User{
+		ID:    "other-user",
+		Email: "other-user@example.com",
+		Name:  "Other User",
+	}
+
+	// 2 つのフィードを配置（複数フィードにまたがる検証用）。
+	state.feeds["feed-A"] = &model.Feed{
+		ID:    "feed-A",
+		Title: "Feed Alpha",
+	}
+	state.feeds["feed-B"] = &model.Feed{
+		ID:    "feed-B",
+		Title: "Feed Beta",
+	}
+
+	// 記事を 3 件配置（feed-A に 2 件、feed-B に 1 件）。
+	pub1 := now.Add(-1 * time.Hour)
+	pub2 := now.Add(-2 * time.Hour)
+	pub3 := now.Add(-3 * time.Hour)
+	state.items["item-1"] = &model.Item{
+		ID:          "item-1",
+		FeedID:      "feed-A",
+		Title:       "Article 1 (newest)",
+		Link:        "https://example.com/1",
+		PublishedAt: &pub1,
+	}
+	state.items["item-2"] = &model.Item{
+		ID:          "item-2",
+		FeedID:      "feed-B",
+		Title:       "Article 2 (middle)",
+		Link:        "https://example.com/2",
+		PublishedAt: &pub2,
+	}
+	state.items["item-3"] = &model.Item{
+		ID:          "item-3",
+		FeedID:      "feed-A",
+		Title:       "Article 3 (oldest)",
+		Link:        "https://example.com/3",
+		PublishedAt: &pub3,
+	}
+
+	// user-test は item-1 / item-3 にスターを付ける（feed-A）+ item-2（feed-B）にスター。
+	// 結果として 3 件すべてが横断スター一覧に出る想定。
+	state.itemStates["user-test:item-1"] = &model.ItemState{
+		UserID:    "user-test",
+		ItemID:    "item-1",
+		IsStarred: true,
+	}
+	state.itemStates["user-test:item-2"] = &model.ItemState{
+		UserID:    "user-test",
+		ItemID:    "item-2",
+		IsStarred: true,
+	}
+	state.itemStates["user-test:item-3"] = &model.ItemState{
+		UserID:    "user-test",
+		ItemID:    "item-3",
+		IsStarred: true,
+	}
+
+	// other-user は item-1 にスター（クロスユーザー汚染検証用 / NFR 2.1）。
+	state.itemStates["other-user:item-1"] = &model.ItemState{
+		UserID:    "other-user",
+		ItemID:    "item-1",
+		IsStarred: true,
+	}
+	// other-user は item-2 をスター解除した状態（is_starred=false）。
+	// 別ユーザーの is_starred=false 行が混入しないことを副次的に確認。
+	state.itemStates["other-user:item-2"] = &model.ItemState{
+		UserID:    "other-user",
+		ItemID:    "item-2",
+		IsStarred: false,
+	}
+
+	return "session-user-test"
+}
+
+// TestIntegration_ListStarredItems_OnlyOwnStarredItems は認証クッキー付きで
+// /api/feeds/starred/items を呼んだとき、自ユーザーのスター記事のみが
+// published_at 降順で含まれ、他ユーザーのスター記事が一切混入しないこと、
+// 各 item に feed_id / feed_title / is_starred=true が含まれることを検証する。
+// Requirement 4.1 / 4.2 / 4.9 / 4.10 / 要件 2.4 / NFR 2.1 / Task 4 (a)(b) に対応。
+func TestIntegration_ListStarredItems_OnlyOwnStarredItems(t *testing.T) {
+	// Arrange
+	state := newIntegrationState()
+	sessionID := seedStarredFixture(state)
+	router := createIntegrationRouter(state)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/feeds/starred/items", nil)
+	req.AddCookie(&http.Cookie{Name: "session_id", Value: sessionID})
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: status 200 / Content-Type
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want %q", ct, "application/json")
+	}
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	items, ok := body["items"].([]interface{})
+	if !ok {
+		t.Fatalf("expected items array, got %T", body["items"])
+	}
+
+	// user-test のスター記事は 3 件のみ（item-1 / item-2 / item-3）。
+	// other-user のスター記事（item-1 への other-user 行）は混入しない。
+	if len(items) != 3 {
+		t.Fatalf("items length = %d, want 3 (user-test のみのスター記事数)", len(items))
+	}
+
+	// published_at 降順: item-1 (最新) → item-2 → item-3 (最古) の順。
+	wantIDs := []string{"item-1", "item-2", "item-3"}
+	wantFeedIDs := []string{"feed-A", "feed-B", "feed-A"}
+	wantFeedTitles := []string{"Feed Alpha", "Feed Beta", "Feed Alpha"}
+	for i, raw := range items {
+		row, ok := raw.(map[string]interface{})
+		if !ok {
+			t.Fatalf("items[%d] is not an object", i)
+		}
+		if row["id"] != wantIDs[i] {
+			t.Errorf("items[%d].id = %v, want %q", i, row["id"], wantIDs[i])
+		}
+		if row["feed_id"] != wantFeedIDs[i] {
+			t.Errorf("items[%d].feed_id = %v, want %q", i, row["feed_id"], wantFeedIDs[i])
+		}
+		if row["feed_title"] != wantFeedTitles[i] {
+			t.Errorf("items[%d].feed_title = %v, want %q (要件 2.4)", i, row["feed_title"], wantFeedTitles[i])
+		}
+		if row["is_starred"] != true {
+			t.Errorf("items[%d].is_starred = %v, want true", i, row["is_starred"])
+		}
+	}
+
+	// NFR 2.1（クロスユーザー漏洩なし）: other-user の記事は応答に含まれない。
+	// other-user は item-1 にしかスターを付けていないが、item-1 自体は user-test も
+	// スターを付けているため、応答に item-1 が含まれること自体は問題ではない。
+	// 件数が 3 件で固定されていることが「other-user 単独の項目が混入していない」
+	// 直接的な担保となる（他ユーザーが付けたスター記事だけを別 item として持たせる
+	// fixture でも漏洩しないことを次のテストで補強する）。
+
+	// router 経由のルーティング到達性: state.lastStarredUserID に user-test が記録されること。
+	if state.lastStarredUserID != "user-test" {
+		t.Errorf("listStarredItems was called with userID = %q, want %q (ListStarredItems ハンドラに到達していない可能性)",
+			state.lastStarredUserID, "user-test")
+	}
+	if state.starredCallCount != 1 {
+		t.Errorf("listStarredItems call count = %d, want 1", state.starredCallCount)
+	}
+}
+
+// TestIntegration_ListStarredItems_NoOtherUsersItemsLeaked は、user-test 自身が
+// 一切スターしていない記事を他ユーザーがスターしているケースで、
+// 当該記事が user-test の横断スター一覧に絶対に混入しないことを検証する。
+// NFR 2.1（クロスユーザー漏洩防止）の strict invariant 担保。
+func TestIntegration_ListStarredItems_NoOtherUsersItemsLeaked(t *testing.T) {
+	// Arrange
+	state := newIntegrationState()
+	now := time.Now().UTC().Truncate(time.Second)
+	state.sessions["session-user-test"] = &model.Session{
+		ID:        "session-user-test",
+		UserID:    "user-test",
+		ExpiresAt: now.Add(1 * time.Hour),
+	}
+	state.users["user-test"] = &model.User{ID: "user-test", Email: "u@e.com", Name: "U"}
+	state.users["other-user"] = &model.User{ID: "other-user", Email: "o@e.com", Name: "O"}
+
+	state.feeds["feed-X"] = &model.Feed{ID: "feed-X", Title: "Feed X"}
+
+	// other-user 専用記事: other-user のみスター、user-test は触っていない。
+	pub := now.Add(-1 * time.Hour)
+	state.items["item-other-only"] = &model.Item{
+		ID:          "item-other-only",
+		FeedID:      "feed-X",
+		Title:       "Other User Only Article",
+		Link:        "https://example.com/other",
+		PublishedAt: &pub,
+	}
+	state.itemStates["other-user:item-other-only"] = &model.ItemState{
+		UserID:    "other-user",
+		ItemID:    "item-other-only",
+		IsStarred: true,
+	}
+
+	router := createIntegrationRouter(state)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/feeds/starred/items", nil)
+	req.AddCookie(&http.Cookie{Name: "session_id", Value: "session-user-test"})
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: user-test の応答は空であること（他ユーザーの記事が混入しない）。
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	var body map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	items, _ := body["items"].([]interface{})
+	if len(items) != 0 {
+		t.Errorf("items length = %d, want 0 (他ユーザーのスター記事が混入している / NFR 2.1 違反)", len(items))
+	}
+	if hasMore, _ := body["has_more"].(bool); hasMore {
+		t.Errorf("has_more = true, want false (スター 0 件)")
+	}
+}
+
+// TestIntegration_ListStarredItems_EmptyResult はスター 0 件のユーザーで
+// 200 / items=[] / has_more=false が返ることを検証する（Requirement 4.7 / Task 4 (c)）。
+func TestIntegration_ListStarredItems_EmptyResult(t *testing.T) {
+	// Arrange: ユーザーは存在するがスター記事を 1 件も持たない。
+	state := newIntegrationState()
+	state.sessions["session-zero"] = &model.Session{
+		ID:        "session-zero",
+		UserID:    "user-zero",
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+	}
+	state.users["user-zero"] = &model.User{ID: "user-zero", Email: "z@e.com", Name: "Z"}
+
+	router := createIntegrationRouter(state)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/feeds/starred/items", nil)
+	req.AddCookie(&http.Cookie{Name: "session_id", Value: "session-zero"})
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	bodyBytes := w.Body.Bytes()
+	// items は null ではなく [] で返る（NFR 3.1: 既存応答スキーマと区別不能 = 配列フィールドは
+	// 常に配列であり null にならない）。
+	if !strings.Contains(string(bodyBytes), `"items":[]`) {
+		t.Errorf("expected items=[] in JSON, got %s", string(bodyBytes))
+	}
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(strings.NewReader(string(bodyBytes))).Decode(&body); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if hasMore, _ := body["has_more"].(bool); hasMore {
+		t.Errorf("has_more = true, want false")
+	}
+	if nc, ok := body["next_cursor"]; ok && nc != nil && nc != "" {
+		t.Errorf("next_cursor = %v, want absent or empty", nc)
+	}
+}
+
+// TestIntegration_ListStarredItems_InvalidCursor_Returns400 は不正な cursor 文字列に対して
+// 既存単一フィード API と同等のクライアントエラー（400 / INVALID_FILTER）が返ることを検証する
+// （Requirement 4.8 / Task 4 (d)）。
+func TestIntegration_ListStarredItems_InvalidCursor_Returns400(t *testing.T) {
+	// Arrange
+	state := newIntegrationState()
+	state.sessions["session-test"] = &model.Session{
+		ID:        "session-test",
+		UserID:    "user-test",
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+	}
+	state.users["user-test"] = &model.User{ID: "user-test", Email: "t@e.com", Name: "T"}
+
+	router := createIntegrationRouter(state)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/feeds/starred/items?cursor=not-a-valid-time", nil)
+	req.AddCookie(&http.Cookie{Name: "session_id", Value: "session-test"})
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d (不正カーソルで 400)", resp.StatusCode, http.StatusBadRequest)
+	}
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode error response: %v", err)
+	}
+	if code, _ := body["code"].(string); code != model.ErrCodeInvalidFilter {
+		t.Errorf("code = %q, want %q", code, model.ErrCodeInvalidFilter)
+	}
+	// 応答ボディに items は含まれない（エラー応答は APIError 形式）。
+	if _, ok := body["items"]; ok {
+		t.Error("expected no items field in error response")
+	}
+}
+
+// TestIntegration_ListStarredItems_Unauthorized_Returns401 はセッションクッキーなしの
+// リクエストが 401 を返すことを直接検証する（Requirement 4.6 / Task 4 (e)）。
+// 同様の挙動は TestIntegration_ProtectedEndpoints_RequireAuth でも担保されているが、
+// 横断スター固有の追加検証として「session middleware 段階で 401 を返し、service 層が
+// 呼ばれない（= 記事データを応答に含めない）」ことを確認する目的で個別テストを置く。
+func TestIntegration_ListStarredItems_Unauthorized_Returns401(t *testing.T) {
+	// Arrange
+	state := newIntegrationState()
+	router := createIntegrationRouter(state)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/feeds/starred/items", nil)
+	// セッションクッキー無し。
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+
+	// 応答ボディに items を含めない（Requirement 4.6）。session middleware の 401 は
+	// plain text "unauthorized" を返す実装のため、ここでは JSON パースを期待せず、
+	// 応答に "items" 文字列が含まれないことで担保する。
+	bodyBytes := w.Body.Bytes()
+	if bytes.Contains(bodyBytes, []byte(`"items"`)) {
+		t.Errorf("expected no items field in 401 response, got body: %s", string(bodyBytes))
+	}
+
+	// service 層が呼ばれていないこと（middleware 段階で 401 を返している）も確認。
+	if state.starredCallCount != 0 {
+		t.Errorf("listStarredItems was called %d times, want 0 (401 should not reach service layer)",
+			state.starredCallCount)
+	}
+}
+
+// TestIntegration_ListItems_ByFeedID_StillWorksAfterStarredRouteAdded は、
+// /api/feeds/starred/items ルート追加後も既存 /api/feeds/{id}/items が変化せず動作すること、
+// および chi のトライ木で `starred` が動的パラメータ `{id}` より優先されることに依存せず、
+// /api/feeds/{id}/items が ListItems ハンドラに到達することを検証する
+// （Requirement 5.1 / 5.3 / Task 4 既存挙動の非干渉確認）。
+func TestIntegration_ListItems_ByFeedID_StillWorksAfterStarredRouteAdded(t *testing.T) {
+	// Arrange: 既存 createIntegrationRouter の listItemsFn は固定で
+	// item-integration-1 / FeedID=path の Title=Integration Item を返す。
+	state := newIntegrationState()
+	state.sessions["session-test"] = &model.Session{
+		ID:        "session-test",
+		UserID:    "user-test",
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+	}
+	state.users["user-test"] = &model.User{ID: "user-test", Email: "t@e.com", Name: "T"}
+
+	router := createIntegrationRouter(state)
+
+	// feed-1 と starred 以外の通常の feed_id でリクエスト。
+	const feedID = "feed-some-id"
+	req := httptest.NewRequest(http.MethodGet, "/api/feeds/"+feedID+"/items", nil)
+	req.AddCookie(&http.Cookie{Name: "session_id", Value: "session-test"})
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: 既存 ListItems ハンドラが到達し、その固定モック応答が返ること。
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	items, ok := body["items"].([]interface{})
+	if !ok || len(items) != 1 {
+		t.Fatalf("expected exactly 1 item from ListItems mock, got %v", body["items"])
+	}
+	first, _ := items[0].(map[string]interface{})
+	if first["id"] != "item-integration-1" {
+		t.Errorf("items[0].id = %v, want %q (ListItems ハンドラに到達していない可能性)",
+			first["id"], "item-integration-1")
+	}
+	if first["title"] != "Integration Item" {
+		t.Errorf("items[0].title = %v, want %q", first["title"], "Integration Item")
+	}
+	if first["feed_id"] != feedID {
+		t.Errorf("items[0].feed_id = %v, want %q", first["feed_id"], feedID)
+	}
+	// has_more が false（ListItems モックの固定挙動）。
+	if hm, _ := body["has_more"].(bool); hm {
+		t.Errorf("has_more = true, want false (既存 ListItems モックの固定挙動)")
+	}
+
+	// /starred/items 側のハンドラは呼ばれていないこと（誤ディスパッチがないこと）。
+	if state.starredCallCount != 0 {
+		t.Errorf("listStarredItems was called %d times, want 0 (誤ディスパッチの疑い)",
+			state.starredCallCount)
+	}
+}
+
+// TestIntegration_ListStarredItems_CursorPropagation は cursor クエリパラメータが
+// router 経由で service 層まで伝搬することを検証する（Requirement 4.5）。
+func TestIntegration_ListStarredItems_CursorPropagation(t *testing.T) {
+	// Arrange
+	state := newIntegrationState()
+	state.sessions["session-test"] = &model.Session{
+		ID:        "session-test",
+		UserID:    "user-test",
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+	}
+	state.users["user-test"] = &model.User{ID: "user-test", Email: "t@e.com", Name: "T"}
+
+	router := createIntegrationRouter(state)
+
+	const cursorValue = "2026-02-27T10:00:00Z"
+	req := httptest.NewRequest(http.MethodGet, "/api/feeds/starred/items?cursor="+cursorValue, nil)
+	req.AddCookie(&http.Cookie{Name: "session_id", Value: "session-test"})
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: cursor が service 層へ伝搬している。
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if state.lastStarredCursor != cursorValue {
+		t.Errorf("cursor propagated to service = %q, want %q", state.lastStarredCursor, cursorValue)
+	}
+	if state.lastStarredLimit != defaultItemsPerPage {
+		t.Errorf("limit propagated to service = %d, want %d (default)",
+			state.lastStarredLimit, defaultItemsPerPage)
+	}
+}

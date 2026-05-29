@@ -2,11 +2,13 @@ package feed
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/hitoshi/feedman/internal/model"
 	"github.com/hitoshi/feedman/internal/repository"
@@ -95,6 +97,14 @@ func (m *mockFeedRepo) UpdateFetchState(_ context.Context, _ *model.Feed) error 
 	return nil
 }
 
+func (m *mockFeedRepo) LockFeedForUpdateNowait(_ context.Context, _ *sql.Tx, _ string) (*model.Feed, error) {
+	return nil, nil
+}
+
+func (m *mockFeedRepo) UpdateLastSuccessfulFetchAt(_ context.Context, _ string, _ time.Time) error {
+	return nil
+}
+
 // mockSubRepo はテスト用のSubscriptionRepositoryモック。
 type mockSubRepo struct {
 	subs        map[string]*model.Subscription
@@ -179,6 +189,10 @@ func (m *mockFaviconFetcher) FetchFavicon(_ context.Context, _ string) ([]byte, 
 }
 
 func (m *mockFaviconFetcher) FetchFaviconForSite(_ context.Context, _ string) ([]byte, string, error) {
+	return m.faviconData, m.faviconMime, m.err
+}
+
+func (m *mockFaviconFetcher) FetchFaviconWithFallback(_ context.Context, _ string) ([]byte, string, error) {
 	return m.faviconData, m.faviconMime, m.err
 }
 

@@ -76,11 +76,17 @@ type RouterDeps struct {
 	ItemService      ItemServiceInterface
 	ItemStateService ItemStateServiceInterface
 
+	// 記事検索
+	ItemSearchService ItemSearchServiceInterface
+
 	// 購読
 	SubscriptionService SubscriptionServiceInterface
 
 	// ユーザー
 	UserService UserServiceInterface
+
+	// 横断新着一覧（Issue #121）
+	CrossFeedService CrossFeedServiceInterface
 }
 
 // NewRouter は全APIエンドポイントのルーティングとミドルウェアチェーンを構成したchi.Routerを返す。
@@ -120,8 +126,16 @@ func NewRouter(deps *RouterDeps) http.Handler {
 	authHandler := NewAuthHandler(deps.AuthService, deps.AuthConfig)
 	feedHandler := NewFeedHandler(deps.FeedService, deps.SubscriptionDeleter)
 	itemHandler := NewItemHandler(deps.ItemService, deps.ItemStateService)
+	itemSearchHandler := NewItemSearchHandler(deps.ItemSearchService)
 	subHandler := NewSubscriptionHandler(deps.SubscriptionService)
 	userHandler := NewUserHandler(deps.UserService)
+	// CrossFeedService が nil の場合は CrossFeedHandler を生成しない（後方互換のため、
+	// 既存テスト・既存ルート構成への影響を回避）。Issue #121 の本実装では app.go の
+	// runServe が必ず CrossFeedService を配線するため production 経路では常に非 nil。
+	var crossFeedHandler *CrossFeedHandler
+	if deps.CrossFeedService != nil {
+		crossFeedHandler = NewCrossFeedHandler(deps.CrossFeedService)
+	}
 
 	// 未認証エンドポイント向け IP 単位レート制限ミドルウェア。
 	// UnauthIPRateLimiter が nil の場合は素通し（制限なし）として扱い、既存ルーティングを
@@ -192,6 +206,12 @@ func NewRouter(deps *RouterDeps) http.Handler {
 			// POST /api/feeds - フィード登録（登録専用レート制限を追加）
 			r.With(deps.RateLimiter.FeedRegistrationMiddleware()).Post("/", feedHandler.RegisterFeed)
 
+			// GET /api/feeds/starred/items - 全フィード横断スター記事一覧（Issue #117）
+			// chi v5 のトライ木は静的セグメント `starred` を動的パラメータ `{id}` より優先するため、
+			// 登録順を問わず `/api/feeds/{id}/items` と衝突しない。可読性のため `/{id}` ブロックの
+			// 直前に置く。
+			r.Get("/starred/items", itemHandler.ListStarredItems)
+
 			r.Route("/{id}", func(r chi.Router) {
 				r.Get("/", feedHandler.GetFeed)
 				r.Patch("/", feedHandler.UpdateFeedURL)
@@ -201,6 +221,19 @@ func NewRouter(deps *RouterDeps) http.Handler {
 				r.Get("/items", itemHandler.ListItems)
 			})
 		})
+
+		// 記事検索（/api/items/{id} よりも前に登録する必要がある。
+		// chi は static segment `/search` を `{id}` よりも優先するが、明示的に
+		// 先に登録することで `search` が `{id}` の捕捉に吸われる可能性を確実に排除する）。
+		r.Get("/api/items/search", itemSearchHandler.Search)
+
+		// 横断新着一覧（Issue #121 / Req 1.2, 2.1, 4.3, 4.7）。
+		// /api/items/{id} よりも前に登録し、`cross-feed` セグメントが `{id}` の動的
+		// パラメータに吸われないようにする（既存 starred 同様の保護）。
+		// CrossFeedService が未配線の deps では登録しない（後方互換）。
+		if crossFeedHandler != nil {
+			r.Get("/api/items/cross-feed", crossFeedHandler.ListItems)
+		}
 
 		// 記事管理
 		r.Route("/api/items/{id}", func(r chi.Router) {
@@ -216,12 +249,20 @@ func NewRouter(deps *RouterDeps) http.Handler {
 				r.Delete("/", subHandler.Unsubscribe)
 				r.Put("/settings", subHandler.UpdateSettings)
 				r.Post("/resume", subHandler.ResumeFetch)
+				// Issue #115: 手動フェッチ API（同期）。
+				// 認証ミドルウェア + General レート制限はグループ単位で適用済み（NFR 2.1, 2.2）。
+				r.Post("/fetch", subHandler.ManualFetch)
 			})
 		})
 
 		// ユーザー管理
 		r.Route("/api/users", func(r chi.Router) {
 			r.Delete("/me", userHandler.Withdraw)
+			// PUT /api/users/me/cross-feed-last-seen - 横断一覧の最終閲覧時刻更新（Issue #121）
+			// CrossFeedService が未配線の deps では登録しない（後方互換）。
+			if crossFeedHandler != nil {
+				r.Put("/me/cross-feed-last-seen", crossFeedHandler.TouchLastSeen)
+			}
 		})
 	})
 

@@ -212,6 +212,185 @@ func TestRecordItemsUpserted_IncrementsCounter(t *testing.T) {
 	}
 }
 
+// TestRecordManualFetchSuccess_IncrementsCounterWithSuccessLabel は手動フェッチ成功時に
+// feedman_manual_fetch_total{result="success"} が増加することを検証する（Requirement 8.1）。
+func TestRecordManualFetchSuccess_IncrementsCounterWithSuccessLabel(t *testing.T) {
+	// Arrange
+	reg := prometheus.NewRegistry()
+	c := NewCollector(reg)
+
+	// Act
+	c.RecordManualFetchSuccess()
+	c.RecordManualFetchSuccess()
+	c.RecordManualFetchSuccess()
+
+	// Assert
+	val := getManualFetchCounter(t, reg, "success")
+	if val != 3 {
+		t.Errorf("manual_fetch_total{result=success} = %v, want 3", val)
+	}
+}
+
+// TestRecordManualFetchFailure_IncrementsCounterByReason は手動フェッチ失敗時に
+// reason 別に feedman_manual_fetch_total が分離してカウントされることを検証する（Requirement 8.2）。
+func TestRecordManualFetchFailure_IncrementsCounterByReason(t *testing.T) {
+	// Arrange
+	reg := prometheus.NewRegistry()
+	c := NewCollector(reg)
+
+	// Act: 異なる reason を複数回記録する
+	c.RecordManualFetchFailure("fetch_error")
+	c.RecordManualFetchFailure("fetch_error")
+	c.RecordManualFetchFailure("parse_error")
+	c.RecordManualFetchFailure("upsert_error")
+	c.RecordManualFetchFailure("ssrf_blocked")
+
+	// Assert: reason ごとに独立した counter になっていること
+	cases := []struct {
+		reason string
+		want   float64
+	}{
+		{"fetch_error", 2},
+		{"parse_error", 1},
+		{"upsert_error", 1},
+		{"ssrf_blocked", 1},
+	}
+	for _, tc := range cases {
+		got := getManualFetchCounter(t, reg, tc.reason)
+		if got != tc.want {
+			t.Errorf("manual_fetch_total{result=%q} = %v, want %v", tc.reason, got, tc.want)
+		}
+	}
+}
+
+// TestRecordManualFetchCooldownRejected_IncrementsCounterWithCooldownLabel はクールダウン拒否時に
+// feedman_manual_fetch_total{result="cooldown_rejected"} が増加することを検証する（Requirement 8.3）。
+func TestRecordManualFetchCooldownRejected_IncrementsCounterWithCooldownLabel(t *testing.T) {
+	// Arrange
+	reg := prometheus.NewRegistry()
+	c := NewCollector(reg)
+
+	// Act
+	c.RecordManualFetchCooldownRejected()
+	c.RecordManualFetchCooldownRejected()
+
+	// Assert
+	val := getManualFetchCounter(t, reg, "cooldown_rejected")
+	if val != 2 {
+		t.Errorf("manual_fetch_total{result=cooldown_rejected} = %v, want 2", val)
+	}
+}
+
+// TestRecordManualFetchLockConflict_IncrementsCounterWithLockConflictLabel は行ロック競合拒否時に
+// feedman_manual_fetch_total{result="lock_conflict"} が増加することを検証する（Requirement 8.4）。
+func TestRecordManualFetchLockConflict_IncrementsCounterWithLockConflictLabel(t *testing.T) {
+	// Arrange
+	reg := prometheus.NewRegistry()
+	c := NewCollector(reg)
+
+	// Act
+	c.RecordManualFetchLockConflict()
+
+	// Assert
+	val := getManualFetchCounter(t, reg, "lock_conflict")
+	if val != 1 {
+		t.Errorf("manual_fetch_total{result=lock_conflict} = %v, want 1", val)
+	}
+}
+
+// TestManualFetchTotal_LabelsAreIsolated は異なる label 値が同じカウンタ内で
+// 互いに干渉せず独立してカウントされることを検証する（Requirement 8.1〜8.4 境界）。
+func TestManualFetchTotal_LabelsAreIsolated(t *testing.T) {
+	// Arrange
+	reg := prometheus.NewRegistry()
+	c := NewCollector(reg)
+
+	// Act: 4 種の label を 1 回ずつ記録する
+	c.RecordManualFetchSuccess()
+	c.RecordManualFetchFailure("fetch_error")
+	c.RecordManualFetchCooldownRejected()
+	c.RecordManualFetchLockConflict()
+
+	// Assert: 4 系列が独立にそれぞれ 1 件として記録されている
+	labels := []string{"success", "fetch_error", "cooldown_rejected", "lock_conflict"}
+	for _, label := range labels {
+		got := getManualFetchCounter(t, reg, label)
+		if got != 1 {
+			t.Errorf("manual_fetch_total{result=%q} = %v, want 1", label, got)
+		}
+	}
+}
+
+// TestManualFetchTotal_DistinguishedFromAutoFetch は手動フェッチカウンタが
+// 自動フェッチカウンタ（feedman_fetch_success_total など）と独立な系列として公開されることを検証する（Requirement 8.5）。
+func TestManualFetchTotal_DistinguishedFromAutoFetch(t *testing.T) {
+	// Arrange
+	reg := prometheus.NewRegistry()
+	c := NewCollector(reg)
+
+	// Act: 自動と手動それぞれの成功を記録する
+	c.RecordFetchSuccess("feed-auto")
+	c.RecordManualFetchSuccess()
+
+	// Assert: 別系列名で公開されており互いに加算しない
+	metricFamilies, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() failed: %v", err)
+	}
+
+	var autoVal, manualSuccessVal float64
+	autoFound, manualFound := false, false
+	for _, mf := range metricFamilies {
+		switch mf.GetName() {
+		case "feedman_fetch_success_total":
+			autoFound = true
+			autoVal = mf.GetMetric()[0].GetCounter().GetValue()
+		case "feedman_manual_fetch_total":
+			manualFound = true
+			for _, m := range mf.GetMetric() {
+				if m.GetLabel()[0].GetValue() == "success" {
+					manualSuccessVal = m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+
+	if !autoFound {
+		t.Error("feedman_fetch_success_total が公開されていない")
+	}
+	if !manualFound {
+		t.Error("feedman_manual_fetch_total が公開されていない")
+	}
+	if autoVal != 1 {
+		t.Errorf("auto fetch_success_total = %v, want 1（手動側と独立加算）", autoVal)
+	}
+	if manualSuccessVal != 1 {
+		t.Errorf("manual_fetch_total{success} = %v, want 1（自動側と独立加算）", manualSuccessVal)
+	}
+}
+
+// getManualFetchCounter は reg から feedman_manual_fetch_total の指定 label 値を取得する。
+// 該当 label が未記録（counter 系列に現れていない）の場合は 0 を返す。
+func getManualFetchCounter(t *testing.T, reg *prometheus.Registry, label string) float64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("failed to gather metrics: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != "feedman_manual_fetch_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			lbls := m.GetLabel()
+			if len(lbls) > 0 && lbls[0].GetValue() == label {
+				return m.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
+}
+
 // TestMetricsHandler_ReturnsPrometheusFormat は/metricsエンドポイントがPrometheus形式で返すことを検証する。
 func TestMetricsHandler_ReturnsPrometheusFormat(t *testing.T) {
 	reg := prometheus.NewRegistry()

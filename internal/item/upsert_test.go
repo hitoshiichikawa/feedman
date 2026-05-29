@@ -59,6 +59,26 @@ func (m *mockItemRepo) ListByFeed(_ context.Context, feedID, userID string, filt
 	return nil, nil
 }
 
+// ListStarredByUser はインターフェース充足のための最小スタブ。
+// 本 task では Repository 層の実装と DB 結合テストのみがスコープであり、
+// service 層への組み込みは task 2 で行うため、サービス層テストでは未使用。
+func (m *mockItemRepo) ListStarredByUser(_ context.Context, _ string, _ time.Time, _ int) ([]repository.StarredItemRow, error) {
+	return nil, nil
+}
+
+// ListNewAcrossFeeds は ItemRepository interface 適合のためのスタブ。
+// upsert 経路のテストでは横断新着取得は対象外（Issue #121）のため、常に nil を返す。
+func (m *mockItemRepo) ListNewAcrossFeeds(
+	_ context.Context,
+	_ string,
+	_ time.Time,
+	_ time.Time,
+	_ string,
+	_ int,
+) ([]repository.CrossFeedItem, error) {
+	return nil, nil
+}
+
 func (m *mockItemRepo) FindByFeedAndGUID(_ context.Context, feedID, guid string) (*model.Item, error) {
 	key := feedID + "|" + guid
 	item, ok := m.byFeedGUID[key]
@@ -1480,6 +1500,13 @@ func (m *mockMetricsCollector) RecordItemsUpserted(count int) {
 	m.itemsUpsertedCalls++
 	m.lastItemsUpserted = count
 }
+
+// 手動フェッチ系（Issue #115）は upsert サービスから呼ばれないが、
+// MetricsCollector interface 充足のため no-op 実装する。
+func (m *mockMetricsCollector) RecordManualFetchSuccess()          {}
+func (m *mockMetricsCollector) RecordManualFetchFailure(_ string)  {}
+func (m *mockMetricsCollector) RecordManualFetchCooldownRejected() {}
+func (m *mockMetricsCollector) RecordManualFetchLockConflict()     {}
 
 // TestUpsertItems_Metrics_RecordsUpsertedCount は UPSERT 成功時に
 // 新規 + 更新の件数が RecordItemsUpserted に加算されることを検証する（Requirement 2.6）。
