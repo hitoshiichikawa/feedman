@@ -85,6 +85,8 @@ export function AppShell() {
               feeds={feeds ?? []}
               selectedFeedId={state.selectedFeedId}
               onSelectFeed={handleSelectFeed}
+              viewMode="none"
+              onSelectAllNewItems={() => {}}
             />
           )}
         </aside>
