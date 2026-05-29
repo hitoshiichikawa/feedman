@@ -21,6 +21,7 @@ describe("AppStateContext", () => {
     });
 
     expect(result.current.selectedView).toBe("feed");
+    expect(result.current.viewMode).toBe("none");
     expect(result.current.selectedFeedId).toBeNull();
     expect(result.current.expandedItemId).toBeNull();
     expect(result.current.filter).toBe("all");
@@ -28,6 +29,7 @@ describe("AppStateContext", () => {
     expect(result.current.isSearching).toBe(false);
     expect(result.current.searchScope).toBe("global");
     expect(result.current.searchFeedId).toBeNull();
+    expect(result.current.crossFeedSessionSince).toBeNull();
   });
 
   it("SELECT_STARRED アクションで selectedView が 'starred' に遷移し、他フィールドがリセットされること", () => {
@@ -594,5 +596,157 @@ describe("AppStateContext", () => {
     expect(() => {
       renderHook(() => useAppDispatch());
     }).toThrow("useAppDispatch は AppStateProvider 内で使用してください");
+  });
+
+  // --- Issue #121 task 6: 横断新着一覧 (cross-feed timeline) reducer 追加分 ---
+
+  it("SELECT_ALL_NEW_ITEMS アクションで viewMode が 'cross-feed' に遷移し他フィールドがリセットされること（Req 1.2, 4.7）", () => {
+    const wrapper = createWrapper();
+
+    const { result } = renderHook(
+      () => {
+        const state = useAppState();
+        const dispatch = useAppDispatch();
+        return { state, dispatch };
+      },
+      { wrapper }
+    );
+
+    // 事前に個別フィード選択 / 記事展開 / フィルタ変更を行う
+    act(() => {
+      result.current.dispatch({ type: "SELECT_FEED", feedId: "feed-1" });
+    });
+    act(() => {
+      result.current.dispatch({ type: "EXPAND_ITEM", itemId: "item-1" });
+    });
+    act(() => {
+      result.current.dispatch({ type: "SET_FILTER", filter: "unread" });
+    });
+
+    expect(result.current.state.viewMode).toBe("feed");
+    expect(result.current.state.selectedFeedId).toBe("feed-1");
+    expect(result.current.state.expandedItemId).toBe("item-1");
+    expect(result.current.state.filter).toBe("unread");
+
+    // SELECT_ALL_NEW_ITEMS で viewMode='cross-feed' に切替、selectedFeedId / expandedItemId / filter がリセット
+    act(() => {
+      result.current.dispatch({ type: "SELECT_ALL_NEW_ITEMS" });
+    });
+
+    expect(result.current.state.viewMode).toBe("cross-feed");
+    expect(result.current.state.selectedFeedId).toBeNull();
+    expect(result.current.state.expandedItemId).toBeNull();
+    expect(result.current.state.filter).toBe("all");
+  });
+
+  it("SELECT_FEED アクションで viewMode が 'feed' に遷移すること（Req 1.3）", () => {
+    const wrapper = createWrapper();
+
+    const { result } = renderHook(
+      () => {
+        const state = useAppState();
+        const dispatch = useAppDispatch();
+        return { state, dispatch };
+      },
+      { wrapper }
+    );
+
+    // 初期状態は viewMode='none'
+    expect(result.current.state.viewMode).toBe("none");
+
+    // SELECT_FEED で viewMode='feed' になる
+    act(() => {
+      result.current.dispatch({ type: "SELECT_FEED", feedId: "feed-99" });
+    });
+
+    expect(result.current.state.viewMode).toBe("feed");
+    expect(result.current.state.selectedFeedId).toBe("feed-99");
+  });
+
+  it("SELECT_ALL_NEW_ITEMS → SELECT_FEED の遷移で crossFeedSessionSince が保持されること（Req 4.7）", () => {
+    const wrapper = createWrapper();
+
+    const { result } = renderHook(
+      () => {
+        const state = useAppState();
+        const dispatch = useAppDispatch();
+        return { state, dispatch };
+      },
+      { wrapper }
+    );
+
+    // crossFeedSessionSince を固定
+    act(() => {
+      result.current.dispatch({
+        type: "SET_CROSS_FEED_SESSION_SINCE",
+        sinceTime: "2026-05-27T00:00:00Z",
+      });
+    });
+    expect(result.current.state.crossFeedSessionSince).toBe(
+      "2026-05-27T00:00:00Z"
+    );
+
+    // SELECT_ALL_NEW_ITEMS でも保持される
+    act(() => {
+      result.current.dispatch({ type: "SELECT_ALL_NEW_ITEMS" });
+    });
+    expect(result.current.state.crossFeedSessionSince).toBe(
+      "2026-05-27T00:00:00Z"
+    );
+    expect(result.current.state.viewMode).toBe("cross-feed");
+
+    // SELECT_FEED でも保持される（行き来時の baseline 固定検証）
+    act(() => {
+      result.current.dispatch({ type: "SELECT_FEED", feedId: "feed-1" });
+    });
+    expect(result.current.state.crossFeedSessionSince).toBe(
+      "2026-05-27T00:00:00Z"
+    );
+    expect(result.current.state.viewMode).toBe("feed");
+
+    // 再度 SELECT_ALL_NEW_ITEMS でも保持
+    act(() => {
+      result.current.dispatch({ type: "SELECT_ALL_NEW_ITEMS" });
+    });
+    expect(result.current.state.crossFeedSessionSince).toBe(
+      "2026-05-27T00:00:00Z"
+    );
+  });
+
+  it("SET_CROSS_FEED_SESSION_SINCE アクションで crossFeedSessionSince が指定値に固定されること（Req 4.7）", () => {
+    const wrapper = createWrapper();
+
+    const { result } = renderHook(
+      () => {
+        const state = useAppState();
+        const dispatch = useAppDispatch();
+        return { state, dispatch };
+      },
+      { wrapper }
+    );
+
+    expect(result.current.state.crossFeedSessionSince).toBeNull();
+
+    act(() => {
+      result.current.dispatch({
+        type: "SET_CROSS_FEED_SESSION_SINCE",
+        sinceTime: "2026-05-28T12:00:00Z",
+      });
+    });
+
+    expect(result.current.state.crossFeedSessionSince).toBe(
+      "2026-05-28T12:00:00Z"
+    );
+
+    // 別 sinceTime で上書き
+    act(() => {
+      result.current.dispatch({
+        type: "SET_CROSS_FEED_SESSION_SINCE",
+        sinceTime: "2026-05-29T00:00:00Z",
+      });
+    });
+    expect(result.current.state.crossFeedSessionSince).toBe(
+      "2026-05-29T00:00:00Z"
+    );
   });
 });

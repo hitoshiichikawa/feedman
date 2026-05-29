@@ -1,15 +1,16 @@
 "use client";
 
+import { FeedFavicon } from "@/components/feed-favicon";
+import type { ViewMode } from "@/contexts/app-state";
 import { cn } from "@/lib/utils";
 import type { Subscription } from "@/types/feed";
-import { CircleAlert, CirclePause, Rss, Settings } from "lucide-react";
-import { useState } from "react";
+import { CircleAlert, CirclePause, Settings } from "lucide-react";
 
 /** FeedList コンポーネントのプロパティ */
 interface FeedListProps {
   /** 購読一覧データ */
   feeds: Subscription[];
-  /** 現在選択中のフィードID（null = 未選択） */
+  /** 現在選択中のフィードID（null = 未選択 / 横断新着一覧選択中も null） */
   selectedFeedId: string | null;
   /** フィード選択イベントハンドラ */
   onSelectFeed: (feedId: string) => void;
@@ -21,6 +22,13 @@ interface FeedListProps {
    * AC 1.4: フィード選択イベント（onSelectFeed）は発火しない。
    */
   onOpenSettings: (subscription: Subscription) => void;
+  /**
+   * 現在の表示モード（Issue #121 / Req 1.4）。
+   * 'cross-feed' のとき「すべての新着記事」仮想エントリを選択中スタイルで表示する。
+   */
+  viewMode: ViewMode;
+  /** 「すべての新着記事」仮想エントリ選択時のハンドラ（Req 1.2） */
+  onSelectAllNewItems: () => void;
 }
 
 /**
@@ -33,25 +41,47 @@ interface FeedListProps {
  * 各行末尾にはホバー / 行内フォーカス時にギアアイコン（設定起動コントロール）を表示し、
  * クリック / Enter / Space で onOpenSettings(subscription) を発火する（AC 1.1, 1.2, 1.3, 1.5）。
  * ギアクリック時は e.stopPropagation() で onSelectFeed の発火を抑止する（AC 1.4）。
+ *
+ * 一覧の **先頭**に「すべての新着記事」仮想エントリを常設し（Req 1.1、購読 0 件でも表示）、
+ * 当該エントリを選択することで横断新着一覧表示へ切替える（Req 1.2）。
  */
 export function FeedList({
   feeds,
   selectedFeedId,
   onSelectFeed,
   onOpenSettings,
+  viewMode,
+  onSelectAllNewItems,
 }: FeedListProps) {
-  if (feeds.length === 0) {
-    return (
-      <div className="flex items-center justify-center p-4 text-sm text-muted-foreground">
-        フィードが登録されていません
-      </div>
-    );
-  }
+  const isAllNewItemsSelected = viewMode === "cross-feed";
 
   return (
     <nav className="flex flex-col gap-0.5" role="list">
+      {/* 「すべての新着記事」仮想エントリ（Req 1.1, 1.4, 1.5）。
+          購読 0 件でも常設表示する（Req 1.1）。 */}
+      <button
+        data-testid="all-new-items-entry"
+        data-selected={isAllNewItemsSelected ? "true" : "false"}
+        aria-current={isAllNewItemsSelected ? "page" : undefined}
+        className={cn(
+          "flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors",
+          "hover:bg-accent hover:text-accent-foreground",
+          isAllNewItemsSelected && "bg-accent text-accent-foreground font-medium"
+        )}
+        onClick={onSelectAllNewItems}
+      >
+        <FeedFavicon
+          feedId="__all__"
+          faviconURL={null}
+          feedTitle="すべての新着記事"
+        />
+
+        <span className="flex-1 truncate">すべての新着記事</span>
+      </button>
+
       {feeds.map((feed) => {
-        const isSelected = feed.feed_id === selectedFeedId;
+        const isSelected =
+          viewMode !== "cross-feed" && feed.feed_id === selectedFeedId;
 
         // 行クリック / キーボード起動で onSelectFeed を発火する共通ハンドラ。
         // 行コンテナは <button> ネスト回避のため <div role="button" tabIndex={0}> 化した。
@@ -149,53 +179,14 @@ export function FeedList({
           </div>
         );
       })}
-    </nav>
-  );
-}
 
-/** FeedFavicon のプロパティ */
-interface FeedFaviconProps {
-  /** 購読 ID（test-id 用） */
-  feedId: string;
-  /** favicon の URL（null/空文字なら代替アイコン表示） */
-  faviconURL: string | null;
-  /** フィードタイトル（alt 属性用） */
-  feedTitle: string;
-}
-
-/**
- * フィード行先頭の favicon 表示コンポーネント。
- *
- * favicon URL が設定されていない場合、および <img> の onError が発火した場合は
- * lucide-react の Rss アイコンをデフォルトアイコンとして表示する。
- * 表示サイズは w-4 h-4 で実 favicon と同じ。レイアウトは変化しない（要件 3.3, 3.4）。
- */
-function FeedFavicon({ feedId, faviconURL, feedTitle }: FeedFaviconProps) {
-  const [imgFailed, setImgFailed] = useState(false);
-
-  const hasURL = faviconURL !== null && faviconURL !== "";
-  const showImage = hasURL && !imgFailed;
-
-  return (
-    <div className="flex-shrink-0 w-4 h-4">
-      {showImage ? (
-        <img
-          data-testid={`feed-favicon-${feedId}`}
-          src={faviconURL}
-          alt={`${feedTitle} のアイコン`}
-          className="w-4 h-4 rounded-sm object-contain"
-          onError={() => setImgFailed(true)}
-        />
-      ) : (
-        <span
-          data-testid={`feed-favicon-fallback-${feedId}`}
-          aria-label={`${feedTitle} のアイコン`}
-          role="img"
-          className="inline-flex items-center justify-center w-4 h-4 text-muted-foreground"
-        >
-          <Rss className="w-4 h-4" aria-hidden="true" />
-        </span>
+      {/* 購読 0 件時のメッセージ（Req 1.1: 仮想エントリ自体は常時表示。
+          メッセージは仮想エントリの後ろに配置する）。 */}
+      {feeds.length === 0 && (
+        <div className="flex items-center justify-center p-4 text-sm text-muted-foreground">
+          フィードが登録されていません
+        </div>
       )}
-    </div>
+    </nav>
   );
 }

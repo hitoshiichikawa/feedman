@@ -53,6 +53,8 @@ describe("FeedList コンポーネント", () => {
         selectedFeedId={null}
         onSelectFeed={() => {}}
         onOpenSettings={() => {}}
+        viewMode="none"
+        onSelectAllNewItems={() => {}}
       />
     );
 
@@ -68,6 +70,8 @@ describe("FeedList コンポーネント", () => {
         selectedFeedId={null}
         onSelectFeed={() => {}}
         onOpenSettings={() => {}}
+        viewMode="none"
+        onSelectAllNewItems={() => {}}
       />
     );
 
@@ -83,6 +87,8 @@ describe("FeedList コンポーネント", () => {
         selectedFeedId={null}
         onSelectFeed={() => {}}
         onOpenSettings={() => {}}
+        viewMode="none"
+        onSelectAllNewItems={() => {}}
       />
     );
 
@@ -99,6 +105,8 @@ describe("FeedList コンポーネント", () => {
         selectedFeedId={null}
         onSelectFeed={() => {}}
         onOpenSettings={() => {}}
+        viewMode="none"
+        onSelectAllNewItems={() => {}}
       />
     );
 
@@ -116,6 +124,8 @@ describe("FeedList コンポーネント", () => {
         selectedFeedId={null}
         onSelectFeed={() => {}}
         onOpenSettings={() => {}}
+        viewMode="none"
+        onSelectAllNewItems={() => {}}
       />
     );
 
@@ -131,6 +141,8 @@ describe("FeedList コンポーネント", () => {
         selectedFeedId={null}
         onSelectFeed={() => {}}
         onOpenSettings={() => {}}
+        viewMode="none"
+        onSelectAllNewItems={() => {}}
       />
     );
 
@@ -157,6 +169,8 @@ describe("FeedList コンポーネント", () => {
         selectedFeedId={null}
         onSelectFeed={() => {}}
         onOpenSettings={() => {}}
+        viewMode="none"
+        onSelectAllNewItems={() => {}}
       />
     );
 
@@ -173,6 +187,8 @@ describe("FeedList コンポーネント", () => {
         selectedFeedId={null}
         onSelectFeed={() => {}}
         onOpenSettings={() => {}}
+        viewMode="none"
+        onSelectAllNewItems={() => {}}
       />
     );
 
@@ -189,6 +205,8 @@ describe("FeedList コンポーネント", () => {
         selectedFeedId={null}
         onSelectFeed={() => {}}
         onOpenSettings={() => {}}
+        viewMode="none"
+        onSelectAllNewItems={() => {}}
       />
     );
 
@@ -204,6 +222,8 @@ describe("FeedList コンポーネント", () => {
         selectedFeedId={null}
         onSelectFeed={() => {}}
         onOpenSettings={() => {}}
+        viewMode="none"
+        onSelectAllNewItems={() => {}}
       />
     );
 
@@ -218,6 +238,8 @@ describe("FeedList コンポーネント", () => {
         selectedFeedId={null}
         onSelectFeed={onSelectFeed}
         onOpenSettings={() => {}}
+        viewMode="none"
+        onSelectAllNewItems={() => {}}
       />
     );
 
@@ -232,6 +254,8 @@ describe("FeedList コンポーネント", () => {
         selectedFeedId="feed-1"
         onSelectFeed={() => {}}
         onOpenSettings={() => {}}
+        viewMode="feed"
+        onSelectAllNewItems={() => {}}
       />
     );
 
@@ -246,6 +270,8 @@ describe("FeedList コンポーネント", () => {
         selectedFeedId="feed-1"
         onSelectFeed={() => {}}
         onOpenSettings={() => {}}
+        viewMode="feed"
+        onSelectAllNewItems={() => {}}
       />
     );
 
@@ -260,6 +286,8 @@ describe("FeedList コンポーネント", () => {
         selectedFeedId={null}
         onSelectFeed={() => {}}
         onOpenSettings={() => {}}
+        viewMode="none"
+        onSelectAllNewItems={() => {}}
       />
     );
 
@@ -273,6 +301,8 @@ describe("FeedList コンポーネント", () => {
         selectedFeedId={null}
         onSelectFeed={() => {}}
         onOpenSettings={() => {}}
+        viewMode="none"
+        onSelectAllNewItems={() => {}}
       />
     );
 
@@ -286,6 +316,8 @@ describe("FeedList コンポーネント", () => {
         selectedFeedId={null}
         onSelectFeed={() => {}}
         onOpenSettings={() => {}}
+        viewMode="none"
+        onSelectAllNewItems={() => {}}
       />
     );
 
@@ -522,5 +554,117 @@ describe("FeedList コンポーネント", () => {
       const row = screen.getByTestId("feed-item-sub-1");
       expect(row.className).toContain("group");
     });
+  });
+
+  // --- Issue #121 task 7: 「すべての新着記事」仮想エントリ ---
+
+  it("購読 0 件でも「すべての新着記事」仮想エントリが描画されること（要件 1.1）", () => {
+    // Arrange & Act: 購読 0 件
+    render(
+      <FeedList
+        feeds={[]}
+        selectedFeedId={null}
+        onSelectFeed={() => {}}
+        viewMode="none"
+        onSelectAllNewItems={() => {}}
+      />
+    );
+
+    // Assert: 仮想エントリが描画され、購読 0 件メッセージとも併存する
+    const entry = screen.getByTestId("all-new-items-entry");
+    expect(entry).toBeInTheDocument();
+    expect(screen.getByText("すべての新着記事")).toBeInTheDocument();
+    expect(screen.getByText("フィードが登録されていません")).toBeInTheDocument();
+  });
+
+  it("仮想エントリ click で onSelectAllNewItems が呼ばれること（要件 1.2）", () => {
+    // Arrange
+    const onSelectAllNewItems = vi.fn();
+    const onSelectFeed = vi.fn();
+    render(
+      <FeedList
+        feeds={mockFeeds}
+        selectedFeedId={null}
+        onSelectFeed={onSelectFeed}
+        viewMode="none"
+        onSelectAllNewItems={onSelectAllNewItems}
+      />
+    );
+
+    // Act
+    fireEvent.click(screen.getByTestId("all-new-items-entry"));
+
+    // Assert
+    expect(onSelectAllNewItems).toHaveBeenCalledTimes(1);
+    expect(onSelectFeed).not.toHaveBeenCalled();
+  });
+
+  it("viewMode='cross-feed' のとき仮想エントリが data-selected='true' になり aria-current='page' が付与されること（要件 1.4, NFR 3.1）", () => {
+    // Arrange & Act
+    render(
+      <FeedList
+        feeds={mockFeeds}
+        selectedFeedId={null}
+        onSelectFeed={() => {}}
+        viewMode="cross-feed"
+        onSelectAllNewItems={() => {}}
+      />
+    );
+
+    // Assert: 選択中スタイル
+    const entry = screen.getByTestId("all-new-items-entry");
+    expect(entry).toHaveAttribute("data-selected", "true");
+    expect(entry).toHaveAttribute("aria-current", "page");
+    expect(entry.className).toContain("bg-accent");
+    expect(entry.className).toContain("text-accent-foreground");
+    expect(entry.className).toContain("font-medium");
+  });
+
+  it("既存個別フィード行の並び順とスタイルが本機能導入で変化しないこと（要件 1.5, 5.2, NFR 2.1）", () => {
+    // Arrange & Act: viewMode='feed' で feed-1 選択中
+    render(
+      <FeedList
+        feeds={mockFeeds}
+        selectedFeedId="feed-1"
+        onSelectFeed={() => {}}
+        viewMode="feed"
+        onSelectAllNewItems={() => {}}
+      />
+    );
+
+    // Assert: 個別フィード行の並び順は mockFeeds の順序（sub-1, sub-2, sub-3）を維持
+    const feedButtons = screen.getAllByTestId(/^feed-item-/);
+    expect(feedButtons).toHaveLength(3);
+    expect(feedButtons[0]).toHaveAttribute("data-testid", "feed-item-sub-1");
+    expect(feedButtons[1]).toHaveAttribute("data-testid", "feed-item-sub-2");
+    expect(feedButtons[2]).toHaveAttribute("data-testid", "feed-item-sub-3");
+
+    // Assert: 個別フィードの選択中スタイルは仮想エントリ追加前と同様
+    expect(feedButtons[0]).toHaveAttribute("data-selected", "true");
+    expect(feedButtons[1]).toHaveAttribute("data-selected", "false");
+    expect(feedButtons[2]).toHaveAttribute("data-selected", "false");
+  });
+
+  it("viewMode='cross-feed' のとき個別フィード行は selectedFeedId に関わらず選択中扱いにならないこと（要件 1.4）", () => {
+    // Arrange & Act: selectedFeedId 残存だが viewMode='cross-feed'
+    render(
+      <FeedList
+        feeds={mockFeeds}
+        selectedFeedId="feed-1"
+        onSelectFeed={() => {}}
+        viewMode="cross-feed"
+        onSelectAllNewItems={() => {}}
+      />
+    );
+
+    // Assert: 仮想エントリのみ選択中、個別フィードは非選択
+    expect(screen.getByTestId("all-new-items-entry")).toHaveAttribute(
+      "data-selected",
+      "true"
+    );
+    expect(screen.getByTestId("feed-item-sub-1")).toHaveAttribute(
+      "data-selected",
+      "false"
+    );
   });
 });

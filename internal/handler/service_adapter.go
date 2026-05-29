@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/hitoshi/feedman/internal/crossfeed"
 	"github.com/hitoshi/feedman/internal/item"
 	"github.com/hitoshi/feedman/internal/itemsearch"
 	"github.com/hitoshi/feedman/internal/model"
@@ -319,6 +320,65 @@ func (a *ItemSearchServiceAdapter) Search(
 	}, nil
 }
 
+// CrossFeedServiceAdapter は crossfeed.Service を CrossFeedServiceInterface に適合させる
+// アダプタ。domain 層の crossfeed.NewItemsResult を handler 層 *crossFeedListResult に変換する。
+//
+// favicon_url は service 層が既に `data:<mime>;base64,...` 形式の data URL 文字列まで
+// 構築済（CrossFeedItemSummary.FeedFaviconURL *string）なので、本アダプタは pass-through する。
+type CrossFeedServiceAdapter struct {
+	svc *crossfeed.Service
+}
+
+// NewCrossFeedServiceAdapter は CrossFeedServiceAdapter を生成する。
+func NewCrossFeedServiceAdapter(svc *crossfeed.Service) *CrossFeedServiceAdapter {
+	return &CrossFeedServiceAdapter{svc: svc}
+}
+
+// ListNewItems は service 層を呼び出し、結果を handler 用レスポンス型に変換して返す。
+// overrideSince は service 層へそのまま転送する（Req 4.7）。
+func (a *CrossFeedServiceAdapter) ListNewItems(
+	ctx context.Context,
+	userID string,
+	cursorStr string,
+	limit int,
+	overrideSince *time.Time,
+) (*crossFeedListResult, error) {
+	result, err := a.svc.ListNewItems(ctx, userID, cursorStr, limit, overrideSince)
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]crossFeedItemResponse, len(result.Items))
+	for i, it := range result.Items {
+		items[i] = crossFeedItemResponse{
+			ID:              it.ID,
+			FeedID:          it.FeedID,
+			FeedTitle:       it.FeedTitle,
+			FeedFaviconURL:  it.FeedFaviconURL,
+			Title:           it.Title,
+			Link:            it.Link,
+			Summary:         it.Summary,
+			PublishedAt:     it.PublishedAt,
+			IsDateEstimated: it.IsDateEstimated,
+			IsRead:          it.IsRead,
+			IsStarred:       it.IsStarred,
+			HatebuCount:     it.HatebuCount,
+		}
+	}
+
+	return &crossFeedListResult{
+		Items:      items,
+		NextCursor: result.NextCursor,
+		HasMore:    result.HasMore,
+		SinceTime:  result.SinceTime,
+	}, nil
+}
+
+// TouchLastSeen は service 層へそのまま転送する（Req 4.3）。
+func (a *CrossFeedServiceAdapter) TouchLastSeen(ctx context.Context, userID string) error {
+	return a.svc.TouchLastSeen(ctx, userID)
+}
+
 // --- compile-time interface checks ---
 
 var _ SubscriptionServiceInterface = (*SubscriptionServiceAdapter)(nil)
@@ -327,6 +387,7 @@ var _ ItemServiceInterface = (*ItemServiceAdapterFromDomain)(nil)
 var _ ItemStateServiceInterface = (*ItemStateServiceAdapterFromRepo)(nil)
 var _ ItemSearchServiceInterface = (*ItemSearchServiceAdapter)(nil)
 var _ SubscriptionDeleter = (*SubscriptionDeleterAdapter)(nil)
+var _ CrossFeedServiceInterface = (*CrossFeedServiceAdapter)(nil)
 
 // zeroTime はゼロ値のtime.Time。
 var zeroTime time.Time

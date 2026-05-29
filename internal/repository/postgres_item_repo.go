@@ -360,6 +360,109 @@ func (r *PostgresItemRepo) ListStarredByUser(
 	return items, nil
 }
 
+// ListNewAcrossFeeds はユーザーの全購読フィードから sinceTime より後の記事を横断取得する。
+// items × subscriptions × feeds × item_states を 1 クエリで JOIN し、
+// (published_at, id) 複合キーによる cursor ベースページングを提供する。
+// cursorPublishedAt がゼロ値かつ cursorItemID が空文字の場合は cursor なし扱いで先頭から取得する。
+// 戻り値は published_at DESC, id DESC で決定論的に並ぶ（Issue #121 / Req 2.1, 2.2, 2.3, 4.2）。
+func (r *PostgresItemRepo) ListNewAcrossFeeds(
+	ctx context.Context,
+	userID string,
+	sinceTime time.Time,
+	cursorPublishedAt time.Time,
+	cursorItemID string,
+	limit int,
+) ([]CrossFeedItem, error) {
+	// cursorPublishedAt / cursorItemID をともに有効値として扱うのは
+	// いずれも非ゼロ値（cursorPublishedAt が非ゼロ、かつ cursorItemID が空文字でない）のときのみ。
+	// 片方のみゼロ値で渡された場合は cursor なし扱い（先頭から取得）にして、
+	// 呼び出し側のバリデーション漏れを安全側に倒す。
+	hasCursor := !cursorPublishedAt.IsZero() && cursorItemID != ""
+
+	// $1: userID（subscriptions.user_id と item_states.user_id の両方に紐づけ）
+	// $2: sinceTime（i.published_at > sinceTime の境界）
+	// cursor あり時: $3 = cursorPublishedAt, $4 = cursorItemID, $5 = limit
+	// cursor なし時: $3 = limit
+	var query string
+	var args []interface{}
+	if hasCursor {
+		query = `
+			SELECT i.id, i.feed_id, i.guid_or_id, i.title, i.link, i.summary, i.author,
+			       i.published_at, i.is_date_estimated, i.fetched_at,
+			       i.hatebu_count, i.created_at, i.updated_at,
+			       COALESCE(st.is_read, false)   AS is_read,
+			       COALESCE(st.is_starred, false) AS is_starred,
+			       f.title AS feed_title,
+			       f.favicon_data, COALESCE(f.favicon_mime, '') AS favicon_mime
+			FROM items i
+			JOIN subscriptions s ON s.feed_id = i.feed_id AND s.user_id = $1
+			JOIN feeds f ON f.id = i.feed_id
+			LEFT JOIN item_states st ON st.item_id = i.id AND st.user_id = $1
+			WHERE i.published_at > $2
+			  AND (i.published_at, i.id) < ($3, $4::uuid)
+			ORDER BY i.published_at DESC, i.id DESC
+			LIMIT $5`
+		args = []interface{}{userID, sinceTime, cursorPublishedAt, cursorItemID, limit}
+	} else {
+		query = `
+			SELECT i.id, i.feed_id, i.guid_or_id, i.title, i.link, i.summary, i.author,
+			       i.published_at, i.is_date_estimated, i.fetched_at,
+			       i.hatebu_count, i.created_at, i.updated_at,
+			       COALESCE(st.is_read, false)   AS is_read,
+			       COALESCE(st.is_starred, false) AS is_starred,
+			       f.title AS feed_title,
+			       f.favicon_data, COALESCE(f.favicon_mime, '') AS favicon_mime
+			FROM items i
+			JOIN subscriptions s ON s.feed_id = i.feed_id AND s.user_id = $1
+			JOIN feeds f ON f.id = i.feed_id
+			LEFT JOIN item_states st ON st.item_id = i.id AND st.user_id = $1
+			WHERE i.published_at > $2
+			ORDER BY i.published_at DESC, i.id DESC
+			LIMIT $3`
+		args = []interface{}{userID, sinceTime, limit}
+	}
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("横断新着記事一覧の取得に失敗しました: %w", err)
+	}
+	defer rows.Close()
+
+	var items []CrossFeedItem
+	for rows.Next() {
+		var row CrossFeedItem
+		var publishedAt sql.NullTime
+		var guidOrID, link, summary, author sql.NullString
+
+		if err := rows.Scan(
+			&row.ID, &row.FeedID, &guidOrID, &row.Title, &link,
+			&summary, &author,
+			&publishedAt, &row.IsDateEstimated, &row.FetchedAt,
+			&row.HatebuCount, &row.CreatedAt, &row.UpdatedAt,
+			&row.IsRead, &row.IsStarred,
+			&row.FeedTitle,
+			&row.FaviconData, &row.FaviconMime,
+		); err != nil {
+			return nil, fmt.Errorf("横断新着記事行の読み取りに失敗しました: %w", err)
+		}
+
+		row.GuidOrID = nullStringValue(guidOrID)
+		row.Link = nullStringValue(link)
+		row.Summary = nullStringValue(summary)
+		row.Author = nullStringValue(author)
+		if publishedAt.Valid {
+			row.PublishedAt = &publishedAt.Time
+		}
+
+		items = append(items, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("横断新着記事一覧の走査に失敗しました: %w", err)
+	}
+
+	return items, nil
+}
+
 // Create は新規記事を作成する。
 func (r *PostgresItemRepo) Create(ctx context.Context, item *model.Item) error {
 	_, err := r.db.ExecContext(ctx,

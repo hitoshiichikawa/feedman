@@ -84,6 +84,9 @@ type RouterDeps struct {
 
 	// ユーザー
 	UserService UserServiceInterface
+
+	// 横断新着一覧（Issue #121）
+	CrossFeedService CrossFeedServiceInterface
 }
 
 // NewRouter は全APIエンドポイントのルーティングとミドルウェアチェーンを構成したchi.Routerを返す。
@@ -126,6 +129,13 @@ func NewRouter(deps *RouterDeps) http.Handler {
 	itemSearchHandler := NewItemSearchHandler(deps.ItemSearchService)
 	subHandler := NewSubscriptionHandler(deps.SubscriptionService)
 	userHandler := NewUserHandler(deps.UserService)
+	// CrossFeedService が nil の場合は CrossFeedHandler を生成しない（後方互換のため、
+	// 既存テスト・既存ルート構成への影響を回避）。Issue #121 の本実装では app.go の
+	// runServe が必ず CrossFeedService を配線するため production 経路では常に非 nil。
+	var crossFeedHandler *CrossFeedHandler
+	if deps.CrossFeedService != nil {
+		crossFeedHandler = NewCrossFeedHandler(deps.CrossFeedService)
+	}
 
 	// 未認証エンドポイント向け IP 単位レート制限ミドルウェア。
 	// UnauthIPRateLimiter が nil の場合は素通し（制限なし）として扱い、既存ルーティングを
@@ -217,6 +227,14 @@ func NewRouter(deps *RouterDeps) http.Handler {
 		// 先に登録することで `search` が `{id}` の捕捉に吸われる可能性を確実に排除する）。
 		r.Get("/api/items/search", itemSearchHandler.Search)
 
+		// 横断新着一覧（Issue #121 / Req 1.2, 2.1, 4.3, 4.7）。
+		// /api/items/{id} よりも前に登録し、`cross-feed` セグメントが `{id}` の動的
+		// パラメータに吸われないようにする（既存 starred 同様の保護）。
+		// CrossFeedService が未配線の deps では登録しない（後方互換）。
+		if crossFeedHandler != nil {
+			r.Get("/api/items/cross-feed", crossFeedHandler.ListItems)
+		}
+
 		// 記事管理
 		r.Route("/api/items/{id}", func(r chi.Router) {
 			r.Get("/", itemHandler.GetItem)
@@ -240,6 +258,11 @@ func NewRouter(deps *RouterDeps) http.Handler {
 		// ユーザー管理
 		r.Route("/api/users", func(r chi.Router) {
 			r.Delete("/me", userHandler.Withdraw)
+			// PUT /api/users/me/cross-feed-last-seen - 横断一覧の最終閲覧時刻更新（Issue #121）
+			// CrossFeedService が未配線の deps では登録しない（後方互換）。
+			if crossFeedHandler != nil {
+				r.Put("/me/cross-feed-last-seen", crossFeedHandler.TouchLastSeen)
+			}
 		})
 	})
 
