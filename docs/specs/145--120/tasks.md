@@ -51,7 +51,7 @@
   - _Boundary: web/components/feed-pane-header.tsx_
   - _Depends: 2.1_
 
-- [ ] 3. `ItemList` から責務を縮退してフィードヘッダ要素を撤去する
+- [x] 3. `ItemList` から責務を縮退してフィードヘッダ要素を撤去する
   - `web/src/components/item-list.tsx` の以下を撤去する:
     - フィードヘッダ DOM（L143-169 の `<div className="flex flex-shrink-0 ...">` 配下）
     - `FeedSearchBar` import / 配置
