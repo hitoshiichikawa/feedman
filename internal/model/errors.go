@@ -39,6 +39,7 @@ const (
 	ErrCodeFeedCooldown         = "FEED_COOLDOWN"
 	ErrCodeInvalidSearchQuery   = "INVALID_SEARCH_QUERY"
 	ErrCodeFeedNotSubscribed    = "FEED_NOT_SUBSCRIBED"
+	ErrCodeFeedHTTPError        = "FEED_HTTP_ERROR"
 )
 
 // NewItemNotFoundError は記事未検出エラーを生成する。
@@ -218,5 +219,25 @@ func NewFeedNotSubscribedError(feedID string) *APIError {
 		Message:  fmt.Sprintf("指定されたフィードを購読していません: %s", feedID),
 		Category: "authorization",
 		Action:   "購読中のフィードを指定するか、横断検索を利用してください。",
+	}
+}
+
+// NewFeedHTTPError は検出対象 URL から非 2xx の HTTP ステータスを受信した場合の
+// エラーを生成する（Issue #153）。FETCH_FAILED（レスポンス取得前の失敗）とは
+// 区別され、レスポンス取得には成功したが HTTP エラー応答だったことを示す。
+// Details["status_code"] に受信したステータスコード（int）を載せる。
+//
+// ユーザー向けメッセージには受信ステータスコードを付記し（Req 2.4）、
+// 「サイト側のブロック / URL 間違い / 一時的にサーバが応答しない」といった
+// 原因示唆と、ユーザーが取れる対処（別 URL を試す / 時間を置いて再試行する）を含める（Req 2.1）。
+func NewFeedHTTPError(statusCode int) *APIError {
+	return &APIError{
+		Code:     ErrCodeFeedHTTPError,
+		Message:  fmt.Sprintf("URLにアクセスしたところ HTTP %d が返されました。サイト側がアクセスをブロックしている、URL が間違っている、もしくは一時的にサーバが応答していない可能性があります。", statusCode),
+		Category: "feed",
+		Action:   "別のURL（フィード本体のURLや異なるページ）を試すか、時間を置いてから再度お試しください。",
+		Details: map[string]any{
+			"status_code": statusCode,
+		},
 	}
 }
