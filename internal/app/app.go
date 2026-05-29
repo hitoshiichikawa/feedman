@@ -15,6 +15,7 @@ import (
 
 	"github.com/hitoshi/feedman/internal/auth"
 	"github.com/hitoshi/feedman/internal/config"
+	"github.com/hitoshi/feedman/internal/crossfeed"
 	"github.com/hitoshi/feedman/internal/database"
 	"github.com/hitoshi/feedman/internal/feed"
 	"github.com/hitoshi/feedman/internal/handler"
@@ -110,6 +111,7 @@ func runServe(cfg *config.Config) error {
 	subRepo := repository.NewPostgresSubscriptionRepo(db)
 	itemRepo := repository.NewPostgresItemRepo(db)
 	itemStateRepo := repository.NewPostgresItemStateRepo(db)
+	userCrossFeedViewRepo := repository.NewPostgresUserCrossFeedViewRepo(db)
 
 	// 3. セキュリティサービスの初期化
 	ssrfGuard := security.NewSSRFGuard()
@@ -131,6 +133,10 @@ func runServe(cfg *config.Config) error {
 	feedService := feed.NewFeedService(feedRepo, subRepo, feedDetector, faviconFetcher)
 
 	itemService := item.NewItemService(itemRepo, itemStateRepo)
+
+	// 横断新着一覧サービス（Issue #121）。itemRepo の ListNewAcrossFeeds と
+	// userCrossFeedViewRepo の Get / Upsert を利用する。
+	crossFeedService := crossfeed.NewService(itemRepo, userCrossFeedViewRepo)
 
 	// serve 専用の Prometheus registry と Collector を生成する。
 	// Collector は手動フェッチ系のカウンタ（feedman_manual_fetch_total）も保持しており、
@@ -171,6 +177,7 @@ func runServe(cfg *config.Config) error {
 	itemServiceAdapter := handler.NewItemServiceAdapter(itemService)
 	itemStateServiceAdapter := handler.NewItemStateServiceAdapter(itemStateRepo)
 	itemSearchServiceAdapter := handler.NewItemSearchServiceAdapter(itemSearchService)
+	crossFeedServiceAdapter := handler.NewCrossFeedServiceAdapter(crossFeedService)
 
 	// 6. SubscriptionDeleterアダプタの構築
 	subDeleterAdapter := handler.NewSubscriptionDeleterAdapter(subRepo, itemStateRepo)
@@ -222,6 +229,8 @@ func runServe(cfg *config.Config) error {
 
 		SubscriptionService: subServiceAdapter,
 		UserService:         userServiceAdapter,
+
+		CrossFeedService: crossFeedServiceAdapter,
 	}
 
 	router := handler.NewRouter(deps)
