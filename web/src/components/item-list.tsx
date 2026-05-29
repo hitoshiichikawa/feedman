@@ -1,16 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useCallback, useEffect, useRef } from "react";
 import { RotateCw, Star } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useItems, useItemDetail } from "@/hooks/use-items";
 import { useMarkAsRead, useToggleStar } from "@/hooks/use-item-state";
-import { useManualRefresh } from "@/hooks/use-manual-refresh";
-import { useFeeds } from "@/hooks/use-feeds";
-import { FeedSearchBar } from "@/components/feed-search-bar";
 import { ItemDetail } from "@/components/item-detail";
-import { ManualRefreshBanner } from "@/components/manual-refresh-banner";
 import type {
   ItemDetail as ItemDetailType,
   ItemFilter,
@@ -25,16 +20,36 @@ interface ItemListProps {
   onSelectItem: (itemId: string) => void;
   /** 現在展開中の記事ID（null = 未展開） */
   expandedItemId: string | null;
+  /**
+   * 現在のフィルタ値（"all" | "unread" | "starred"）。
+   *
+   * Issue #145 / Task 3 でフィードヘッダ領域（フィルタタブを含む）の責務を
+   * `FeedPaneHeader` へ移譲したため、フィルタ値は呼び出し側（`AppShell`）で
+   * 保持し props 経由で受け取る形に変更した。
+   *
+   * 後方互換のため optional とし、未指定時は `"all"` を fallback として用いる
+   * （`AppShell` 側で本 props を渡す改修が Task 4 で完了するまでのビルド非破壊の橋渡し）。
+   */
+  filter?: ItemFilter;
 }
 
 /**
  * 記事一覧パネル（右ペイン）
  *
  * フィード選択に応じた記事一覧をpublished_at降順で表示する。
- * 推定フラグ付き日付の表示、無限スクロール、フィルタ切替UIを提供する。
+ * 推定フラグ付き日付の表示、無限スクロール、記事詳細展開を提供する。
+ *
+ * Issue #145 / Task 3: フィードヘッダ領域（フィルタタブ / FeedSearchBar /
+ * ManualRefreshButton / ManualRefreshBanner）の描画責務は `FeedPaneHeader` へ
+ * 移譲した。本コンポーネントは記事リスト本体（取得・ローディング/エラー/空状態・
+ * 無限スクロール・詳細展開）のみを担う（Req 3.3 / NFR 1.1 の非回帰担保）。
  */
-export function ItemList({ feedId, onSelectItem, expandedItemId }: ItemListProps) {
-  const [filter, setFilter] = useState<ItemFilter>("all");
+export function ItemList({
+  feedId,
+  onSelectItem,
+  expandedItemId,
+  filter = "all",
+}: ItemListProps) {
   const sentinelRef = useRef<HTMLDivElement>(null);
 
   const {
@@ -57,15 +72,6 @@ export function ItemList({ feedId, onSelectItem, expandedItemId }: ItemListProps
   const markAsRead = useMarkAsRead();
   const toggleStar = useToggleStar();
 
-  // 手動更新ボタン用: 現在表示中のフィードに対応する subscription.id を解決する。
-  // useFeeds は購読一覧（feed_id → subscription.id 対応表）を提供する。
-  const { data: feeds } = useFeeds();
-  const subscriptionId =
-    feedId !== null && Array.isArray(feeds)
-      ? feeds.find((f) => f.feed_id === feedId)?.id ?? null
-      : null;
-  const manualRefresh = useManualRefresh(feedId);
-
   const handleMarkAsRead = useCallback(
     (itemId: string) => {
       markAsRead.mutate(itemId);
@@ -79,11 +85,6 @@ export function ItemList({ feedId, onSelectItem, expandedItemId }: ItemListProps
     },
     [toggleStar]
   );
-
-  // フィード切替時にフィルタをリセット
-  useEffect(() => {
-    setFilter("all");
-  }, [feedId]);
 
   // Intersection Observerによる無限スクロール
   const handleObserver = useCallback(
@@ -141,37 +142,10 @@ export function ItemList({ feedId, onSelectItem, expandedItemId }: ItemListProps
 
   return (
     <div className="flex flex-col h-full">
-      {/* フィルタタブ + フィード内検索バー + 手動更新ボタン
-          FeedSearchBar は selectedFeedId === null のとき内部で null を返すため、
-          本領域に到達する時点（feedId !== null）では常に描画される（Req 1.2 / NFR 2.3）。
-          ManualRefreshButton は subscriptionId 解決時のみ描画する（Issue #115 Req 5.x）。 */}
-      <div className="flex flex-shrink-0 flex-wrap items-center justify-between gap-2 border-b px-4 py-2">
-        <Tabs
-          value={filter}
-          onValueChange={(value) => setFilter(value as ItemFilter)}
-        >
-          <TabsList>
-            <TabsTrigger value="all">全て</TabsTrigger>
-            <TabsTrigger value="unread">未読</TabsTrigger>
-            <TabsTrigger value="starred">スター</TabsTrigger>
-          </TabsList>
-        </Tabs>
-        <div className="flex items-center gap-2">
-          <FeedSearchBar />
-          {subscriptionId !== null && (
-            <ManualRefreshButton
-              subscriptionId={subscriptionId}
-              isPending={manualRefresh.isPending}
-              onClick={() => manualRefresh.mutate(subscriptionId)}
-            />
-          )}
-        </div>
-      </div>
-
-      {/* 手動更新エラー表示（成功時は描画しない） */}
-      <ManualRefreshBanner error={manualRefresh.error ?? null} />
-
-      {/* 記事一覧 */}
+      {/* 記事一覧
+          Issue #145 / Task 3: フィードヘッダ領域（フィルタタブ / FeedSearchBar /
+          ManualRefreshButton / ManualRefreshBanner）は `FeedPaneHeader` 側に移譲済み。
+          本領域は記事リスト本体のみを担う。 */}
       <div className="flex-1 overflow-y-auto">
         {allItems.length === 0 ? (
           <div className="flex items-center justify-center h-32 text-sm text-muted-foreground">
