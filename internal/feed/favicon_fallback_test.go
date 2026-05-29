@@ -11,8 +11,19 @@ import (
 	"testing"
 )
 
-// pngBody は最小サイズの PNG ヘッダー（テスト用 favicon ペイロード）。
-var pngBody = []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+// pngBody はテスト用 favicon ペイロード（不透明 PNG）。
+// Issue #148 の透明判定でデコードされるため、8 バイトのマジックバイトのみではなく
+// 有効な PNG（不透明 4x4）を遅延初期化する。各テストは t.Helper() 経由で生成する。
+//
+// 旧仕様: 8 バイトの PNG マジック値だけで「画像として成功」を判定していたが、
+// 透明判定導入後はデコード可能でかつ alpha>0 のピクセルを 1 件以上含むことを要求する。
+var pngBody = mustGenerateOpaquePNG(4, 4)
+
+// mustGenerateOpaquePNG は init 時に呼ばれる pngBody 生成用ヘルパー。
+// パッケージレベル変数初期化のため testing.T を取らない（panic 経路で失敗を露見させる）。
+func mustGenerateOpaquePNG(width, height int) []byte {
+	return generateOpaquePNGForInit(width, height)
+}
 
 // --- parseFaviconURLFromHTML のテスト（要件 2.4） ---
 
@@ -176,11 +187,14 @@ func TestOriginURL(t *testing.T) {
 func TestFetchFaviconWithFallback_StageA_FeedOriginICOSucceeds(t *testing.T) {
 	var stageBHit, stageCHit, stageDHit atomic.Bool
 
+	// Issue #148: 透明判定で ICO は内包 BMP の alpha バイトを走査するため有効な ICO バイト列を返す
+	icoBody := newOpaqueICO(t, 8, 8)
+
 	feedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/favicon.ico":
 			w.Header().Set("Content-Type", "image/x-icon")
-			_, _ = w.Write(pngBody)
+			_, _ = w.Write(icoBody)
 		case "/":
 			// 段階 (b) で来る HTML
 			stageBHit.Store(true)

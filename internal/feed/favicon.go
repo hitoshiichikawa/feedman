@@ -148,6 +148,30 @@ func (f *FaviconFetcher) FetchFavicon(ctx context.Context, faviconURL string) ([
 		return nil, "", nil
 	}
 
+	// 透明判定（Issue #148）。alpha チャネルを持ち得る形式のみデコードして
+	// 全ピクセル alpha=0 なら段階失敗扱いとする（要件 1.1, 1.2, 1.4）。
+	// NFR 2.2 により、HTTP 2xx・image/* MIME・サイズ上限内を満たした画像にのみ実行する。
+	transparent, decodeErr := checkFaviconTransparency(body, mimeType)
+	if decodeErr != nil {
+		// 要件 1.4 / 3.2: デコード失敗を段階失敗として扱い構造化ログに記録する。
+		slog.Warn("favicon取得: デコード失敗（段階失敗扱い）",
+			"url", faviconURL,
+			"mime", mimeType,
+			"reason", "decode-failed",
+			"error", decodeErr,
+		)
+		return nil, "", nil
+	}
+	if transparent {
+		// 要件 1.2 / 3.1: 全面透明を段階失敗として扱い構造化ログに記録する。
+		slog.Warn("favicon取得: 全面透明（段階失敗扱い）",
+			"url", faviconURL,
+			"mime", mimeType,
+			"reason", "transparent",
+		)
+		return nil, "", nil
+	}
+
 	return body, mimeType, nil
 }
 
