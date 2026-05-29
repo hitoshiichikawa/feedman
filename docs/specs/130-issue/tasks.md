@@ -31,7 +31,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 3.1, 3.2, 3.3, 3.4, 3.5, 4.4, NFR 1.2, NFR 3.1_
   - _Boundary: SubscriptionSettings_
 
-- [ ] 4. SubscriptionSettingsDialog: `Dialog` ラッパコンポーネント新設 (P)
+- [x] 4. SubscriptionSettingsDialog: `Dialog` ラッパコンポーネント新設 (P)
   - `web/src/components/subscription-settings-dialog.tsx` を新規作成する
   - props: `{ open: boolean; subscription: Subscription | null; onOpenChange: (open: boolean) => void; onUnsubscribed: (unsubscribedFeedId: string) => void }`
   - 中身は shadcn/ui `Dialog` + `DialogContent` + `DialogHeader`（`DialogTitle="フィードの設定"`）+ `<SubscriptionSettings subscription={subscription} onUnsubscribed={(feedId) => { onUnsubscribed(feedId); onOpenChange(false); }} />`
