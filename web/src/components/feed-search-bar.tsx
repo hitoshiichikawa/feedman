@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Search, X } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -40,6 +40,26 @@ export function FeedSearchBar() {
       ? state.searchQuery
       : "";
   const [localQuery, setLocalQuery] = useState(initialLocalQuery);
+
+  // Req 1.2 一般化: 検索結果表示中に AppState の searchQuery が外部変更（例: ProgrammaticallyDispatched
+  // からの再検索キーワード変更）されたとき、localQuery にも反映して入力欄表示を同期する。
+  // useState の直後・early return の前に配置することで、React の hooks 順序制約を満たす。
+  // 注: setLocalQuery は安定参照のため deps には含めない（react-hooks/exhaustive-deps は満たす）。
+  useEffect(() => {
+    if (
+      state.isSearching &&
+      state.searchScope === "feed" &&
+      state.searchFeedId === selectedFeedId
+    ) {
+      setLocalQuery(state.searchQuery);
+    }
+  }, [
+    state.isSearching,
+    state.searchScope,
+    state.searchFeedId,
+    state.searchQuery,
+    selectedFeedId,
+  ]);
 
   if (selectedFeedId === null) {
     return null;

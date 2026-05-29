@@ -183,4 +183,69 @@ describe("FeedSearchBar", () => {
     });
     expect(screen.queryByTestId("feed-search-clear")).toBeNull();
   });
+
+  it("初期 mount 時に検索結果表示中（scope='feed' かつ searchFeedId が一致）のとき、input の value が state.searchQuery を反映すること（Req 1.2 / 初期描画）", () => {
+    renderWithInitialDispatch(<FeedSearchBar />, (dispatch) => {
+      dispatch({ type: "SELECT_FEED", feedId: "feed-X" });
+      dispatch({
+        type: "SET_SEARCH_QUERY",
+        query: "rust",
+        scope: "feed",
+        feedId: "feed-X",
+      });
+    });
+
+    const input = screen.getByTestId(
+      "feed-search-input"
+    ) as HTMLInputElement;
+    expect(input.value).toBe("rust");
+  });
+
+  it("mount 後に外部から SET_SEARCH_QUERY を dispatch すると input の value が新キーワードに同期されること（Req 1.2 / 一般化）", async () => {
+    const user = userEvent.setup();
+
+    // 別の dispatcher コンポーネントを描画し、ボタン押下で SET_SEARCH_QUERY を発火させる。
+    // renderWithInitialDispatch は initial dispatch しか扱えないため、本ケースでは
+    // FeedSearchBar と並列に dispatcher を mount してテスト中に追加 dispatch を実行する。
+    function ExternalDispatcher() {
+      const dispatch = useAppDispatch();
+      return (
+        <button
+          type="button"
+          data-testid="external-set-search"
+          onClick={() =>
+            dispatch({
+              type: "SET_SEARCH_QUERY",
+              query: "typescript",
+              scope: "feed",
+              feedId: "feed-Y",
+            })
+          }
+        >
+          fire
+        </button>
+      );
+    }
+
+    renderWithInitialDispatch(
+      <>
+        <FeedSearchBar />
+        <ExternalDispatcher />
+      </>,
+      (dispatch) => {
+        dispatch({ type: "SELECT_FEED", feedId: "feed-Y" });
+      }
+    );
+
+    // 初期状態では検索未開始のため input は空
+    const input = screen.getByTestId(
+      "feed-search-input"
+    ) as HTMLInputElement;
+    expect(input.value).toBe("");
+
+    // 外部 dispatch で SET_SEARCH_QUERY を発火 → useEffect により input.value が同期される
+    await user.click(screen.getByTestId("external-set-search"));
+
+    expect(input.value).toBe("typescript");
+  });
 });
