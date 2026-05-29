@@ -105,7 +105,7 @@
   - _Boundary: SubscriptionHandler, SubscriptionServiceAdapter, RouterDeps, app.runServe_
   - _Depends: 4.1, 5.1_
 
-- [ ] 7. Frontend: useManualRefresh フック + ManualRefreshButton / ManualRefreshBanner UI 追加
+- [x] 7. Frontend: useManualRefresh フック + ManualRefreshButton / ManualRefreshBanner UI 追加
 - [x] 7.1 useManualRefresh フック実装 (P)
   - `web/src/hooks/use-manual-refresh.ts` を新規作成。`useMutation<void, ApiError, string>` で
     `apiClient.post(\`/api/subscriptions/${subscriptionId}/fetch\`)` を呼ぶ
