@@ -17,7 +17,7 @@
       （新規ケース、Req 1.2 の一般化）
   - _Requirements: 1.2, 1.3, NFR 2.1_
 
-- [ ] 2. `FeedPaneHeader` コンポーネントを新規作成する
+- [x] 2. `FeedPaneHeader` コンポーネントを新規作成する
 - [x] 2.1 `web/src/components/feed-pane-header.tsx` を新規作成する
   - design.md の `FeedPaneHeaderProps` 型に従ったコンポーネントを実装する
     （`mode: 'normal' | 'search-feed'`, `feedId: string`, `filter?: ItemFilter`,
