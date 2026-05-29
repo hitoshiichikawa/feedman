@@ -24,7 +24,7 @@
   - _Boundary: ItemRepository_
   - _Depends: 1_
 
-- [ ] 4. crossfeed.Service の実装（ドメインロジック）
+- [x] 4. crossfeed.Service の実装（ドメインロジック）
   - `internal/crossfeed/service.go` を新規作成し `Service struct { itemRepo repository.ItemRepository; userCrossFeedViewRepo repository.UserCrossFeedViewRepository }` と `NewService` を定義
   - `ListNewItems(ctx, userID, cursorStr string, limit int, overrideSince *time.Time) (*NewItemsResult, error)` を実装: (1) `overrideSince != nil` なら `sinceTime = *overrideSince`（Req 4.7、client-driven baseline）。そうでなければ (2) `userCrossFeedViewRepo.Get` で lastSeen 取得、(3) nil なら `sinceTime = now - 24h` fallback、非 nil なら `sinceTime = lastSeen`、(4) `cursorStr` を `strings.LastIndex(s, ":")` で複合分解、(5) `itemRepo.ListNewAcrossFeeds` を `limit+1` で呼び HasMore 判定、(6) NextCursor を `<RFC3339Nano>:<itemID>` 形式で組み立て、(7) 採用した sinceTime を `NewItemsResult.SinceTime` に格納し、`CrossFeedItemSummary` 配列とともに返す。`FeedFaviconURL` は `favicon_data` 非空なら `data:<mime>;base64,<encoded>` 形式の data URL を構築（`internal/subscription/service.go` の方式と整合）
   - `TouchLastSeen(ctx, userID) error` を実装: `userCrossFeedViewRepo.Upsert(ctx, userID, time.Now())` を呼ぶ
