@@ -22,3 +22,22 @@ export interface Subscription {
   unread_count: number;
   created_at: string;
 }
+
+/**
+ * 手動フェッチ API のエラーレスポンスボディ。
+ *
+ * `ApiError.body` にこの形状で詰められて返る前提（バックエンド
+ * `internal/middleware/WriteErrorResponse` の wire format に対応）。
+ * `details.retry_after_seconds` は HTTP 429 / FEED_COOLDOWN のときのみ含まれる。
+ */
+export interface ManualFetchErrorBody {
+  error: {
+    code: string;
+    message: string;
+    category: string;
+    action: string;
+    details?: {
+      retry_after_seconds?: number;
+    };
+  };
+}
