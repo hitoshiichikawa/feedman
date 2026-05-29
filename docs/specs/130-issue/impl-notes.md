@@ -23,6 +23,17 @@
   - Tailwind class の検証テスト（`expect(className).toContain("opacity-0")` 等）を入れたのは、`group-hover` 等の CSS 擬似クラスは jsdom が評価しないため、`opacity-0` の解除を runtime で検証できないことの代替として class 文字列レベルで担保するため。
 - 残存課題: なし。task 5 で AppShell の `handleOpenSettings` 実装と wiring を行い、no-op を置き換える予定。
 
+### Task 3
+
+- 採用方針: tasks.md task 3 の指示通り、`SubscriptionSettingsProps` の `onUnsubscribed` シグネチャを `() => void` から `(unsubscribedFeedId: string) => void` に拡張し、`handleUnsubscribe` 内の mutation `onSuccess` で `onUnsubscribed(subscription.feed_id)` を渡すように変更した（AC 4.4）。その他の挙動（更新間隔 Select / フェッチ再開 / 警告表示 / 確認 AlertDialog / 進行中ラベル / キャンセル挙動 / 文言）は一切変更していない（NFR 1.2 / NFR 3.1）。
+- 重要な判断:
+  - `Subscription` 型は既に import 済みで、`subscription.feed_id` は型上 `string` として保証されているので追加 nullish check は不要と判断した。
+  - 既存テスト 9 件は `onUnsubscribed={() => {}}` のように引数を無視する callback で呼ばれており、TypeScript の関数型互換性（少ない引数を受け取る関数は多い引数を受け取る関数の型に代入可能）により破壊されない。実際に既存 9 件は全て pass し続けることを確認済み。
+  - 新規テスト 1 件「購読解除が成功したとき onUnsubscribed が subscription.feed_id を引数として呼ばれること」を追加し、`vi.fn()` で `onUnsubscribed` を spy し、`mockFetch` で `DELETE /api/subscriptions/sub-1` を成功させた後に `expect(onUnsubscribed).toHaveBeenCalledWith("feed-1")` で AC 4.4 を直接検証した。
+  - mutation の `onSuccess` 内で `setShowUnsubscribeDialog(false)` の後に `onUnsubscribed(subscription.feed_id)` を呼ぶ既存順序を維持。task 5 で wire される `AppShell.handleUnsubscribed` 側で `CLEAR_SELECTED_FEED` dispatch と `setSettingsTarget(null)` が行われるが、ダイアログ自体の `open` は SubscriptionSettings 内 state なので先に false にしておく必要がある。
+  - `app-shell.tsx` 側で `SubscriptionSettings` を直接利用している箇所は存在せず（Grep で確認済み）、task 4 で新規追加される `SubscriptionSettingsDialog` 経由で利用される予定のため、本 task では他ファイルへの波及修正は不要。`npm run build` も task 3 段階では未実施でよく、`npm test` / `npm run lint` のみで pass を確認した。
+- 残存課題: なし。task 4 で `SubscriptionSettingsDialog` ラッパが新規作成され、本 task で拡張した `onUnsubscribed(feedId)` シグネチャを親に伝播する。
+
 ## 受入基準カバレッジ（task 1 分のみ）
 
 | Requirement | テスト |

@@ -153,6 +153,49 @@ describe("SubscriptionSettings コンポーネント", () => {
     );
   });
 
+  it("購読解除が成功したとき onUnsubscribed が subscription.feed_id を引数として呼ばれること", async () => {
+    const user = userEvent.setup();
+    const onUnsubscribed = vi.fn();
+
+    // DELETE /api/subscriptions/sub-1 を成功させる
+    mockFetch.mockImplementation((url: string, options?: RequestInit) => {
+      if (url === "/api/subscriptions/sub-1" && options?.method === "DELETE") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({}),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({}),
+      });
+    });
+
+    render(
+      <SubscriptionSettings
+        subscription={mockActiveSubscription}
+        onUnsubscribed={onUnsubscribed}
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    // 購読解除ボタンを押下してダイアログを開く
+    await user.click(screen.getByTestId("unsubscribe-button"));
+
+    await waitFor(() => {
+      expect(screen.getByText("購読を解除しますか？")).toBeInTheDocument();
+    });
+
+    // 確認ダイアログの「購読解除」ボタンを押下
+    await user.click(screen.getByRole("button", { name: "購読解除" }));
+
+    // mutation 成功後、feed_id 引数で onUnsubscribed が呼ばれる（AC 4.4）
+    await waitFor(() => {
+      expect(onUnsubscribed).toHaveBeenCalledTimes(1);
+    });
+    expect(onUnsubscribed).toHaveBeenCalledWith("feed-1");
+  });
+
   it("停止中フィードの「再開」ボタンが表示されること", () => {
     render(
       <SubscriptionSettings
