@@ -45,6 +45,21 @@
   - **AppShell 統合テスト（`app-shell.test.tsx`）の 7 件が transient に失敗する状態**: 旧 `ItemList` が描画していたフィルタタブを `getByRole("tab", { name: "全て" })` で「ItemList が表示されたか」の proxy assertion として使っていたテストが 7 件あり、本 task の責務縮退で当該タブが ItemList 側に存在しなくなったため失敗する。これらは **Task 4 で AppShell が `FeedPaneHeader` を統合して再びフィルタタブを描画するようになると自動的に green に戻る** 想定（Task 2 の impl-notes で「task 4 で `AppShell` が `FeedPaneHeader` を呼び出す」と明記されている設計上の transient state。per-task 分割設計の意図された中間状態）。
   - **Task 4 で AppShell が `filter` props を `ItemList` に明示渡しする必要**: 本 task で `filter?` を optional にしたため、Task 4 で AppShell が `<ItemList ... filter={state.filter} />` を渡すことで design.md / tasks.md L62-63 の「props 経由で受け取る」が完全に成立する。
 
+### Task 4
+
+- **採用方針**: `web/src/components/app-shell.tsx` の右ペイン分岐を design.md「`app-shell.tsx`（修正）」節の擬似コードに従って書き換え、`FeedPaneHeader` を `SearchResults` / `ItemList` の上に挿入する責務統合のみを行う。タスク本体は AppShell の分岐ロジック変更に限定し、子コンポーネント（`FeedPaneHeader` / `ItemList` / `FeedSearchBar`）の中身は Task 1 / 2 / 3 で完成済みのため触らない。
+- **重要な判断**:
+  - **5 分岐 + ネスト 1 段の優先順位設計**: `isSearching` を最優先、その中で `searchScope === 'feed' && searchFeedId !== null` をネスト判定する 2 段構造を採用（design.md 擬似コードのフラット if-else を JSX の三項演算ネストで表現）。`searchScope === 'global'` 枝は `FeedPaneHeader` を挿入せず `<SearchResults />` のみ（Req 2.1）、`searchScope === 'feed' && searchFeedId !== null` 枝は `<FeedPaneHeader mode="search-feed" /> + <SearchResults />` を render（Req 1.1）。`searchFeedId === null` の例外ケース（理論上 `searchScope='feed'` だが feedId 未指定）は global 検索と同等扱いで `<SearchResults />` のみとする（防御的）。
+  - **「フィードを選択してください」メッセージの所有権移譲**: 旧構造では `ItemList` 側が `feedId === null` のときに当該メッセージを描画していたが、Task 3 で `ItemList` から責務を縮退した結果、AppShell が `selectedFeedId === null` 枝で直接描画する設計に変更（design.md「`app-shell.tsx`（修正）」節の擬似コード `// フィード未選択（Req 2.3 の前提状態）` 行に整合）。`ItemList` は `feedId !== null` を前提として呼び出される。これは `ItemList` 側に「フィードを選択してください」描画ロジックが残っている（item-list.tsx L114-121）が、AppShell が `feedId={state.selectedFeedId}` を渡すのは `selectedFeedId !== null` の枝のみなので到達不能コードになる（残置自体は仕様変更ではないため削除しない / Task 3 のスコープ）。
+  - **`filter` props 明示渡し（Task 3 で optional 化した橋渡しの確定）**: AppShell は `<ItemList ... filter={state.filter} />` と明示渡しすることで Task 3 の `filter?: ItemFilter` + `filter = "all"` fallback が defacto unused になる（design.md / tasks.md L62-63 の「props 経由で受け取る」が完全成立）。`FeedPaneHeader` には `filter={state.filter}` + `onFilterChange={(filter) => dispatch({ type: 'SET_FILTER', filter })}` を渡し、AppState の reducer 既存挙動（L218-222 `SET_FILTER` / L173 `SELECT_FEED` 時の `filter: "all"` リセット）を介してフィード切替時のリセットを担保する（design.md 確認事項 3 採用方針と整合）。
+  - **import 追加は `FeedPaneHeader` 1 件のみ**: 既存の `SearchResults` / `ItemList` / `StarredItemList` / `CrossFeedItemList` / `HeaderSearchBar` の import 配置を変更せず、`FeedPaneHeader` を `ItemList` の隣に追加。新規 `dispatch({ type: 'SET_FILTER', filter })` 呼び出しは既存 `useAppDispatch` hook をそのまま使用（AppState の reducer に既存実装あり / app-state.tsx L218-222）。
+  - **DOM 構造の維持**: `<main data-testid="right-pane" className="flex-1 overflow-hidden">` の内側 `<div className="flex flex-col h-full">` 構造は手付かずで、その flex-col の **直接の子**として `FeedPaneHeader` + リスト本体を fragment（`<>...</>`）で並べる形に変更した。`FeedPaneHeader` の `flex-shrink-0` ヘッダ DOM + リスト本体の `flex-1 overflow-y-auto` の組合せで flex-col layout が成立する（Task 2 で `FeedPaneHeader` 内部の `flex flex-shrink-0` div は実装済み / `ItemList` 内部の `flex-1 overflow-y-auto` も Task 3 縮退後も保持されている）。
+  - **Task 3 transient 失敗 7 件の自動解消確認**: Task 3 impl-notes 残存課題で記載されていた `app-shell.test.tsx` の 7 件 transient 失敗（旧 ItemList が描画していたフィルタタブを ItemList 表示判定の proxy として使用していたケース）は、Task 4 で AppShell が `<FeedPaneHeader mode="normal" .../>` を統合して再びフィルタタブを描画するようになったため、本 task 単独で全 19 件 green に復帰（per-task 分割設計の意図された中間状態が解消）。
+- **残存課題**:
+  - **Task 5（AppShell 統合テスト追加）が次タスク**: tasks.md Task 5 は「フィード内検索の連続操作（フィード選択 → キーワード入力 → Enter → 検索結果中に input 編集 → 再検索 / 空入力 / クリア）」を 9 ケースの統合テストで検証する追加スコープ。本 task では既存 19 件の transient 失敗を解消する以上の新規テストは追加しなかった（Task 5 のスコープ）。
+  - **横断検索結果中の FeedSearchBar 非表示の構造的担保**: AppShell の分岐で `searchScope === 'global'` 枝に `<FeedPaneHeader />` を挿入しない実装は完了しているが、回帰防止の専用テスト（Req 2.1 の「横断検索結果表示中に `feed-search-bar` testid が存在しない」）は Task 5 の統合テスト追加スコープに含まれる。
+  - **`ItemList` の `feedId === null` 到達不能化**: AppShell が `selectedFeedId !== null` の枝でのみ `<ItemList />` を呼ぶようになったため、`item-list.tsx` L114-121 の「フィード未選択時」分岐が defacto unreachable code となる。これは Task 3 のスコープで明示削除されておらず（Task 3 は最小差分の優先で当該分岐を残置）、本 task でも仕様変更を避けるため削除しない。将来の cleanup PR でデッドコードとして整理する余地あり。
+
 ## 受入基準カバレッジ
 
 | Requirement | Test |
@@ -75,6 +90,13 @@
   - 7 件失敗の内訳: 全件「フィルタタブが ItemList 経由で描画されること」を ItemList 表示判定の proxy として使用していたケース（`expect(screen.getByRole("tab", { name: "全て" })).toBeInTheDocument()`）。Task 4 で AppShell が `FeedPaneHeader` を統合し再びフィルタタブを描画するため、それらは Task 4 完了時点で自動的に green に戻る。本 task で `ItemList` のテストを通すこと自体は完全に成功している（28 / 28）
 - `cd web && npm run lint`: 0 errors / 5 warnings（warnings は全て既存のもので本 task とは無関係。Task 2 時点 6 warnings → Task 3 で 5 warnings に減少した理由は、撤去された `useState<ItemFilter>` 関連の暗黙警告ではなく、テストヘルパーの未使用 import 整理に伴う副次的な減少）
 - `cd web && npm run build`: ✓ success（standalone build 5 routes prerendered）
+
+### Task 4 検証結果
+
+- `cd web && npm test -- app-shell`: 19 / 19 pass（Task 3 完了時点で transient 失敗していた 7 件が全て自動 green 復帰。新規追加テストは Task 5 のスコープのため本 task では 0 件）
+- `cd web && npm test`: 365 / 365 pass（全 web スイート / 既存 358 件 + Task 3 transient 失敗解消の 7 件）
+- `cd web && npm run lint`: 0 errors / 5 warnings（warnings は全て既存のもので本 task とは無関係。Task 3 時点と同件数 / 同一内容）
+- `cd web && npm run build`: ✓ success（standalone build 5 routes prerendered / Task 3 時点と同一の build output）
 
 ## 確認事項
 
