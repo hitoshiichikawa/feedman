@@ -22,7 +22,7 @@
   - _Boundary: FeedList_
   - _Depends: 1_
 
-- [ ] 3. SubscriptionSettings: `onUnsubscribed` シグネチャ拡張と既存挙動温存の確認
+- [x] 3. SubscriptionSettings: `onUnsubscribed` シグネチャ拡張と既存挙動温存の確認
   - `web/src/components/subscription-settings.tsx` の `SubscriptionSettingsProps` の `onUnsubscribed` を `() => void` から `(unsubscribedFeedId: string) => void` に変更する
   - `handleUnsubscribe` 内の `unsubscribe.mutate(subscription.id, { onSuccess: () => { setShowUnsubscribeDialog(false); onUnsubscribed(subscription.feed_id); } })` のように、解除された subscription の `feed_id` を引数で渡す（AC 4.4）
   - 確認 `AlertDialog` の表示・ボタン非活性化（`unsubscribe.isPending`）・進行中ラベル・キャンセル挙動・確定挙動・タイトル / 本文文言は全て既存挙動を維持する（AC 3.1, 3.2, 3.3, 3.4, 3.5, NFR 3.1, NFR 1.2）
