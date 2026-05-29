@@ -80,6 +80,20 @@
 
 残存課題: なし（task 6 完了で Issue #115 の Go 側実装は完了。task 7 系の web 側 hook / UI は別 task）。
 
+### Task 7
+
+採用方針: `useManualRefresh(feedId)` フックで `POST /api/subscriptions/:id/fetch` を mutation 化し、成功時は `["items", feedId]` / `["feeds"]` を invalidate して記事一覧と未読バッジを自動再取得。失敗時は invalidate せず既存表示を維持。`ItemList` 内部に `ManualRefreshButton` 子コンポーネントを新設してフィルタタブ群を `flex justify-between` でラップし、`useFeeds` から `feed_id === feedId` で `subscription.id` を解決して mutation に渡す。エラーは新規 `ManualRefreshBanner` がフィルタタブ直下に status / code 別の説明文付きで描画（429 はサーバーが返す `details.retry_after_seconds` を本文に埋め込み）。
+
+重要な判断:
+- **`subscriptionId` 解決の二段防御**: `useFeeds` の `data` 型は `Subscription[]` だが、TanStack Query の loading 中（=`undefined`）や非配列レスポンスを誤って受信した場合に `find` が runtime error を起こすため、`Array.isArray(feeds)` ガードを併用した。これにより既存テスト群が `/api/subscriptions` をモックしていない（= mockFetch default の `{}` を返す）状況でも regression を起こさない設計とした
+- **既存テストヘルパの拡張**: `item-list.test.tsx` の `setupMockFetch` / `setupMockFetchWithDetail` および inline mockFetch を更新し、`/api/subscriptions` を `mockSubscriptions: Subscription[]` にルーティング。既存 27 テストは新規ボタンの存在を期待していないが、ヘッダーの DOM 構造変更（`flex justify-between` ラップ）と subscription 解決を介する `useFeeds` のクエリ発行があるため、安全側で全分岐に分岐を追加
+- **ApiError 以外の error への防御**: `useManualRefresh` の型は `useMutation<void, ApiError, string>` だが、ネットワーク到達不能時は fetch が `TypeError` で reject するため runtime 値は ApiError ではない。`ManualRefreshBanner.resolveMessage` は `error.status` を読むだけで（undefined ならどの分岐にもマッチせず）デフォルトの「一時的なエラー」メッセージへフォールバックする設計とした。これにより型と runtime の不一致を吸収しつつ Req 7.4（ネットワーク不調も一時的失敗扱い）を満たす
+- **`ManualRefreshButton` を `item-list.tsx` 内部に同居させた**: design.md で別ファイル化を要求されていないこと、`ItemList` 専用の小さな見た目コンポーネントであること、`isPending` を props で受けて状態管理を呼び出し側に寄せた純粋表示コンポーネントであるため、ファイル分割せず ItemListReact フラグメントの一部として配置した。将来別箇所で再利用する局面が出てきたら切り出す（YAGNI）
+- **disabled 状態の視覚化**: `disabled:opacity-60` + `disabled:cursor-not-allowed` を `cn` 経由で適用。`aria-busy=true` も同時に付与し、AT 利用者にも進行中状態を伝達する（design.md「ManualRefreshButton 疑似コード」のアクセシビリティ方針を踏襲）
+- **テスト戦略**: pending 状態の検証は `new Promise(() => {})`（永久 pending）で簡潔に再現。各エラーステータス（429 / 409 / 401 / 503 / network reject）を `setupMockFetchForManualRefresh({ manualFetch })` に集約し、9 ケースを table 的に列挙。バナーメッセージは regex 部分一致で文言改善時の柔軟性を確保
+
+残存課題: なし。Issue #115 の AC（Req 1〜8, NFR 1〜3）に対応する実装は task 1〜7 で全 cover。
+
 ## 補足
 
 
