@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. AppState: `CLEAR_SELECTED_FEED` action を追加
+- [x] 1. AppState: `CLEAR_SELECTED_FEED` action を追加
   - `web/src/contexts/app-state.tsx` の `AppAction` ユニオン型に `ClearSelectedFeedAction = { type: "CLEAR_SELECTED_FEED" }` を追加する
   - `appReducer` の `switch` に `case "CLEAR_SELECTED_FEED"` を追加し、`selectedFeedId: null`, `expandedItemId: null`, `filter: "all"` に遷移させる（`SELECT_FEED` と同じ副作用パターン）
   - 既存 `SELECT_FEED` / `EXPAND_ITEM` / `SET_FILTER` の挙動は変更しないこと（NFR 1.1）
