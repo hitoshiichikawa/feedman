@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { useAppState, useAppDispatch } from "@/contexts/app-state";
 import { useFeeds } from "@/hooks/use-feeds";
 import { FeedList } from "@/components/feed-list";
@@ -11,9 +12,11 @@ import { StarredItemList } from "@/components/starred-item-list";
 import { StarredNavItem } from "@/components/starred-nav-item";
 import { LogoutButton } from "@/components/logout-button";
 import { SearchResults } from "@/components/search-results";
+import { SubscriptionSettingsDialog } from "@/components/subscription-settings-dialog";
 import { useTheme } from "@/components/theme-provider";
 import { Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import type { Subscription } from "@/types/feed";
 
 /**
  * アプリケーションシェル（2ペインレイアウト）
@@ -29,6 +32,15 @@ export function AppShell() {
 
   const { data: feeds, isLoading: isFeedsLoading } = useFeeds();
 
+  /**
+   * 設定ダイアログの対象 subscription を保持するローカル state。
+   * `null` のときはダイアログを閉じている状態を意味する（AC 1.3 の起動制御）。
+   * グローバル AppState には載せず、AppShell ローカル state とする（design.md 代替案 C 却下理由）。
+   */
+  const [settingsTarget, setSettingsTarget] = useState<Subscription | null>(
+    null
+  );
+
   /** フィード選択ハンドラ */
   const handleSelectFeed = (feedId: string) => {
     dispatch({ type: "SELECT_FEED", feedId });
@@ -42,6 +54,36 @@ export function AppShell() {
   /** フィード登録完了ハンドラ */
   const handleFeedRegistered = () => {
     // フィード一覧は useFeeds のキャッシュ無効化で自動更新される
+  };
+
+  /**
+   * 設定起動ハンドラ。FeedList のギアアイコンクリックから対象 subscription を受け取り、
+   * 設定ダイアログを開く（AC 1.3）。
+   */
+  const handleOpenSettings = (feed: Subscription) => {
+    setSettingsTarget(feed);
+  };
+
+  /**
+   * 購読解除成功時のハンドラ。
+   *
+   * 解除されたフィードが現在右ペインに選択されているフィードと一致する場合のみ、
+   * `CLEAR_SELECTED_FEED` を dispatch して右ペインを初期状態に戻す（AC 4.2）。
+   * 一致しない場合は右ペインの選択状態を維持する（AC 4.3）。
+   * 最後にダイアログ自身を閉じる（`settingsTarget` を null に戻す）。
+   *
+   * AC 5.3（失敗時に右ペインを触らない）の構造的保証:
+   *   本ハンドラは `SubscriptionSettingsDialog` 経由で `SubscriptionSettings` の
+   *   mutation `onSuccess` 内でのみ発火する。`useUnsubscribe` の mutation が
+   *   エラー（ネットワーク / 5xx 等）で終了した場合は `onSuccess` が呼ばれず、
+   *   よって本ハンドラにも到達しないため、右ペインの選択状態は変化しない。
+   *   AppShell 側で明示的なエラー分岐を持つ必要はない。
+   */
+  const handleUnsubscribed = (unsubscribedFeedId: string) => {
+    if (unsubscribedFeedId === state.selectedFeedId) {
+      dispatch({ type: "CLEAR_SELECTED_FEED" });
+    }
+    setSettingsTarget(null);
   };
 
   return (
@@ -86,6 +128,7 @@ export function AppShell() {
               feeds={feeds ?? []}
               selectedFeedId={state.selectedFeedId}
               onSelectFeed={handleSelectFeed}
+              onOpenSettings={handleOpenSettings}
               viewMode={state.viewMode}
               onSelectAllNewItems={() =>
                 dispatch({ type: "SELECT_ALL_NEW_ITEMS" })
@@ -120,6 +163,20 @@ export function AppShell() {
           </div>
         </main>
       </div>
+
+      {/* 設定ダイアログ（2 ペインの外、AppShell 直下に配置）。
+          radix-ui Dialog は Portal で body 直下に render するため位置は副次的だが、
+          コンポーネントツリー上は 2 ペインの外側に置くことで責務分離を明示する。 */}
+      <SubscriptionSettingsDialog
+        open={settingsTarget !== null}
+        subscription={settingsTarget}
+        onOpenChange={(open) => {
+          if (!open) {
+            setSettingsTarget(null);
+          }
+        }}
+        onUnsubscribed={handleUnsubscribed}
+      />
     </div>
   );
 }

@@ -396,6 +396,196 @@ describe("AppStateContext", () => {
     expect(result.current.state.searchFeedId).toBeNull();
   });
 
+  it("CLEAR_SELECTED_FEED アクションで selectedFeedId が null になり、expandedItemId と filter がリセットされること", () => {
+    const wrapper = createWrapper();
+
+    const { result } = renderHook(
+      () => {
+        const state = useAppState();
+        const dispatch = useAppDispatch();
+        return { state, dispatch };
+      },
+      { wrapper }
+    );
+
+    // 事前にフィード選択 / 記事展開 / フィルタ変更を行い、非初期状態を作る
+    act(() => {
+      result.current.dispatch({ type: "SELECT_FEED", feedId: "feed-1" });
+    });
+    act(() => {
+      result.current.dispatch({ type: "EXPAND_ITEM", itemId: "item-1" });
+    });
+    act(() => {
+      result.current.dispatch({ type: "SET_FILTER", filter: "unread" });
+    });
+
+    expect(result.current.state.selectedFeedId).toBe("feed-1");
+    expect(result.current.state.expandedItemId).toBe("item-1");
+    expect(result.current.state.filter).toBe("unread");
+
+    // CLEAR_SELECTED_FEED で selectedFeedId が null になり、関連状態がリセットされる
+    act(() => {
+      result.current.dispatch({ type: "CLEAR_SELECTED_FEED" });
+    });
+
+    // (a) selectedFeedId が null になる
+    expect(result.current.state.selectedFeedId).toBeNull();
+    // (b) expandedItemId / filter が初期値にリセットされる
+    expect(result.current.state.expandedItemId).toBeNull();
+    expect(result.current.state.filter).toBe("all");
+    // selectedView は "feed" のまま（SELECT_FEED と同等パターン）
+    expect(result.current.state.selectedView).toBe("feed");
+  });
+
+  it("CLEAR_SELECTED_FEED アクションで検索状態（searchQuery / isSearching / searchScope / searchFeedId）もリセットされること", () => {
+    const wrapper = createWrapper();
+
+    const { result } = renderHook(
+      () => {
+        const state = useAppState();
+        const dispatch = useAppDispatch();
+        return { state, dispatch };
+      },
+      { wrapper }
+    );
+
+    // 検索状態を非初期値にする
+    act(() => {
+      result.current.dispatch({ type: "SELECT_FEED", feedId: "feed-1" });
+    });
+    act(() => {
+      result.current.dispatch({
+        type: "SET_SEARCH_QUERY",
+        query: "kubernetes",
+        scope: "feed",
+        feedId: "feed-1",
+      });
+    });
+
+    expect(result.current.state.searchQuery).toBe("kubernetes");
+    expect(result.current.state.isSearching).toBe(true);
+    expect(result.current.state.searchScope).toBe("feed");
+    expect(result.current.state.searchFeedId).toBe("feed-1");
+
+    // CLEAR_SELECTED_FEED で検索状態もリセットされる（SELECT_FEED と同等の副作用）
+    act(() => {
+      result.current.dispatch({ type: "CLEAR_SELECTED_FEED" });
+    });
+
+    expect(result.current.state.selectedFeedId).toBeNull();
+    expect(result.current.state.searchQuery).toBe("");
+    expect(result.current.state.isSearching).toBe(false);
+    expect(result.current.state.searchScope).toBe("global");
+    expect(result.current.state.searchFeedId).toBeNull();
+  });
+
+  it("CLEAR_SELECTED_FEED アクションは初期状態に対しても安全に動作すること（冪等性）", () => {
+    const wrapper = createWrapper();
+
+    const { result } = renderHook(
+      () => {
+        const state = useAppState();
+        const dispatch = useAppDispatch();
+        return { state, dispatch };
+      },
+      { wrapper }
+    );
+
+    // 初期状態（selectedFeedId === null）から CLEAR_SELECTED_FEED を dispatch しても
+    // 例外が発生せず、全フィールドが初期値のままであること
+    act(() => {
+      result.current.dispatch({ type: "CLEAR_SELECTED_FEED" });
+    });
+
+    expect(result.current.state.selectedFeedId).toBeNull();
+    expect(result.current.state.expandedItemId).toBeNull();
+    expect(result.current.state.filter).toBe("all");
+    expect(result.current.state.selectedView).toBe("feed");
+  });
+
+  it("CLEAR_SELECTED_FEED アクション導入後も既存 SELECT_FEED の挙動が変わらないこと（NFR 1.1 回帰）", () => {
+    const wrapper = createWrapper();
+
+    const { result } = renderHook(
+      () => {
+        const state = useAppState();
+        const dispatch = useAppDispatch();
+        return { state, dispatch };
+      },
+      { wrapper }
+    );
+
+    act(() => {
+      result.current.dispatch({ type: "EXPAND_ITEM", itemId: "item-a" });
+    });
+    act(() => {
+      result.current.dispatch({ type: "SET_FILTER", filter: "starred" });
+    });
+
+    // SELECT_FEED は引き続き feedId を string で受け、関連状態をリセットする
+    act(() => {
+      result.current.dispatch({ type: "SELECT_FEED", feedId: "feed-x" });
+    });
+
+    expect(result.current.state.selectedFeedId).toBe("feed-x");
+    expect(result.current.state.expandedItemId).toBeNull();
+    expect(result.current.state.filter).toBe("all");
+    expect(result.current.state.selectedView).toBe("feed");
+  });
+
+  it("CLEAR_SELECTED_FEED アクション導入後も既存 EXPAND_ITEM のトグル挙動が変わらないこと（NFR 1.1 回帰）", () => {
+    const wrapper = createWrapper();
+
+    const { result } = renderHook(
+      () => {
+        const state = useAppState();
+        const dispatch = useAppDispatch();
+        return { state, dispatch };
+      },
+      { wrapper }
+    );
+
+    act(() => {
+      result.current.dispatch({ type: "EXPAND_ITEM", itemId: "item-1" });
+    });
+    expect(result.current.state.expandedItemId).toBe("item-1");
+
+    // 同じ ID でトグル off
+    act(() => {
+      result.current.dispatch({ type: "EXPAND_ITEM", itemId: "item-1" });
+    });
+    expect(result.current.state.expandedItemId).toBeNull();
+
+    // 異なる ID で排他的展開
+    act(() => {
+      result.current.dispatch({ type: "EXPAND_ITEM", itemId: "item-2" });
+    });
+    expect(result.current.state.expandedItemId).toBe("item-2");
+  });
+
+  it("CLEAR_SELECTED_FEED アクション導入後も既存 SET_FILTER の挙動が変わらないこと（NFR 1.1 回帰）", () => {
+    const wrapper = createWrapper();
+
+    const { result } = renderHook(
+      () => {
+        const state = useAppState();
+        const dispatch = useAppDispatch();
+        return { state, dispatch };
+      },
+      { wrapper }
+    );
+
+    act(() => {
+      result.current.dispatch({ type: "SET_FILTER", filter: "starred" });
+    });
+    expect(result.current.state.filter).toBe("starred");
+
+    act(() => {
+      result.current.dispatch({ type: "SET_FILTER", filter: "unread" });
+    });
+    expect(result.current.state.filter).toBe("unread");
+  });
+
   it("Provider外でuseAppStateを使用するとエラーが発生すること", () => {
     expect(() => {
       renderHook(() => useAppState());

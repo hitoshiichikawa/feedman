@@ -357,6 +357,339 @@ describe("AppShell コンポーネント", () => {
     expect(screen.queryByRole("tab", { name: "全て" })).not.toBeInTheDocument();
   });
 
+  // -----------------------------------------------------------------------
+  // 購読解除フロー統合テスト（task 6 / Issue #130）
+  //
+  // 既存 mockFetch（setupMockFetch）は GET /api/subscriptions を mockSubscriptions
+  // 固定で返すため、購読解除後の一覧変化（[feeds] invalidate → refetch）を
+  // 検証するシナリオでは、解除済み subscription を逐次除外する動的 mockFetch を
+  // 各テスト内で setup する。
+  // -----------------------------------------------------------------------
+  describe("購読解除フロー（task 6）", () => {
+    /**
+     * DELETE /api/subscriptions/:id を成功させ、以降の GET /api/subscriptions が
+     * 解除済み id を除いた一覧を返すように mockFetch を動的に切替える共通ヘルパ。
+     *
+     * @param deleteOk  DELETE のレスポンス ok（false 時は 500 で失敗扱い）
+     */
+    function setupUnsubscribeMockFetch(deleteOk: boolean) {
+      const deletedIds = new Set<string>();
+      mockFetch.mockImplementation((url: string, options?: RequestInit) => {
+        // DELETE /api/subscriptions/:id の処理
+        if (
+          typeof url === "string" &&
+          url.startsWith("/api/subscriptions/") &&
+          options?.method === "DELETE"
+        ) {
+          const id = url.substring("/api/subscriptions/".length);
+          if (deleteOk) {
+            deletedIds.add(id);
+            return Promise.resolve({
+              ok: true,
+              status: 200,
+              json: async () => ({}),
+            });
+          }
+          // 失敗系: 500 を返す
+          return Promise.resolve({
+            ok: false,
+            status: 500,
+            json: async () => ({ error: "internal server error" }),
+          });
+        }
+        // GET /api/subscriptions（一覧）。DELETE 後の refetch では除外されたものを返す
+        if (url === "/api/subscriptions") {
+          const filtered = mockSubscriptions.filter(
+            (s) => !deletedIds.has(s.id)
+          );
+          return Promise.resolve({
+            ok: true,
+            json: async () => filtered,
+          });
+        }
+        // 記事一覧 API
+        if (typeof url === "string" && url.includes("/api/feeds/")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              items: [],
+              next_cursor: null,
+              has_more: false,
+            }),
+          });
+        }
+        if (typeof url === "string" && url.includes("/api/items/search")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              items: [],
+              next_cursor: null,
+              has_more: false,
+            }),
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({}),
+        });
+      });
+    }
+
+    it("(a) フィード行ホバー → ギアアイコンクリックで「フィードの設定」ダイアログが表示されること（AC 1.3, 2.1）", async () => {
+      const user = userEvent.setup();
+      render(<AppShell />, { wrapper: createWrapper() });
+
+      await waitFor(() => {
+        expect(screen.getByText("Tech Blog")).toBeInTheDocument();
+      });
+
+      // フィード行にホバー（jsdom では CSS hover 擬似クラスが評価されないため、
+      // ホバーイベント自体は発火させた上で、ギアボタン自体は DOM に存在することを
+      // 検証する。表示制御は task 2 で class 文字列レベルで担保済み）
+      const feedRow = screen.getByTestId("feed-item-sub-1");
+      await user.hover(feedRow);
+
+      // ギアボタンが存在する（hover 関係なく DOM 上には常に存在し、CSS で表示制御）
+      const gearButton = screen.getByTestId("feed-settings-button-sub-1");
+      expect(gearButton).toBeInTheDocument();
+
+      // ギアアイコンクリック → ダイアログタイトル「フィードの設定」が表示される
+      await user.click(gearButton);
+
+      await waitFor(() => {
+        expect(screen.getByText("フィードの設定")).toBeInTheDocument();
+      });
+
+      // ダイアログ内の「購読解除」ボタンが render される（AC 2.1: 対象フィードの状態反映）
+      expect(screen.getByTestId("unsubscribe-button")).toBeInTheDocument();
+      expect(screen.getByTestId("fetch-interval-select")).toBeInTheDocument();
+    });
+
+    it("(b) ダイアログ表示中に Esc キーで閉じられること（AC 2.5）", async () => {
+      const user = userEvent.setup();
+      render(<AppShell />, { wrapper: createWrapper() });
+
+      await waitFor(() => {
+        expect(screen.getByText("Tech Blog")).toBeInTheDocument();
+      });
+
+      // ギアボタンをクリックしてダイアログを開く
+      await user.click(screen.getByTestId("feed-settings-button-sub-1"));
+
+      await waitFor(() => {
+        expect(screen.getByText("フィードの設定")).toBeInTheDocument();
+      });
+
+      // Esc キーで閉じる（radix-ui Dialog の既定挙動）
+      await user.keyboard("{Escape}");
+
+      await waitFor(() => {
+        expect(screen.queryByText("フィードの設定")).not.toBeInTheDocument();
+      });
+
+      // ダイアログ内コンテンツも DOM から除去されている
+      expect(screen.queryByTestId("unsubscribe-button")).not.toBeInTheDocument();
+    });
+
+    it("(c) 選択中フィードを購読解除 → ダイアログ閉鎖・一覧から除外・右ペインが初期表示に戻ること（AC 4.1, 4.2, 4.4, 4.5）", async () => {
+      const user = userEvent.setup();
+      setupUnsubscribeMockFetch(true);
+
+      render(<AppShell />, { wrapper: createWrapper() });
+
+      await waitFor(() => {
+        expect(screen.getByText("Tech Blog")).toBeInTheDocument();
+      });
+
+      // 事前に Tech Blog を選択（右ペインに ItemList が描画される）
+      await user.click(screen.getByText("Tech Blog"));
+
+      await waitFor(() => {
+        expect(screen.getByRole("tab", { name: "全て" })).toBeInTheDocument();
+      });
+
+      // ギアボタンクリック → ダイアログ表示
+      await user.click(screen.getByTestId("feed-settings-button-sub-1"));
+
+      await waitFor(() => {
+        expect(screen.getByText("フィードの設定")).toBeInTheDocument();
+      });
+
+      // 「購読解除」ボタンクリック → 確認 AlertDialog 表示
+      await user.click(screen.getByTestId("unsubscribe-button"));
+
+      await waitFor(() => {
+        expect(screen.getByText("購読を解除しますか？")).toBeInTheDocument();
+      });
+
+      // 確認ダイアログの「購読解除」ボタンを押下（AlertDialog の確定）
+      await user.click(screen.getByRole("button", { name: "購読解除" }));
+
+      // DELETE が呼ばれたことを確認
+      await waitFor(() => {
+        expect(mockFetch).toHaveBeenCalledWith(
+          "/api/subscriptions/sub-1",
+          expect.objectContaining({ method: "DELETE" })
+        );
+      });
+
+      // ダイアログが閉じる（AC 4.4）
+      await waitFor(() => {
+        expect(screen.queryByText("フィードの設定")).not.toBeInTheDocument();
+      });
+
+      // フィード一覧から Tech Blog が消える（AC 4.1: [feeds] invalidate → refetch）
+      await waitFor(() => {
+        expect(screen.queryByText("Tech Blog")).not.toBeInTheDocument();
+      });
+      // News Feed は引き続き表示される
+      expect(screen.getByText("News Feed")).toBeInTheDocument();
+
+      // 右ペインが初期状態（ItemList feedId=null の案内）に戻る（AC 4.2）
+      await waitFor(() => {
+        expect(
+          screen.getByText("フィードを選択してください")
+        ).toBeInTheDocument();
+      });
+      // ItemList のフィルタタブは消えている（selectedFeedId=null のため）
+      expect(screen.queryByRole("tab", { name: "全て" })).not.toBeInTheDocument();
+    });
+
+    it("(d) 非選択フィードを購読解除 → 右ペインの選択状態は維持され、対象のみ一覧から消えること（AC 4.1, 4.3）", async () => {
+      const user = userEvent.setup();
+      setupUnsubscribeMockFetch(true);
+
+      render(<AppShell />, { wrapper: createWrapper() });
+
+      await waitFor(() => {
+        expect(screen.getByText("Tech Blog")).toBeInTheDocument();
+        expect(screen.getByText("News Feed")).toBeInTheDocument();
+      });
+
+      // フィード A（Tech Blog / sub-1 / feed-1）を選択
+      await user.click(screen.getByText("Tech Blog"));
+
+      await waitFor(() => {
+        expect(screen.getByRole("tab", { name: "全て" })).toBeInTheDocument();
+      });
+
+      // 別フィード B（News Feed / sub-2 / feed-2）のギアをクリック
+      await user.click(screen.getByTestId("feed-settings-button-sub-2"));
+
+      await waitFor(() => {
+        expect(screen.getByText("フィードの設定")).toBeInTheDocument();
+      });
+
+      // 確認ダイアログを開いて確定
+      await user.click(screen.getByTestId("unsubscribe-button"));
+
+      await waitFor(() => {
+        expect(screen.getByText("購読を解除しますか？")).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole("button", { name: "購読解除" }));
+
+      // DELETE が News Feed（sub-2）に対して発行されたことを確認
+      await waitFor(() => {
+        expect(mockFetch).toHaveBeenCalledWith(
+          "/api/subscriptions/sub-2",
+          expect.objectContaining({ method: "DELETE" })
+        );
+      });
+
+      // ダイアログ閉鎖
+      await waitFor(() => {
+        expect(screen.queryByText("フィードの設定")).not.toBeInTheDocument();
+      });
+
+      // News Feed が一覧から消える（AC 4.1）
+      await waitFor(() => {
+        expect(screen.queryByText("News Feed")).not.toBeInTheDocument();
+      });
+      // Tech Blog は引き続き表示される
+      expect(screen.getByText("Tech Blog")).toBeInTheDocument();
+
+      // 右ペインは Tech Blog の ItemList のまま（AC 4.3: 選択状態維持）
+      expect(screen.getByRole("tab", { name: "全て" })).toBeInTheDocument();
+      // 「フィードを選択してください」案内は表示されていない（クリアされていないことの証左）
+      expect(
+        screen.queryByText("フィードを選択してください")
+      ).not.toBeInTheDocument();
+    });
+
+    it("(e) DELETE 失敗時（500）→ ダイアログ残存・一覧不変・右ペイン不変（AC 5.1, 5.2, 5.3）", async () => {
+      const user = userEvent.setup();
+      setupUnsubscribeMockFetch(false); // DELETE は 500 で失敗
+
+      render(<AppShell />, { wrapper: createWrapper() });
+
+      await waitFor(() => {
+        expect(screen.getByText("Tech Blog")).toBeInTheDocument();
+        expect(screen.getByText("News Feed")).toBeInTheDocument();
+      });
+
+      // フィード A（Tech Blog）を選択し、右ペインに ItemList を描画
+      await user.click(screen.getByText("Tech Blog"));
+
+      await waitFor(() => {
+        expect(screen.getByRole("tab", { name: "全て" })).toBeInTheDocument();
+      });
+
+      // フィード B（News Feed）のギア → 設定ダイアログ
+      await user.click(screen.getByTestId("feed-settings-button-sub-2"));
+
+      await waitFor(() => {
+        expect(screen.getByText("フィードの設定")).toBeInTheDocument();
+      });
+
+      // 確認 AlertDialog を開いて確定
+      await user.click(screen.getByTestId("unsubscribe-button"));
+
+      await waitFor(() => {
+        expect(screen.getByText("購読を解除しますか？")).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole("button", { name: "購読解除" }));
+
+      // DELETE は発行される（が 500 で失敗）
+      await waitFor(() => {
+        expect(mockFetch).toHaveBeenCalledWith(
+          "/api/subscriptions/sub-2",
+          expect.objectContaining({ method: "DELETE" })
+        );
+      });
+
+      // mutation の Promise が settle するまで待つ余地（onSuccess は呼ばれない）
+      await waitFor(() => {
+        // 失敗時は AppShell 側の onUnsubscribed が呼ばれないため、設定ダイアログは
+        // 開いたまま残存する（AC 5.2）。SubscriptionSettings 内部の confirm AlertDialog
+        // も同様に閉じない（onSuccess 内で setShowUnsubscribeDialog(false) なため）
+        expect(screen.getByText("フィードの設定")).toBeInTheDocument();
+      });
+
+      // 一覧の News Feed は引き続き存在（AC 5.1: [feeds] invalidate されない / refetch されない）
+      // 設定 Dialog が開いている間 radix-ui がメインコンテンツに aria-hidden を付与するため
+      // accessibility tree 経由の getByRole は使えないが、getByText は textContent ベースで
+      // DOM ノードを探すため引き続き機能する
+      expect(screen.getByText("News Feed")).toBeInTheDocument();
+      expect(screen.getByText("Tech Blog")).toBeInTheDocument();
+
+      // 右ペインは A（Tech Blog / feed-1）のまま不変（AC 5.3）。
+      // ダイアログ open 中は ItemList のタブが accessibility tree から隠れる（radix-ui の
+      // モーダル既定挙動）ため、selectedFeedId の維持は左ペインのフィード行の
+      // data-selected="true" 属性で確認する（DOM 属性なので aria-hidden に影響されない）
+      expect(screen.getByTestId("feed-item-sub-1")).toHaveAttribute(
+        "data-selected",
+        "true"
+      );
+      // 右ペインが ItemList feedId=null パスに切り替わっていないこと（AC 5.3 補強）。
+      // 「フィードを選択してください」案内は ItemList の feedId=null 描画時のみ表示される
+      expect(
+        screen.queryByText("フィードを選択してください")
+      ).not.toBeInTheDocument();
+    });
+  });
+
   // --- Issue #121 task 9: viewMode 切替配線テスト ---
 
   it("「すべての新着記事」エントリ click で viewMode='cross-feed' に切替わり、右ペインに CrossFeedItemList が描画されること（Req 1.2）", async () => {

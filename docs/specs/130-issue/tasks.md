@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. AppState: `CLEAR_SELECTED_FEED` action を追加
+- [x] 1. AppState: `CLEAR_SELECTED_FEED` action を追加
   - `web/src/contexts/app-state.tsx` の `AppAction` ユニオン型に `ClearSelectedFeedAction = { type: "CLEAR_SELECTED_FEED" }` を追加する
   - `appReducer` の `switch` に `case "CLEAR_SELECTED_FEED"` を追加し、`selectedFeedId: null`, `expandedItemId: null`, `filter: "all"` に遷移させる（`SELECT_FEED` と同じ副作用パターン）
   - 既存 `SELECT_FEED` / `EXPAND_ITEM` / `SET_FILTER` の挙動は変更しないこと（NFR 1.1）
@@ -8,7 +8,7 @@
   - _Requirements: 4.2, NFR 1.1_
   - _Boundary: AppState_
 
-- [ ] 2. FeedList: ホバー時ギアアイコン表示と `onOpenSettings` イベント発火
+- [x] 2. FeedList: ホバー時ギアアイコン表示と `onOpenSettings` イベント発火
   - `web/src/components/feed-list.tsx` の `FeedListProps` に `onOpenSettings: (subscription: Subscription) => void` を追加する
   - 行コンテナを既存 `<button>` から `<div role="button" tabIndex={0}>` に変更する。`onClick` で `onSelectFeed(feed.feed_id)` を呼び、`onKeyDown` で Enter / Space に対応する（ネスト button 回避のため。既存 `data-testid="feed-item-${id}"` / `data-selected` 属性は維持）
   - 行末尾に `<button type="button" data-testid="feed-settings-button-${id}" aria-label="${feed.feed_title} の設定">` を追加し、`lucide-react` の `Settings` アイコンを表示する
@@ -22,7 +22,7 @@
   - _Boundary: FeedList_
   - _Depends: 1_
 
-- [ ] 3. SubscriptionSettings: `onUnsubscribed` シグネチャ拡張と既存挙動温存の確認
+- [x] 3. SubscriptionSettings: `onUnsubscribed` シグネチャ拡張と既存挙動温存の確認
   - `web/src/components/subscription-settings.tsx` の `SubscriptionSettingsProps` の `onUnsubscribed` を `() => void` から `(unsubscribedFeedId: string) => void` に変更する
   - `handleUnsubscribe` 内の `unsubscribe.mutate(subscription.id, { onSuccess: () => { setShowUnsubscribeDialog(false); onUnsubscribed(subscription.feed_id); } })` のように、解除された subscription の `feed_id` を引数で渡す（AC 4.4）
   - 確認 `AlertDialog` の表示・ボタン非活性化（`unsubscribe.isPending`）・進行中ラベル・キャンセル挙動・確定挙動・タイトル / 本文文言は全て既存挙動を維持する（AC 3.1, 3.2, 3.3, 3.4, 3.5, NFR 3.1, NFR 1.2）
@@ -31,7 +31,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 3.1, 3.2, 3.3, 3.4, 3.5, 4.4, NFR 1.2, NFR 3.1_
   - _Boundary: SubscriptionSettings_
 
-- [ ] 4. SubscriptionSettingsDialog: `Dialog` ラッパコンポーネント新設 (P)
+- [x] 4. SubscriptionSettingsDialog: `Dialog` ラッパコンポーネント新設 (P)
   - `web/src/components/subscription-settings-dialog.tsx` を新規作成する
   - props: `{ open: boolean; subscription: Subscription | null; onOpenChange: (open: boolean) => void; onUnsubscribed: (unsubscribedFeedId: string) => void }`
   - 中身は shadcn/ui `Dialog` + `DialogContent` + `DialogHeader`（`DialogTitle="フィードの設定"`）+ `<SubscriptionSettings subscription={subscription} onUnsubscribed={(feedId) => { onUnsubscribed(feedId); onOpenChange(false); }} />`
@@ -47,7 +47,7 @@
   - _Boundary: SubscriptionSettingsDialog_
   - _Depends: 3_
 
-- [ ] 5. AppShell: 設定ダイアログ状態管理と購読解除後の右ペインクリア統合
+- [x] 5. AppShell: 設定ダイアログ状態管理と購読解除後の右ペインクリア統合
   - `web/src/components/app-shell.tsx` に `const [settingsTarget, setSettingsTarget] = useState<Subscription | null>(null)` を追加する
   - `handleOpenSettings = (feed: Subscription) => setSettingsTarget(feed)` を定義し、`<FeedList onOpenSettings={handleOpenSettings} />` に渡す（AC 1.3）
   - `<SubscriptionSettingsDialog open={settingsTarget !== null} subscription={settingsTarget} onOpenChange={(open) => { if (!open) setSettingsTarget(null) }} onUnsubscribed={handleUnsubscribed} />` を 2 ペインの外（`<div data-testid="app-shell">` 直下）に配置する
@@ -58,7 +58,7 @@
   - _Boundary: AppShell_
   - _Depends: 2, 4_
 
-- [ ] 6. AppShell: 統合テスト（ホバー → ダイアログ → 解除 → 右ペインクリア / 非クリア / 失敗時）
+- [x] 6. AppShell: 統合テスト（ホバー → ダイアログ → 解除 → 右ペインクリア / 非クリア / 失敗時）
   - `web/src/components/app-shell.test.tsx` に以下のシナリオを追加する（既存テストパターン: `QueryClientProvider` + `AppStateProvider` + `ThemeProvider` を踏襲、`mockFetch` で HTTP を制御）:
     - (a) フィード行ホバー（`pointerEnter` / `mouseEnter`）→ ギアアイコン表示 → クリック → 「フィードの設定」ダイアログが表示される（AC 1.3, 2.1）
     - (b) ダイアログのキャンセル / Esc で閉じる（AC 2.5）
