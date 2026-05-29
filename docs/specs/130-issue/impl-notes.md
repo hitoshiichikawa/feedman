@@ -34,6 +34,17 @@
   - `app-shell.tsx` 側で `SubscriptionSettings` を直接利用している箇所は存在せず（Grep で確認済み）、task 4 で新規追加される `SubscriptionSettingsDialog` 経由で利用される予定のため、本 task では他ファイルへの波及修正は不要。`npm run build` も task 3 段階では未実施でよく、`npm test` / `npm run lint` のみで pass を確認した。
 - 残存課題: なし。task 4 で `SubscriptionSettingsDialog` ラッパが新規作成され、本 task で拡張した `onUnsubscribed(feedId)` シグネチャを親に伝播する。
 
+### Task 4
+
+- 採用方針: tasks.md task 4 / design.md「SubscriptionSettingsDialog（New）」節の指示通り、`web/src/components/subscription-settings-dialog.tsx` を新規作成。shadcn/ui `Dialog` + `DialogContent` + `DialogHeader` + `DialogTitle="フィードの設定"` で `SubscriptionSettings` をラップし、`onUnsubscribed` を `(feedId) => { onUnsubscribed(feedId); onOpenChange(false); }` で wire する thin wrapper として実装した（AC 2.5 / 4.4）。`subscription === null` のとき `SubscriptionSettings` 自体を render せず、防御的ガードを実装した（task 5 で `settingsTarget=null` を初期値とする AppShell との契約を踏まえた挙動）。
+- 重要な判断:
+  - `DialogDescription` を `sr-only` で追加した。理由: radix-ui Dialog は `aria-describedby` が未指定だと開発モードで warning を出す既定挙動があり、視覚的にはタイトル直下の領域を取りたくないため `sr-only` でスクリーンリーダ向けの説明文のみ提供。これにより NFR 2.2 のアクセシビリティ要件も補強される。
+  - `subscription === null` のとき "DialogContent 内を空にする" 方式を選択し、`return null` 方式は採らなかった。理由: `Dialog` 自体は `open` で制御されており、親（task 5 で `settingsTarget` を `null` にすると `open=false` になる）の責務として閉鎖されるが、レンダリングサイクルで一瞬 `open=true && subscription=null` 状態が起こりうる（state 更新の順序による）。`return null` だと Dialog 自体の closing animation が走らない可能性があるため、Dialog 構造は保ったまま中身だけガードする方式が安全。
+  - `onUnsubscribed` の wiring 順序は「親の `onUnsubscribed(feedId)` を先に呼んでから `onOpenChange(false)`」とした。理由: AppShell 側で `handleUnsubscribed` 内に `SELECT_FEED` dispatch が入る予定（task 5）で、右ペインクリア → ダイアログ閉鎖の順序がユーザー体感的に自然（ダイアログが先に消えて右ペインが残ったままになると視覚的に不整合）。tasks.md 本文の `(feedId) => { onUnsubscribed(feedId); onOpenChange(false); }` 順序記述に厳密に従った。
+  - テストでは `userEvent.keyboard("{Escape}")` で Esc 経由の `onOpenChange(false)` 発火も追加検証した（NFR 2.2 の radix-ui 既定挙動を実環境で確認するため）。tasks.md の (a)〜(d) の 4 ケースに加え、Esc 検証を 5 ケース目として追加。これは task 7（deferrable a11y 追加検証）の一部前倒しだが、Dialog ラッパの責務として基本中の基本のため task 4 で担保した方が文脈が近い。
+  - `open=false` で内容が render されないことのテストは、Dialog 自体が portal に render するため通常時 DOM に存在しないことを `queryByText` / `queryByTestId` で `not.toBeInTheDocument()` で検証。
+- 残存課題: なし。task 5 で `AppShell` が `settingsTarget` state を保持し本コンポーネントを wire する予定。本 task の Dialog wrapper は AppShell 側の state 設計（`Subscription | null`）と完全に整合している。
+
 ## 受入基準カバレッジ（task 1 分のみ）
 
 | Requirement | テスト |
