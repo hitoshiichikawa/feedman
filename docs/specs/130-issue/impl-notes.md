@@ -57,6 +57,18 @@
   - 統合テストは task 6 でカバーするため、本 task では追加テスト不要と判断（tasks.md task 5 の指示通り）。既存テストが全て pass し、AC は task 6 の統合テストで担保される。
 - 残存課題: なし。task 6 で AppShell の統合テスト（ホバー → ダイアログ → 解除 → 右ペインクリア / 非クリア / 失敗時の 5 シナリオ）を追加することで AC 1.3 / 4.2 / 4.3 / 5.3 のランタイム動作が直接検証される予定。
 
+### Task 6
+
+- 採用方針: tasks.md task 6 の指示通り、`web/src/components/app-shell.test.tsx` の既存 `describe("AppShell コンポーネント", ...)` 配下に内側 `describe("購読解除フロー（task 6）", ...)` を追加し、(a)〜(e) の 5 シナリオをそれぞれ 1 `it` で実装した。既存 11 件のテストには一切手を加えず、合計 16 件全て pass する状態を維持した（NFR 1.1）。
+- 重要な判断:
+  - `setupUnsubscribeMockFetch(deleteOk: boolean)` という共通ヘルパを `describe` 内に定義し、`DELETE /api/subscriptions/:id` の成否を引数で切り替える設計とした。成功時は `deletedIds` Set に id を蓄積し、以降の `GET /api/subscriptions`（`useFeeds` の refetch）が解除済みを除いた一覧を返すよう動的に挙動を切替える。これにより (c)(d) シナリオで `["feeds"]` invalidate → refetch → 一覧 UI 更新（AC 4.1）まで含めて end-to-end に検証できる。
+  - **設定 Dialog 表示中の accessibility tree 隠蔽問題**: radix-ui の `Dialog` はモーダル表示中に AppShell 内のメインコンテンツ（右ペインの `<Tabs>` 含む）に `aria-hidden="true"` を付与し、accessibility tree から隠す。このため (e) シナリオで `screen.getByRole("tab", { name: "全て" })` が dialog 開放中は **取得不可** となる（最初のテスト実行で hit したエッジケース）。対応として、右ペインが Tech Blog のままであることの検証を「左ペインのフィード行 `data-testid="feed-item-sub-1"` の `data-selected="true"` 属性確認」+ 「`「フィードを選択してください」` テキストが描画されていない（= ItemList feedId=null 描画ではない）」の組み合わせで代替した。DOM 属性 / textContent ベースのクエリは aria-hidden に影響されないため、selectedFeedId の維持を確実に検証できる。
+  - **ホバー検証の jsdom 制約**: tasks.md (a) は「フィード行ホバー → ギアアイコン表示 → クリック」と指示するが、jsdom は CSS `:hover` 擬似クラスを評価しないため `userEvent.hover()` で表示変化を直接観測できない。task 2 で `feed-list.test.tsx` 側に class 文字列レベル（`opacity-0` / `group-hover:opacity-100`）の検証は既に存在するため、本 task では `userEvent.hover()` でイベントを発火させた上で `feed-settings-button-sub-1` ボタンが DOM 上に存在することを確認 → クリックして「フィードの設定」ダイアログが描画されるまでを統合経路として検証した。
+  - **失敗時のダイアログ残存検証 (e)**: `subscription-settings.tsx` の `handleUnsubscribe` 内で `unsubscribe.mutate(...)` の `onSuccess` 内でのみ `setShowUnsubscribeDialog(false)` と `onUnsubscribed(subscription.feed_id)` が呼ばれる構造。500 失敗時は `onSuccess` が発火せず、よって AppShell の `handleUnsubscribed` も呼ばれず、`settingsTarget` も `null` に戻らない（→ 親 Dialog が開きっぱなし）ことを構造的に保証している。テストでは `expect(screen.getByText("フィードの設定")).toBeInTheDocument()` でこの残存を観測している（AC 5.2）。なお radix-ui `AlertDialogAction` クリックでは確認 AlertDialog 自体は閉じる（コンポーネント仕様）ため、(e) は「確認ダイアログ→閉、設定ダイアログ→残存」という現実的な挙動を反映した検証になっている。
+  - **`unhandled` promise rejection の扱い**: 500 を返す `apiClient.delete` は `ApiError` を throw し `mutation.onError` パスに行くが、`useUnsubscribe` は `onError` を定義していないので unhandled rejection 相当になる。`QueryClient` を `mutations: { retry: false }` で生成しているため retry 連鎖はせず、テスト pass に影響しないことを確認済み（既存 `subscription-settings.test.tsx` も同パターンを採用）。
+  - **複数ダイアログのフォーカス管理**: (c)(d)(e) の "確認 AlertDialog → 親設定 Dialog" の 2 段モーダル構造で radix-ui のフォーカストラップが正しく動作することを `await user.click(screen.getByRole("button", { name: "購読解除" }))` の遷移で間接的に検証している（user-event の click はフォーカス可能要素を自動でフォーカスする）。
+- 残存課題: なし。本 task で AC 1.3 / 2.5 / 4.1 / 4.2 / 4.3 / 4.4 / 4.5 / 5.1 / 5.2 / 5.3 の統合動作を E2E に近い形で検証できた。task 7 は deferrable な追加 a11y 検証で、必要時のみ実装する。
+
 ## 受入基準カバレッジ（task 1 分のみ）
 
 | Requirement | テスト |
