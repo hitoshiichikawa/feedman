@@ -2,7 +2,7 @@
 
 import { cn } from "@/lib/utils";
 import type { Subscription } from "@/types/feed";
-import { CircleAlert, CirclePause, Rss } from "lucide-react";
+import { CircleAlert, CirclePause, Rss, Settings } from "lucide-react";
 import { useState } from "react";
 
 /** FeedList コンポーネントのプロパティ */
@@ -13,6 +13,14 @@ interface FeedListProps {
   selectedFeedId: string | null;
   /** フィード選択イベントハンドラ */
   onSelectFeed: (feedId: string) => void;
+  /**
+   * 設定起動コントロール（ギアアイコン）クリック時のハンドラ。
+   * 対象 subscription を引数に呼ばれる。
+   *
+   * AC 1.3: クリックで購読設定パネルを開く。
+   * AC 1.4: フィード選択イベント（onSelectFeed）は発火しない。
+   */
+  onOpenSettings: (subscription: Subscription) => void;
 }
 
 /**
@@ -21,8 +29,17 @@ interface FeedListProps {
  * フィード一覧をタイトルとfavicon付きで表示する。
  * フィードのfetch_statusが停止/エラーの場合にアイコンで状態を表示する。
  * フィード選択イベントを親コンポーネントに通知する。
+ *
+ * 各行末尾にはホバー / 行内フォーカス時にギアアイコン（設定起動コントロール）を表示し、
+ * クリック / Enter / Space で onOpenSettings(subscription) を発火する（AC 1.1, 1.2, 1.3, 1.5）。
+ * ギアクリック時は e.stopPropagation() で onSelectFeed の発火を抑止する（AC 1.4）。
  */
-export function FeedList({ feeds, selectedFeedId, onSelectFeed }: FeedListProps) {
+export function FeedList({
+  feeds,
+  selectedFeedId,
+  onSelectFeed,
+  onOpenSettings,
+}: FeedListProps) {
   if (feeds.length === 0) {
     return (
       <div className="flex items-center justify-center p-4 text-sm text-muted-foreground">
@@ -36,17 +53,30 @@ export function FeedList({ feeds, selectedFeedId, onSelectFeed }: FeedListProps)
       {feeds.map((feed) => {
         const isSelected = feed.feed_id === selectedFeedId;
 
+        // 行クリック / キーボード起動で onSelectFeed を発火する共通ハンドラ。
+        // 行コンテナは <button> ネスト回避のため <div role="button" tabIndex={0}> 化した。
+        const handleRowKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onSelectFeed(feed.feed_id);
+          }
+        };
+
         return (
-          <button
+          <div
             key={feed.id}
+            role="button"
+            tabIndex={0}
             data-testid={`feed-item-${feed.id}`}
             data-selected={isSelected ? "true" : "false"}
             className={cn(
-              "flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors",
+              "group flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors cursor-pointer",
               "hover:bg-accent hover:text-accent-foreground",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
               isSelected && "bg-accent text-accent-foreground font-medium"
             )}
             onClick={() => onSelectFeed(feed.feed_id)}
+            onKeyDown={handleRowKeyDown}
           >
             <FeedFavicon
               feedId={feed.id}
@@ -88,7 +118,35 @@ export function FeedList({ feeds, selectedFeedId, onSelectFeed }: FeedListProps)
                 {feed.unread_count}
               </span>
             )}
-          </button>
+
+            {/* 設定起動コントロール（ギアアイコン）
+                AC 1.1 / 1.2: ホバー前は非表示、ホバー / 行内フォーカス時に表示。
+                AC 1.4: stopPropagation で行クリックの onSelectFeed を発火させない。
+                AC 1.5 / NFR 2.1: type="button" + aria-label でキーボード到達と読み上げ対応。 */}
+            <button
+              type="button"
+              data-testid={`feed-settings-button-${feed.id}`}
+              aria-label={`${feed.feed_title} の設定`}
+              className={cn(
+                "flex-shrink-0 rounded p-1 text-muted-foreground",
+                "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100",
+                "hover:bg-accent-foreground/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              )}
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenSettings(feed);
+              }}
+              onKeyDown={(e) => {
+                // Enter / Space は button のデフォルト挙動でクリック発火するが、
+                // 親 onKeyDown へ伝搬すると行の onSelectFeed も二重発火するため止める。
+                if (e.key === "Enter" || e.key === " ") {
+                  e.stopPropagation();
+                }
+              }}
+            >
+              <Settings className="w-4 h-4" aria-hidden="true" />
+            </button>
+          </div>
         );
       })}
     </nav>

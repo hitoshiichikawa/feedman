@@ -85,6 +85,10 @@ export function AppShell() {
               feeds={feeds ?? []}
               selectedFeedId={state.selectedFeedId}
               onSelectFeed={handleSelectFeed}
+              onOpenSettings={() => {
+                // task 5 で設定ダイアログ wiring が入るまで no-op を渡し
+                // FeedListProps の型エラーを解消する（NFR 1.1: 既存挙動を変更しない）。
+              }}
             />
           )}
         </aside>
