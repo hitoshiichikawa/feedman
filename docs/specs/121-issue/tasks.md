@@ -6,7 +6,7 @@
   - `internal/model/crossfeed.go` を新規作成し `UserCrossFeedView struct { UserID string; LastSeenAt time.Time; UpdatedAt time.Time }` を定義
   - _Requirements: 4.1, 4.5_
 
-- [ ] 2. UserCrossFeedViewRepository の interface 追加と Postgres 実装 (P)
+- [x] 2. UserCrossFeedViewRepository の interface 追加と Postgres 実装 (P)
   - `internal/repository/interfaces.go` に `UserCrossFeedViewRepository` interface（`Get(ctx, userID) (*model.UserCrossFeedView, error)` / `Upsert(ctx, userID, lastSeenAt) error`）を追加
   - `internal/repository/postgres_user_cross_feed_view_repo.go` に `PostgresUserCrossFeedViewRepo` 構造体と `NewPostgresUserCrossFeedViewRepo(db)` / `Get` / `Upsert`（`INSERT ... ON CONFLICT (user_id) DO UPDATE SET last_seen_at=EXCLUDED.last_seen_at, updated_at=now()`）を実装
   - compile-time interface check（`var _ UserCrossFeedViewRepository = (*PostgresUserCrossFeedViewRepo)(nil)`）を追加
