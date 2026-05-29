@@ -1,7 +1,7 @@
 # Implementation Plan
 
-- [ ] 1. DB マイグレーション: feeds.last_successful_fetch_at カラム追加
-- [ ] 1.1 up / down マイグレーションファイルを新規作成
+- [x] 1. DB マイグレーション: feeds.last_successful_fetch_at カラム追加
+- [x] 1.1 up / down マイグレーションファイルを新規作成
   - `internal/database/migrations/20260528120000_add_feeds_last_successful_fetch_at.up.sql` を作成し、
     `ALTER TABLE feeds ADD COLUMN last_successful_fetch_at TIMESTAMPTZ NULL` を記述（バックフィルなし）
   - `internal/database/migrations/20260528120000_add_feeds_last_successful_fetch_at.down.sql` を作成し、
@@ -13,8 +13,8 @@
     SELECT 期待値・Scan 行数が変わるため整合させる
   - _Requirements: 2.4_
 
-- [ ] 2. Repository 層: 行ロック取得 + last_successful_fetch_at 更新メソッド追加
-- [ ] 2.1 LockFeedForUpdateNowait / UpdateLastSuccessfulFetchAt の interface 定義と PostgreSQL 実装
+- [x] 2. Repository 層: 行ロック取得 + last_successful_fetch_at 更新メソッド追加
+- [x] 2.1 LockFeedForUpdateNowait / UpdateLastSuccessfulFetchAt の interface 定義と PostgreSQL 実装
   - `internal/repository/interfaces.go` の `FeedRepository` interface に以下 2 メソッドを追加:
     `LockFeedForUpdateNowait(ctx, tx *sql.Tx, feedID string) (*model.Feed, error)`
     `UpdateLastSuccessfulFetchAt(ctx, feedID string, at time.Time) error`
@@ -28,8 +28,8 @@
   - _Boundary: PostgresFeedRepo_
   - _Depends: 1.1_
 
-- [ ] 3. Worker fetcher の成功経路に UpdateLastSuccessfulFetchAt 反映
-- [ ] 3.1 既存 Fetcher.Fetch の ApplySuccess 直後に成功時刻を記録 (P)
+- [x] 3. Worker fetcher の成功経路に UpdateLastSuccessfulFetchAt 反映
+- [x] 3.1 既存 Fetcher.Fetch の ApplySuccess 直後に成功時刻を記録 (P)
   - `internal/worker/fetch/fetcher.go` の 2 箇所（304 Not Modified パス / 200 OK 成功パス）の `ApplySuccess` 呼び出し直後に
     `f.feedRepo.UpdateLastSuccessfulFetchAt(ctx, feed.ID, time.Now())` を 1 行追加する
   - エラーが発生した場合はログ警告のみ（成功時刻の記録失敗で fetch 自体は成功扱いを維持）
@@ -39,8 +39,8 @@
   - _Boundary: fetch.Fetcher_
   - _Depends: 2.1_
 
-- [ ] 4. Service 層: subscription.Service に ManualFetch メソッド追加
-- [ ] 4.1 ManualFetch のオーケストレーション実装（認可 / 行ロック / クールダウン判定 / fetcher 呼び出し / メトリクス）
+- [x] 4. Service 層: subscription.Service に ManualFetch メソッド追加
+- [x] 4.1 ManualFetch のオーケストレーション実装（認可 / 行ロック / クールダウン判定 / fetcher 呼び出し / メトリクス）
   - `internal/model/errors.go` に `ErrCodeFeedFetchInProgress = "FEED_FETCH_IN_PROGRESS"` /
     `ErrCodeFeedCooldown = "FEED_COOLDOWN"` 定数と、`NewFeedFetchInProgressError()` /
     `NewFeedCooldownError(retryAfterSeconds int)` 生成関数を追加。後者は `Details["retry_after_seconds"] = int` をセット
@@ -67,8 +67,8 @@
   - _Boundary: subscription.Service_
   - _Depends: 2.1, 3.1_
 
-- [ ] 5. Metrics: feedman_manual_fetch_total カウンタ追加
-- [ ] 5.1 MetricsCollector interface に 4 メソッド追加 + Collector / NopCollector 実装 (P)
+- [x] 5. Metrics: feedman_manual_fetch_total カウンタ追加
+- [x] 5.1 MetricsCollector interface に 4 メソッド追加 + Collector / NopCollector 実装 (P)
   - `internal/metrics/metrics.go` の `MetricsCollector` interface に以下 4 メソッドを追加:
     `RecordManualFetchSuccess()` / `RecordManualFetchFailure(reason string)` /
     `RecordManualFetchCooldownRejected()` / `RecordManualFetchLockConflict()`
@@ -80,8 +80,8 @@
   - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5_
   - _Boundary: metrics.Collector, metrics.NopCollector_
 
-- [ ] 6. Handler / Router: POST /api/subscriptions/{id}/fetch 追加
-- [ ] 6.1 SubscriptionServiceInterface 拡張 + Handler.ManualFetch + Router 配線 + Error マッピング
+- [x] 6. Handler / Router: POST /api/subscriptions/{id}/fetch 追加
+- [x] 6.1 SubscriptionServiceInterface 拡張 + Handler.ManualFetch + Router 配線 + Error マッピング
   - `internal/handler/subscription_handler.go` の `SubscriptionServiceInterface` に
     `ManualFetch(ctx, userID, subscriptionID string) (*subscriptionResponse, error)` を追加
   - 同ファイルに `(*SubscriptionHandler).ManualFetch` ハンドラを実装。`ResumeFetch` と同パターンで
@@ -105,8 +105,8 @@
   - _Boundary: SubscriptionHandler, SubscriptionServiceAdapter, RouterDeps, app.runServe_
   - _Depends: 4.1, 5.1_
 
-- [ ] 7. Frontend: useManualRefresh フック + ManualRefreshButton / ManualRefreshBanner UI 追加
-- [ ] 7.1 useManualRefresh フック実装 (P)
+- [x] 7. Frontend: useManualRefresh フック + ManualRefreshButton / ManualRefreshBanner UI 追加
+- [x] 7.1 useManualRefresh フック実装 (P)
   - `web/src/hooks/use-manual-refresh.ts` を新規作成。`useMutation<void, ApiError, string>` で
     `apiClient.post(\`/api/subscriptions/${subscriptionId}/fetch\`)` を呼ぶ
   - `onSuccess`: `queryClient.invalidateQueries({ queryKey: ["items", feedId] })` および
@@ -117,7 +117,7 @@
   - _Requirements: 5.3, 6.1, 6.2, 6.3, 7.5_
   - _Boundary: web hooks_
 
-- [ ] 7.2 ManualRefreshButton + ManualRefreshBanner を ItemList に統合
+- [x] 7.2 ManualRefreshButton + ManualRefreshBanner を ItemList に統合
   - `web/src/components/manual-refresh-banner.tsx` を新規作成。`error: ApiError | null` を受け取り、
     status / code 別の表示メッセージを返す純粋表示コンポーネント。429 のとき `details.retry_after_seconds` を本文に埋め込む
   - `web/src/components/item-list.tsx` を修正:

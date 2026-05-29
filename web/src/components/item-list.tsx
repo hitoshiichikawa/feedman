@@ -2,12 +2,15 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Star } from "lucide-react";
+import { RotateCw, Star } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useItems, useItemDetail } from "@/hooks/use-items";
 import { useMarkAsRead, useToggleStar } from "@/hooks/use-item-state";
+import { useManualRefresh } from "@/hooks/use-manual-refresh";
+import { useFeeds } from "@/hooks/use-feeds";
 import { FeedSearchBar } from "@/components/feed-search-bar";
 import { ItemDetail } from "@/components/item-detail";
+import { ManualRefreshBanner } from "@/components/manual-refresh-banner";
 import type {
   ItemDetail as ItemDetailType,
   ItemFilter,
@@ -53,6 +56,15 @@ export function ItemList({ feedId, onSelectItem, expandedItemId }: ItemListProps
   // 記事詳細から既読化・スター切替を行うための mutation を配線する。
   const markAsRead = useMarkAsRead();
   const toggleStar = useToggleStar();
+
+  // 手動更新ボタン用: 現在表示中のフィードに対応する subscription.id を解決する。
+  // useFeeds は購読一覧（feed_id → subscription.id 対応表）を提供する。
+  const { data: feeds } = useFeeds();
+  const subscriptionId =
+    feedId !== null && Array.isArray(feeds)
+      ? feeds.find((f) => f.feed_id === feedId)?.id ?? null
+      : null;
+  const manualRefresh = useManualRefresh(feedId);
 
   const handleMarkAsRead = useCallback(
     (itemId: string) => {
@@ -129,9 +141,10 @@ export function ItemList({ feedId, onSelectItem, expandedItemId }: ItemListProps
 
   return (
     <div className="flex flex-col h-full">
-      {/* フィルタタブ + フィード内検索バー（Req 1.2 / NFR 2.3）
+      {/* フィルタタブ + フィード内検索バー + 手動更新ボタン
           FeedSearchBar は selectedFeedId === null のとき内部で null を返すため、
-          本領域に到達する時点（feedId !== null）では常に描画される */}
+          本領域に到達する時点（feedId !== null）では常に描画される（Req 1.2 / NFR 2.3）。
+          ManualRefreshButton は subscriptionId 解決時のみ描画する（Issue #115 Req 5.x）。 */}
       <div className="flex flex-shrink-0 flex-wrap items-center justify-between gap-2 border-b px-4 py-2">
         <Tabs
           value={filter}
@@ -143,8 +156,20 @@ export function ItemList({ feedId, onSelectItem, expandedItemId }: ItemListProps
             <TabsTrigger value="starred">スター</TabsTrigger>
           </TabsList>
         </Tabs>
-        <FeedSearchBar />
+        <div className="flex items-center gap-2">
+          <FeedSearchBar />
+          {subscriptionId !== null && (
+            <ManualRefreshButton
+              subscriptionId={subscriptionId}
+              isPending={manualRefresh.isPending}
+              onClick={() => manualRefresh.mutate(subscriptionId)}
+            />
+          )}
+        </div>
       </div>
+
+      {/* 手動更新エラー表示（成功時は描画しない） */}
+      <ManualRefreshBanner error={manualRefresh.error ?? null} />
 
       {/* 記事一覧 */}
       <div className="flex-1 overflow-y-auto">
@@ -191,6 +216,49 @@ export function ItemList({ feedId, onSelectItem, expandedItemId }: ItemListProps
         )}
       </div>
     </div>
+  );
+}
+
+/** ManualRefreshButton のプロパティ */
+interface ManualRefreshButtonProps {
+  /** 対象の購読 ID（mutation 引数として再送するため保持） */
+  subscriptionId: string;
+  /** mutation 進行中フラグ。true の間は disabled + 回転アニメーション */
+  isPending: boolean;
+  /** クリックハンドラ（呼び出し側で mutate を発火） */
+  onClick: () => void;
+}
+
+/**
+ * 記事一覧ヘッダー（フィルタタブ群の右隣）に配置する手動更新ボタン。
+ *
+ * 進行中は `aria-busy=true` / `disabled` で重複起動を防止し、Lucide `RotateCw`
+ * アイコンに `animate-spin` を当てて視覚的なローディングを継続する（Req 5.4 / 5.5 / 5.6）。
+ */
+function ManualRefreshButton({
+  subscriptionId,
+  isPending,
+  onClick,
+}: ManualRefreshButtonProps) {
+  return (
+    <button
+      type="button"
+      aria-label="フィードを更新"
+      aria-busy={isPending}
+      disabled={isPending}
+      onClick={onClick}
+      data-testid={`manual-refresh-button-${subscriptionId}`}
+      className={cn(
+        "inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors",
+        "hover:bg-accent hover:text-foreground",
+        "disabled:cursor-not-allowed disabled:opacity-60"
+      )}
+    >
+      <RotateCw
+        aria-hidden="true"
+        className={cn("w-4 h-4", isPending && "animate-spin")}
+      />
+    </button>
   );
 }
 

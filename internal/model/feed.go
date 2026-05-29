@@ -5,20 +5,24 @@ import "time"
 
 // Feed はRSS/Atomフィードを表す。
 type Feed struct {
-	ID               string
-	FeedURL          string
-	SiteURL          string
-	Title            string
-	FaviconData      []byte
-	FaviconMime      string
-	ETag             string
-	LastModified     string
-	FetchStatus      FetchStatus
+	ID                string
+	FeedURL           string
+	SiteURL           string
+	Title             string
+	FaviconData       []byte
+	FaviconMime       string
+	ETag              string
+	LastModified      string
+	FetchStatus       FetchStatus
 	ConsecutiveErrors int
-	ErrorMessage     string
-	NextFetchAt      time.Time
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	ErrorMessage      string
+	NextFetchAt       time.Time
+	// LastSuccessfulFetchAt は直近のフェッチ成功時刻。
+	// nil の場合は過去に成功実績がないことを表し、手動フェッチのクールダウン判定では非適用となる。
+	// 自動ワーカー / 手動フェッチの双方の成功経路で更新される。
+	LastSuccessfulFetchAt *time.Time
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
 }
 
 // FetchStatus はフィードのフェッチ状態を表す。

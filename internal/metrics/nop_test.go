@@ -18,10 +18,10 @@ func TestNopCollector_ImplementsMetricsCollector(t *testing.T) {
 	}
 }
 
-// TestNopCollector_MethodsDoNotPanic は NopCollector の 6 メソッドが
+// TestNopCollector_MethodsDoNotPanic は NopCollector の全 10 メソッドが
 // panic せず副作用なく呼べることを検証する。
 // Collector 未注入時の既定値として nil 安全に振る舞うことを担保する。
-// Requirement 5.1 / NFR 1.2 に対応。
+// Requirement 5.1 / NFR 1.2 / Issue #115 Req 8.1〜8.4 に対応。
 func TestNopCollector_MethodsDoNotPanic(t *testing.T) {
 	cases := []struct {
 		name string
@@ -50,6 +50,22 @@ func TestNopCollector_MethodsDoNotPanic(t *testing.T) {
 		{
 			name: "RecordItemsUpsertedを呼んでもpanicしない",
 			call: func(c NopCollector) { c.RecordItemsUpserted(3) },
+		},
+		{
+			name: "RecordManualFetchSuccessを呼んでもpanicしない",
+			call: func(c NopCollector) { c.RecordManualFetchSuccess() },
+		},
+		{
+			name: "RecordManualFetchFailureを呼んでもpanicしない",
+			call: func(c NopCollector) { c.RecordManualFetchFailure("fetch_error") },
+		},
+		{
+			name: "RecordManualFetchCooldownRejectedを呼んでもpanicしない",
+			call: func(c NopCollector) { c.RecordManualFetchCooldownRejected() },
+		},
+		{
+			name: "RecordManualFetchLockConflictを呼んでもpanicしない",
+			call: func(c NopCollector) { c.RecordManualFetchLockConflict() },
 		},
 	}
 
@@ -88,4 +104,8 @@ func TestNopCollector_ZeroValueIsUsable(t *testing.T) {
 	c.RecordHTTPStatus(0)
 	c.RecordFetchLatency(0)
 	c.RecordItemsUpserted(0)
+	c.RecordManualFetchSuccess()
+	c.RecordManualFetchFailure("")
+	c.RecordManualFetchCooldownRejected()
+	c.RecordManualFetchLockConflict()
 }

@@ -22,6 +22,7 @@ type mockSubscriptionService struct {
 	updateSettingsFn    func(ctx context.Context, userID, subscriptionID string, minutes int) (*subscriptionResponse, error)
 	unsubscribeFn       func(ctx context.Context, userID, subscriptionID string) error
 	resumeFetchFn       func(ctx context.Context, userID, subscriptionID string) (*subscriptionResponse, error)
+	manualFetchFn       func(ctx context.Context, userID, subscriptionID string) (*subscriptionResponse, error)
 }
 
 func (m *mockSubscriptionService) ListSubscriptions(ctx context.Context, userID string) ([]subscriptionResponse, error) {
@@ -48,6 +49,13 @@ func (m *mockSubscriptionService) Unsubscribe(ctx context.Context, userID, subsc
 func (m *mockSubscriptionService) ResumeFetch(ctx context.Context, userID, subscriptionID string) (*subscriptionResponse, error) {
 	if m.resumeFetchFn != nil {
 		return m.resumeFetchFn(ctx, userID, subscriptionID)
+	}
+	return nil, nil
+}
+
+func (m *mockSubscriptionService) ManualFetch(ctx context.Context, userID, subscriptionID string) (*subscriptionResponse, error) {
+	if m.manualFetchFn != nil {
+		return m.manualFetchFn(ctx, userID, subscriptionID)
 	}
 	return nil, nil
 }
@@ -864,6 +872,305 @@ func TestSetupSubscriptionRoutes_ResumeEndpoint(t *testing.T) {
 	resp := w.Result()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("POST /api/subscriptions/:id/resume status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
+// --- POST /api/subscriptions/:id/fetch（手動フェッチ）テスト（Issue #115） ---
+
+// TestSubscriptionHandler_ManualFetch_Success は正常系（200 OK）を検証する（Req 1.1）。
+// 認証済みユーザーが自身の購読 ID を指定して呼び出すと、サービス層から返った
+// SubscriptionInfo が JSON で返ることを確認する。
+func TestSubscriptionHandler_ManualFetch_Success(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	svc := &mockSubscriptionService{
+		manualFetchFn: func(ctx context.Context, userID, subscriptionID string) (*subscriptionResponse, error) {
+			if userID != "user-123" {
+				t.Errorf("userID = %q, want %q", userID, "user-123")
+			}
+			if subscriptionID != "sub-1" {
+				t.Errorf("subscriptionID = %q, want %q", subscriptionID, "sub-1")
+			}
+			return &subscriptionResponse{
+				ID:                   "sub-1",
+				UserID:               "user-123",
+				FeedID:               "feed-1",
+				FeedTitle:            "Refreshed Feed",
+				FeedURL:              "https://example.com/feed.xml",
+				FetchIntervalMinutes: 60,
+				FeedStatus:           "active",
+				UnreadCount:          7,
+				CreatedAt:            now,
+			}, nil
+		},
+	}
+
+	h := NewSubscriptionHandler(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/subscriptions/sub-1/fetch", nil)
+	req = withUserID(req, "user-123")
+	req = withChiURLParam(req, "id", "sub-1")
+	w := httptest.NewRecorder()
+
+	h.ManualFetch(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if result["feed_status"] != "active" {
+		t.Errorf("feed_status = %v, want %q", result["feed_status"], "active")
+	}
+	if int(result["unread_count"].(float64)) != 7 {
+		t.Errorf("unread_count = %v, want 7", result["unread_count"])
+	}
+}
+
+// TestSubscriptionHandler_ManualFetch_Unauthorized は未認証時に 401 を返し、
+// サービス層が呼ばれないことを検証する（Req 1.4）。
+func TestSubscriptionHandler_ManualFetch_Unauthorized(t *testing.T) {
+	called := false
+	svc := &mockSubscriptionService{
+		manualFetchFn: func(ctx context.Context, userID, subscriptionID string) (*subscriptionResponse, error) {
+			called = true
+			return nil, nil
+		},
+	}
+
+	h := NewSubscriptionHandler(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/subscriptions/sub-1/fetch", nil)
+	// userID を注入しない（未認証）
+	req = withChiURLParam(req, "id", "sub-1")
+	w := httptest.NewRecorder()
+
+	h.ManualFetch(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+	if called {
+		t.Error("ManualFetch service should not be called when unauthenticated (Req 1.4)")
+	}
+}
+
+// TestSubscriptionHandler_ManualFetch_NotFound は subID 不存在 / 他人の subID の
+// いずれの場合も SUBSCRIPTION_NOT_FOUND（404）を返すことを検証する（Req 1.5 / 1.6）。
+func TestSubscriptionHandler_ManualFetch_NotFound(t *testing.T) {
+	tests := []struct {
+		name  string
+		subID string
+	}{
+		{"non-existent subID", "nonexistent"},
+		{"another user's subID returns same 404 (Req 1.6)", "sub-of-other-user"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &mockSubscriptionService{
+				manualFetchFn: func(ctx context.Context, userID, subscriptionID string) (*subscriptionResponse, error) {
+					return nil, model.NewSubscriptionNotFoundError(subscriptionID)
+				},
+			}
+
+			h := NewSubscriptionHandler(svc)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/subscriptions/"+tt.subID+"/fetch", nil)
+			req = withUserID(req, "user-123")
+			req = withChiURLParam(req, "id", tt.subID)
+			w := httptest.NewRecorder()
+
+			h.ManualFetch(w, req)
+
+			resp := w.Result()
+			if resp.StatusCode != http.StatusNotFound {
+				t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+			}
+		})
+	}
+}
+
+// TestSubscriptionHandler_ManualFetch_Conflict は行ロック競合時に
+// FEED_FETCH_IN_PROGRESS（409）を返すことを検証する（Req 3.2 / 3.3）。
+func TestSubscriptionHandler_ManualFetch_Conflict(t *testing.T) {
+	svc := &mockSubscriptionService{
+		manualFetchFn: func(ctx context.Context, userID, subscriptionID string) (*subscriptionResponse, error) {
+			return nil, model.NewFeedFetchInProgressError()
+		},
+	}
+
+	h := NewSubscriptionHandler(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/subscriptions/sub-1/fetch", nil)
+	req = withUserID(req, "user-123")
+	req = withChiURLParam(req, "id", "sub-1")
+	w := httptest.NewRecorder()
+
+	h.ManualFetch(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusConflict)
+	}
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode body: %v", err)
+	}
+	if body["code"] != model.ErrCodeFeedFetchInProgress {
+		t.Errorf("code = %v, want %q", body["code"], model.ErrCodeFeedFetchInProgress)
+	}
+	// Req 3.3: ボディに「フェッチ中で再試行案内」相当のメッセージが含まれる
+	if body["action"] == "" || body["action"] == nil {
+		t.Error("action should contain retry guidance (Req 3.3)")
+	}
+}
+
+// TestSubscriptionHandler_ManualFetch_Cooldown はクールダウン拒否時に
+// FEED_COOLDOWN（429）を返し、Details.retry_after_seconds が JSON に含まれることを
+// 検証する（Req 2.1 / 2.2）。
+func TestSubscriptionHandler_ManualFetch_Cooldown(t *testing.T) {
+	svc := &mockSubscriptionService{
+		manualFetchFn: func(ctx context.Context, userID, subscriptionID string) (*subscriptionResponse, error) {
+			return nil, model.NewFeedCooldownError(480)
+		},
+	}
+
+	h := NewSubscriptionHandler(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/subscriptions/sub-1/fetch", nil)
+	req = withUserID(req, "user-123")
+	req = withChiURLParam(req, "id", "sub-1")
+	w := httptest.NewRecorder()
+
+	h.ManualFetch(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusTooManyRequests)
+	}
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode body: %v", err)
+	}
+	if body["code"] != model.ErrCodeFeedCooldown {
+		t.Errorf("code = %v, want %q", body["code"], model.ErrCodeFeedCooldown)
+	}
+
+	details, ok := body["details"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("details missing or wrong type: body=%v", body)
+	}
+	retryAfter, ok := details["retry_after_seconds"].(float64)
+	if !ok {
+		t.Fatalf("retry_after_seconds missing: details=%v", details)
+	}
+	if int(retryAfter) != 480 {
+		t.Errorf("retry_after_seconds = %v, want 480", retryAfter)
+	}
+}
+
+// TestSubscriptionHandler_ManualFetch_FetchFailed は fetcher 失敗時に
+// FETCH_FAILED（502）を返すことを検証する（Req 7.4 ← UI 観点での 5xx）。
+func TestSubscriptionHandler_ManualFetch_FetchFailed(t *testing.T) {
+	svc := &mockSubscriptionService{
+		manualFetchFn: func(ctx context.Context, userID, subscriptionID string) (*subscriptionResponse, error) {
+			return nil, model.NewFetchFailedError("timeout")
+		},
+	}
+
+	h := NewSubscriptionHandler(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/subscriptions/sub-1/fetch", nil)
+	req = withUserID(req, "user-123")
+	req = withChiURLParam(req, "id", "sub-1")
+	w := httptest.NewRecorder()
+
+	h.ManualFetch(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadGateway)
+	}
+}
+
+// TestSubscriptionHandler_ManualFetch_InternalError は予期しない error が
+// INTERNAL_ERROR（500）に正規化されることを検証する。
+func TestSubscriptionHandler_ManualFetch_InternalError(t *testing.T) {
+	svc := &mockSubscriptionService{
+		manualFetchFn: func(ctx context.Context, userID, subscriptionID string) (*subscriptionResponse, error) {
+			return nil, errors.New("database error")
+		},
+	}
+
+	h := NewSubscriptionHandler(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/subscriptions/sub-1/fetch", nil)
+	req = withUserID(req, "user-123")
+	req = withChiURLParam(req, "id", "sub-1")
+	w := httptest.NewRecorder()
+
+	h.ManualFetch(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusInternalServerError)
+	}
+}
+
+// TestSubscriptionHandler_ManualFetch_NoBody は POST /fetch がリクエストボディを
+// 必要としないことを検証する（Req 1.7）。空ボディでも 200 が返る。
+func TestSubscriptionHandler_ManualFetch_NoBody(t *testing.T) {
+	svc := &mockSubscriptionService{
+		manualFetchFn: func(ctx context.Context, userID, subscriptionID string) (*subscriptionResponse, error) {
+			return &subscriptionResponse{ID: subscriptionID, FeedStatus: "active"}, nil
+		},
+	}
+
+	h := NewSubscriptionHandler(svc)
+
+	// nil body
+	req := httptest.NewRequest(http.MethodPost, "/api/subscriptions/sub-1/fetch", nil)
+	req = withUserID(req, "user-123")
+	req = withChiURLParam(req, "id", "sub-1")
+	w := httptest.NewRecorder()
+
+	h.ManualFetch(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d (Req 1.7: body 不要)", w.Result().StatusCode, http.StatusOK)
+	}
+}
+
+// TestSetupSubscriptionRoutes_ManualFetchEndpoint は /fetch ルーティングが
+// 配線されていることを検証する（Req 1.1 のエンドポイント存在性）。
+func TestSetupSubscriptionRoutes_ManualFetchEndpoint(t *testing.T) {
+	svc := &mockSubscriptionService{
+		manualFetchFn: func(ctx context.Context, userID, subscriptionID string) (*subscriptionResponse, error) {
+			return &subscriptionResponse{
+				ID:         subscriptionID,
+				FeedStatus: "active",
+				CreatedAt:  time.Now().UTC().Truncate(time.Second),
+			}, nil
+		},
+	}
+
+	router := SetupSubscriptionRoutes(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/subscriptions/sub-1/fetch", nil)
+	req = withUserID(req, "user-123")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("POST /api/subscriptions/:id/fetch status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 }
 

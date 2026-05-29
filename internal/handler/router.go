@@ -231,6 +231,9 @@ func NewRouter(deps *RouterDeps) http.Handler {
 				r.Delete("/", subHandler.Unsubscribe)
 				r.Put("/settings", subHandler.UpdateSettings)
 				r.Post("/resume", subHandler.ResumeFetch)
+				// Issue #115: 手動フェッチ API（同期）。
+				// 認証ミドルウェア + General レート制限はグループ単位で適用済み（NFR 2.1, 2.2）。
+				r.Post("/fetch", subHandler.ManualFetch)
 			})
 		})
 

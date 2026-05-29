@@ -3,10 +3,23 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/hitoshi/feedman/internal/model"
+	"github.com/lib/pq"
 )
+
+// ErrFeedLocked は対象フィード行が別トランザクションによって既にロックされている場合に返される。
+// PostgreSQL ErrCode 55P03 (lock_not_available) を判定し、上位レイヤ用に sentinel error として正規化する。
+// 行ロック非ブロッキング取得（LockFeedForUpdateNowait）の戻り値として errors.Is(err, ErrFeedLocked) で
+// 検出可能とすることで、subscription.Service 側で FEED_FETCH_IN_PROGRESS APIError へマップする責務を集約する。
+var ErrFeedLocked = errors.New("feed row is currently locked by another transaction")
+
+// pgErrCodeLockNotAvailable は PostgreSQL の lock_not_available エラーコード。
+// SELECT ... FOR UPDATE NOWAIT が既存ロック保持中の行に当たったときに返される。
+const pgErrCodeLockNotAvailable = "55P03"
 
 // PostgresFeedRepo はPostgreSQLを使用したフィードリポジトリ。
 type PostgresFeedRepo struct {
@@ -23,18 +36,21 @@ func (r *PostgresFeedRepo) FindByID(ctx context.Context, id string) (*model.Feed
 	feed := &model.Feed{}
 	var faviconData []byte
 	var faviconMime, siteURL, etag, lastModified, errorMessage sql.NullString
+	var lastSuccessfulFetchAt sql.NullTime
 
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, feed_url, site_url, title, favicon_data, favicon_mime,
 		        etag, last_modified, fetch_status, consecutive_errors,
-		        error_message, next_fetch_at, created_at, updated_at
+		        error_message, next_fetch_at, last_successful_fetch_at,
+		        created_at, updated_at
 		 FROM feeds WHERE id = $1`,
 		id,
 	).Scan(
 		&feed.ID, &feed.FeedURL, &siteURL, &feed.Title,
 		&faviconData, &faviconMime,
 		&etag, &lastModified, &feed.FetchStatus, &feed.ConsecutiveErrors,
-		&errorMessage, &feed.NextFetchAt, &feed.CreatedAt, &feed.UpdatedAt,
+		&errorMessage, &feed.NextFetchAt, &lastSuccessfulFetchAt,
+		&feed.CreatedAt, &feed.UpdatedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -50,6 +66,7 @@ func (r *PostgresFeedRepo) FindByID(ctx context.Context, id string) (*model.Feed
 	feed.ETag = nullStringValue(etag)
 	feed.LastModified = nullStringValue(lastModified)
 	feed.ErrorMessage = nullStringValue(errorMessage)
+	feed.LastSuccessfulFetchAt = nullTimeValue(lastSuccessfulFetchAt)
 
 	return feed, nil
 }
@@ -59,18 +76,21 @@ func (r *PostgresFeedRepo) FindByFeedURL(ctx context.Context, feedURL string) (*
 	feed := &model.Feed{}
 	var faviconData []byte
 	var faviconMime, siteURL, etag, lastModified, errorMessage sql.NullString
+	var lastSuccessfulFetchAt sql.NullTime
 
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, feed_url, site_url, title, favicon_data, favicon_mime,
 		        etag, last_modified, fetch_status, consecutive_errors,
-		        error_message, next_fetch_at, created_at, updated_at
+		        error_message, next_fetch_at, last_successful_fetch_at,
+		        created_at, updated_at
 		 FROM feeds WHERE feed_url = $1`,
 		feedURL,
 	).Scan(
 		&feed.ID, &feed.FeedURL, &siteURL, &feed.Title,
 		&faviconData, &faviconMime,
 		&etag, &lastModified, &feed.FetchStatus, &feed.ConsecutiveErrors,
-		&errorMessage, &feed.NextFetchAt, &feed.CreatedAt, &feed.UpdatedAt,
+		&errorMessage, &feed.NextFetchAt, &lastSuccessfulFetchAt,
+		&feed.CreatedAt, &feed.UpdatedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -86,6 +106,7 @@ func (r *PostgresFeedRepo) FindByFeedURL(ctx context.Context, feedURL string) (*
 	feed.ETag = nullStringValue(etag)
 	feed.LastModified = nullStringValue(lastModified)
 	feed.ErrorMessage = nullStringValue(errorMessage)
+	feed.LastSuccessfulFetchAt = nullTimeValue(lastSuccessfulFetchAt)
 
 	return feed, nil
 }
@@ -158,6 +179,16 @@ func nullStringValue(ns sql.NullString) string {
 	return ""
 }
 
+// nullTimeValue はsql.NullTimeから*time.Timeを取得する。
+// Valid=false のときは nil を返し、ドメインモデル側で「未設定」を nil で表現できるようにする。
+func nullTimeValue(nt sql.NullTime) *time.Time {
+	if nt.Valid {
+		t := nt.Time
+		return &t
+	}
+	return nil
+}
+
 // ListDueForFetch はフェッチ対象のフィードを取得する。
 // next_fetch_at <= now() かつ fetch_status = 'active' かつ購読者が存在するフィードを
 // FOR UPDATE SKIP LOCKEDで排他的に取得する。
@@ -171,7 +202,8 @@ func (r *PostgresFeedRepo) ListDueForFetch(ctx context.Context) ([]*model.Feed, 
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT f.id, f.feed_url, f.site_url, f.title, f.favicon_data, f.favicon_mime,
 		        f.etag, f.last_modified, f.fetch_status, f.consecutive_errors,
-		        f.error_message, f.next_fetch_at, f.created_at, f.updated_at
+		        f.error_message, f.next_fetch_at, f.last_successful_fetch_at,
+		        f.created_at, f.updated_at
 		 FROM feeds f
 		 WHERE f.next_fetch_at <= now()
 		   AND f.fetch_status = 'active'
@@ -189,12 +221,14 @@ func (r *PostgresFeedRepo) ListDueForFetch(ctx context.Context) ([]*model.Feed, 
 		feed := &model.Feed{}
 		var faviconData []byte
 		var faviconMime, siteURL, etag, lastModified, errorMessage sql.NullString
+		var lastSuccessfulFetchAt sql.NullTime
 
 		if err := rows.Scan(
 			&feed.ID, &feed.FeedURL, &siteURL, &feed.Title,
 			&faviconData, &faviconMime,
 			&etag, &lastModified, &feed.FetchStatus, &feed.ConsecutiveErrors,
-			&errorMessage, &feed.NextFetchAt, &feed.CreatedAt, &feed.UpdatedAt,
+			&errorMessage, &feed.NextFetchAt, &lastSuccessfulFetchAt,
+			&feed.CreatedAt, &feed.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("フェッチ対象フィードの読み取りに失敗しました: %w", err)
 		}
@@ -205,6 +239,7 @@ func (r *PostgresFeedRepo) ListDueForFetch(ctx context.Context) ([]*model.Feed, 
 		feed.ETag = nullStringValue(etag)
 		feed.LastModified = nullStringValue(lastModified)
 		feed.ErrorMessage = nullStringValue(errorMessage)
+		feed.LastSuccessfulFetchAt = nullTimeValue(lastSuccessfulFetchAt)
 
 		feeds = append(feeds, feed)
 	}
@@ -249,6 +284,67 @@ func (r *PostgresFeedRepo) UpdateFetchState(ctx context.Context, feed *model.Fee
 	)
 	if err != nil {
 		return fmt.Errorf("フェッチ状態の更新に失敗しました: %w", err)
+	}
+	return nil
+}
+
+// LockFeedForUpdateNowait は指定フィード行に対し非ブロッキング排他ロック（FOR UPDATE NOWAIT）を取得する。
+// 既に別トランザクションがロックを保持している場合は ErrFeedLocked を返し、待機しない。
+// 取得したロックは tx の COMMIT / ROLLBACK で自動解放される。
+// 対象 ID のフィードが存在しないときは (nil, nil) を返す（FindByID と同パターン）。
+func (r *PostgresFeedRepo) LockFeedForUpdateNowait(ctx context.Context, tx *sql.Tx, feedID string) (*model.Feed, error) {
+	feed := &model.Feed{}
+	var faviconData []byte
+	var faviconMime, siteURL, etag, lastModified, errorMessage sql.NullString
+	var lastSuccessfulFetchAt sql.NullTime
+
+	err := tx.QueryRowContext(ctx,
+		`SELECT id, feed_url, site_url, title, favicon_data, favicon_mime,
+		        etag, last_modified, fetch_status, consecutive_errors,
+		        error_message, next_fetch_at, last_successful_fetch_at,
+		        created_at, updated_at
+		 FROM feeds WHERE id = $1 FOR UPDATE NOWAIT`,
+		feedID,
+	).Scan(
+		&feed.ID, &feed.FeedURL, &siteURL, &feed.Title,
+		&faviconData, &faviconMime,
+		&etag, &lastModified, &feed.FetchStatus, &feed.ConsecutiveErrors,
+		&errorMessage, &feed.NextFetchAt, &lastSuccessfulFetchAt,
+		&feed.CreatedAt, &feed.UpdatedAt,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		var pgErr *pq.Error
+		if errors.As(err, &pgErr) && string(pgErr.Code) == pgErrCodeLockNotAvailable {
+			return nil, ErrFeedLocked
+		}
+		return nil, fmt.Errorf("フィードのロック取得に失敗しました: %w", err)
+	}
+
+	feed.FaviconData = faviconData
+	feed.FaviconMime = nullStringValue(faviconMime)
+	feed.SiteURL = nullStringValue(siteURL)
+	feed.ETag = nullStringValue(etag)
+	feed.LastModified = nullStringValue(lastModified)
+	feed.ErrorMessage = nullStringValue(errorMessage)
+	feed.LastSuccessfulFetchAt = nullTimeValue(lastSuccessfulFetchAt)
+
+	return feed, nil
+}
+
+// UpdateLastSuccessfulFetchAt は指定フィードの last_successful_fetch_at を更新する。
+// 自動ワーカーの成功経路と手動フェッチの成功経路の双方から呼ばれる共有更新メソッド。
+// 既存値の有無に関わらず単純上書きする（成功時刻は単調増加するため呼び出し側で順序を保証する）。
+func (r *PostgresFeedRepo) UpdateLastSuccessfulFetchAt(ctx context.Context, feedID string, at time.Time) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE feeds SET last_successful_fetch_at = $2, updated_at = now() WHERE id = $1`,
+		feedID, at,
+	)
+	if err != nil {
+		return fmt.Errorf("最終成功時刻の更新に失敗しました: %w", err)
 	}
 	return nil
 }
