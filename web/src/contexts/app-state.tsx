@@ -23,10 +23,29 @@ export type SearchScope = "global" | "feed";
  */
 export type SelectedView = "feed" | "starred";
 
+/**
+ * 横断新着一覧（cross-feed timeline）の表示モード判別子（Issue #121 / Req 1.2, 1.3, 4.7）。
+ * - `"none"`: セッション開始直後の未選択状態
+ * - `"feed"`: 個別フィード記事一覧表示中（selectedFeedId が非 null）
+ * - `"cross-feed"`: 横断新着一覧表示中
+ *
+ * 既存の `selectedView` ("feed" | "starred") と並列の discriminator として導入する。
+ * 既存 starred 表示 (`selectedView === "starred"`) と本 viewMode の "cross-feed" は
+ * 同時には共存しない: `SELECT_ALL_NEW_ITEMS` action は selectedView を "feed" に倒し
+ * viewMode を "cross-feed" にする。`SELECT_STARRED` は viewMode をリセットせず、
+ * 右ペインの分岐は selectedView を優先する設計（後続 task 9 の AppShell 切替で確定）。
+ */
+export type ViewMode = "none" | "feed" | "cross-feed";
+
 /** アプリケーションUIステート */
 export interface AppState {
   /** 現在の右ペイン表示モード（"feed" or "starred"） */
   selectedView: SelectedView;
+  /**
+   * 横断新着一覧の表示モード判別子（Req 1.2, 1.3）。
+   * 初期値は "none"（既存挙動と同等：何も選択されていない状態）。
+   */
+  viewMode: ViewMode;
   /** 現在選択中のフィードID（null = 未選択 / "starred" 選択時も null） */
   selectedFeedId: string | null;
   /** 現在展開中の記事ID（null = 未展開） */
@@ -41,11 +60,19 @@ export interface AppState {
   searchScope: SearchScope;
   /** フィード内検索の対象フィードID（searchScope === 'feed' のときのみ非 null） */
   searchFeedId: string | null;
+  /**
+   * 横断新着一覧の同一セッション内 baseline (新着判定基準時刻、RFC3339 文字列)。
+   * セッション初回 fetch 完了時に `SET_CROSS_FEED_SESSION_SINCE` で固定し、以降の
+   * 行き来（横断 ⇄ 個別フィード）で値を保持する（Req 4.7）。
+   * 初期値 null = セッション初回 fetch 前。
+   */
+  crossFeedSessionSince: string | null;
 }
 
 /** 初期状態 */
 const initialState: AppState = {
   selectedView: "feed",
+  viewMode: "none",
   selectedFeedId: null,
   expandedItemId: null,
   filter: "all",
@@ -53,6 +80,7 @@ const initialState: AppState = {
   isSearching: false,
   searchScope: "global",
   searchFeedId: null,
+  crossFeedSessionSince: null,
 };
 
 // --- Actions ---
@@ -89,10 +117,30 @@ type SetSearchQueryAction = {
 /** 検索解除アクション: 検索状態のみリセットし、selectedFeedId と filter は保持する */
 type ClearSearchAction = { type: "CLEAR_SEARCH" };
 
+/**
+ * 「すべての新着記事」エントリ選択アクション（Issue #121 / Req 1.2, 4.7）。
+ * viewMode を "cross-feed" に切り替え、selectedFeedId / expandedItemId をリセットし、
+ * filter を "all" に戻す。selectedView は "feed" に倒して既存 starred モードと排他とする。
+ * `crossFeedSessionSince` は **保持**（Req 4.7、行き来時の baseline 固定）。
+ */
+type SelectAllNewItemsAction = { type: "SELECT_ALL_NEW_ITEMS" };
+
+/**
+ * 横断新着一覧のセッション baseline 固定アクション（Issue #121 / Req 4.7）。
+ * CrossFeedItemList が初回 fetch 完了時に 1 回だけ dispatch し、
+ * `crossFeedSessionSince` を当該レスポンスの `since_time` で固定する。
+ */
+type SetCrossFeedSessionSinceAction = {
+  type: "SET_CROSS_FEED_SESSION_SINCE";
+  sinceTime: string;
+};
+
 /** 全アクションのユニオン型 */
 export type AppAction =
   | SelectFeedAction
   | SelectStarredAction
+  | SelectAllNewItemsAction
+  | SetCrossFeedSessionSinceAction
   | ExpandItemAction
   | SetFilterAction
   | SetSearchQueryAction
@@ -104,9 +152,12 @@ export type AppAction =
 function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case "SELECT_FEED":
+      // 個別フィード選択は viewMode='feed' に倒す（Req 1.3）。
+      // crossFeedSessionSince は保持し、横断 ⇄ 個別の行き来で baseline を維持する（Req 4.7）。
       return {
         ...state,
         selectedView: "feed",
+        viewMode: "feed",
         selectedFeedId: action.feedId,
         expandedItemId: null,
         filter: "all",
@@ -126,6 +177,27 @@ function appReducer(state: AppState, action: AppAction): AppState {
         isSearching: false,
         searchScope: "global",
         searchFeedId: null,
+      };
+    case "SELECT_ALL_NEW_ITEMS":
+      // 横断新着一覧表示に切替（Req 1.2）。crossFeedSessionSince は保持（Req 4.7）。
+      // selectedView は "feed" に倒し既存 starred モードと排他とする。
+      return {
+        ...state,
+        selectedView: "feed",
+        viewMode: "cross-feed",
+        selectedFeedId: null,
+        expandedItemId: null,
+        filter: "all",
+        searchQuery: "",
+        isSearching: false,
+        searchScope: "global",
+        searchFeedId: null,
+      };
+    case "SET_CROSS_FEED_SESSION_SINCE":
+      // セッション初回 fetch で受信した since_time を固定（Req 4.7）。
+      return {
+        ...state,
+        crossFeedSessionSince: action.sinceTime,
       };
     case "EXPAND_ITEM":
       return {
