@@ -38,7 +38,7 @@
   - `useFeeds` / `useManualRefresh` の wiring は `FeedPaneHeader` 内部で完結する
     （`item-list.tsx` から移譲。`feedId` 経由で `subscriptionId` を解決する）
   - _Requirements: 1.1, 2.1, 2.3, 3.4_
-- [ ] 2.2 `web/src/components/feed-pane-header.test.tsx` を新規作成する (P)
+- [x] 2.2 `web/src/components/feed-pane-header.test.tsx` を新規作成する (P)
   - `mode="normal"` で FilterTabs / FeedSearchBar / ManualRefreshButton が描画されること
   - `mode="normal"` で `onFilterChange` がタブ切替で呼ばれること
   - `mode="search-feed"` で FeedSearchBar のみ描画され、FilterTabs / ManualRefreshButton が
