@@ -53,7 +53,7 @@
   - _Requirements: 1.2, 1.3, 3.2, 3.3, 4.7, 5.1, 5.2_
   - _Boundary: FeedFavicon, AppStateContext_
 
-- [ ] 7. Frontend: FeedList に「すべての新着記事」エントリ追加と FeedList テスト更新
+- [x] 7. Frontend: FeedList に「すべての新着記事」エントリ追加と FeedList テスト更新
   - `web/src/components/feed-list.tsx` の `FeedList` props に `viewMode: ViewMode` と `onSelectAllNewItems: () => void` を追加（後方互換のため省略可とせず必須化）。`feeds.map` の **直前** に `<AllNewItemsEntry>` 相当の button を常設描画（購読 0 件でも表示。Req 1.1）。選択中時は既存個別フィードと同じ `bg-accent text-accent-foreground font-medium` を適用、`data-testid="all-new-items-entry"` / `aria-current="page"`（選択中時）を付与。favicon 領域は `<FeedFavicon feedId="__all__" faviconURL={null} feedTitle="すべての新着記事" />` で代替アイコン表示
   - 既存購読 0 件時の「フィードが登録されていません」メッセージは購読配列が 0 件かつ仮想エントリ表示後の領域に表示するよう調整（仮想エントリ自体は常時表示、Req 1.1）
   - `web/src/components/feed-list.test.tsx` にテストを追加: (a) 購読 0 件でも仮想エントリが描画、(b) 仮想エントリ click で `onSelectAllNewItems` が呼ばれる、(c) viewMode='cross-feed' のとき仮想エントリが `data-selected="true"`、(d) 既存個別フィード行の並び順・スタイルが維持されていること
