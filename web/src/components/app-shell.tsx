@@ -6,6 +6,7 @@ import { FeedList } from "@/components/feed-list";
 import { FeedRegisterDialog } from "@/components/feed-register-dialog";
 import { HeaderSearchBar } from "@/components/header-search-bar";
 import { ItemList } from "@/components/item-list";
+import { CrossFeedItemList } from "@/components/cross-feed-item-list";
 import { StarredItemList } from "@/components/starred-item-list";
 import { StarredNavItem } from "@/components/starred-nav-item";
 import { LogoutButton } from "@/components/logout-button";
@@ -85,6 +86,10 @@ export function AppShell() {
               feeds={feeds ?? []}
               selectedFeedId={state.selectedFeedId}
               onSelectFeed={handleSelectFeed}
+              viewMode={state.viewMode}
+              onSelectAllNewItems={() =>
+                dispatch({ type: "SELECT_ALL_NEW_ITEMS" })
+              }
             />
           )}
         </aside>
@@ -92,10 +97,16 @@ export function AppShell() {
         {/* 右ペイン: 記事一覧 + 記事詳細（検索モード時は SearchResults に切り替わり、通常時は selectedView で切替 / Req 1.3 / 2.x / 4.7） */}
         <main data-testid="right-pane" className="flex-1 overflow-hidden">
           <div className="flex flex-col h-full">
+            {/* 右ペイン分岐の優先順位（Issue #121 / impl-notes Task 6 確認事項に従う）:
+                isSearching > selectedView==='starred' > viewMode==='cross-feed' > 既存 ItemList
+                viewMode==='cross-feed' は SELECT_ALL_NEW_ITEMS によって selectedView='feed' に
+                倒されているため、本分岐は selectedView==='feed' 文脈で評価される。 */}
             {state.isSearching ? (
               <SearchResults />
             ) : state.selectedView === "starred" ? (
               <StarredItemList />
+            ) : state.viewMode === "cross-feed" ? (
+              <CrossFeedItemList />
             ) : (
               <ItemList
                 feedId={state.selectedFeedId}

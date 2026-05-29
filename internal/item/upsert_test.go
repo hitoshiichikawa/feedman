@@ -66,6 +66,19 @@ func (m *mockItemRepo) ListStarredByUser(_ context.Context, _ string, _ time.Tim
 	return nil, nil
 }
 
+// ListNewAcrossFeeds は ItemRepository interface 適合のためのスタブ。
+// upsert 経路のテストでは横断新着取得は対象外（Issue #121）のため、常に nil を返す。
+func (m *mockItemRepo) ListNewAcrossFeeds(
+	_ context.Context,
+	_ string,
+	_ time.Time,
+	_ time.Time,
+	_ string,
+	_ int,
+) ([]repository.CrossFeedItem, error) {
+	return nil, nil
+}
+
 func (m *mockItemRepo) FindByFeedAndGUID(_ context.Context, feedID, guid string) (*model.Item, error) {
 	key := feedID + "|" + guid
 	item, ok := m.byFeedGUID[key]

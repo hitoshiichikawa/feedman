@@ -39,6 +39,20 @@ func (m *mockItemRepoForService) ListStarredByUser(ctx context.Context, userID s
 	return nil, nil
 }
 
+// ListNewAcrossFeeds は ItemRepository interface 適合のためのスタブ。
+// 本サービステストの対象外（Issue #121 のドメインは crossfeed.Service が担う）のため、
+// 常に nil を返してインターフェース要件のみを満たす。
+func (m *mockItemRepoForService) ListNewAcrossFeeds(
+	_ context.Context,
+	_ string,
+	_ time.Time,
+	_ time.Time,
+	_ string,
+	_ int,
+) ([]repository.CrossFeedItem, error) {
+	return nil, nil
+}
+
 func (m *mockItemRepoForService) FindByID(ctx context.Context, id string) (*model.Item, error) {
 	if m.findByIDFn != nil {
 		return m.findByIDFn(ctx, id)

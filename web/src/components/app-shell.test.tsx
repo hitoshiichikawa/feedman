@@ -77,13 +77,39 @@ function createWrapper() {
   };
 }
 
+/** Issue #121: 横断新着一覧 API の固定応答（test 用、Req 4.7 の since_time を保持） */
+const CROSS_FEED_SINCE_TIME = "2026-05-26T10:00:00Z";
+
 /** mockFetchの設定ヘルパー */
 function setupMockFetch() {
-  mockFetch.mockImplementation((url: string) => {
+  mockFetch.mockImplementation((url: string, options?: RequestInit) => {
     if (url === "/api/subscriptions") {
       return Promise.resolve({
         ok: true,
         json: async () => mockSubscriptions,
+      });
+    }
+    // 横断新着一覧 API（GET /api/items/cross-feed）。`since=` パラメータの有無を
+    // テストから観測できるよう常に固定 since_time を返す。
+    if (typeof url === "string" && url.startsWith("/api/items/cross-feed")) {
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          items: [],
+          next_cursor: null,
+          has_more: false,
+          since_time: CROSS_FEED_SINCE_TIME,
+        }),
+      });
+    }
+    // PUT /api/users/me/cross-feed-last-seen の応答（Req 4.3）
+    if (
+      url === "/api/users/me/cross-feed-last-seen" &&
+      options?.method === "PUT"
+    ) {
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({}),
       });
     }
     // 横断スター / 単一フィード両方の記事一覧 API を空配列で返す
@@ -329,5 +355,118 @@ describe("AppShell コンポーネント", () => {
       expect(screen.getByTestId("search-results-empty")).toBeInTheDocument();
     });
     expect(screen.queryByRole("tab", { name: "全て" })).not.toBeInTheDocument();
+  });
+
+  // --- Issue #121 task 9: viewMode 切替配線テスト ---
+
+  it("「すべての新着記事」エントリ click で viewMode='cross-feed' に切替わり、右ペインに CrossFeedItemList が描画されること（Req 1.2）", async () => {
+    const user = userEvent.setup();
+    render(<AppShell />, { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("all-new-items-entry")).toBeInTheDocument();
+    });
+
+    // 初期状態: 「フィードを選択してください」(viewMode='none' + ItemList feedId=null)
+    expect(
+      screen.getByText("フィードを選択してください")
+    ).toBeInTheDocument();
+
+    // 「すべての新着記事」エントリ click → CrossFeedItemList に切替
+    await user.click(screen.getByTestId("all-new-items-entry"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("cross-feed-item-list")).toBeInTheDocument();
+    });
+    // タイトル「すべての新着記事」が右ペインに表示される
+    expect(
+      screen.getByTestId("cross-feed-item-list-title")
+    ).toHaveTextContent("すべての新着記事");
+    // 「フィードを選択してください」案内は消える
+    expect(
+      screen.queryByText("フィードを選択してください")
+    ).not.toBeInTheDocument();
+  });
+
+  it("viewMode='none' のとき既存「フィードを選択してください」表示が維持されること（Req 5.1 非リグレッション）", async () => {
+    render(<AppShell />, { wrapper: createWrapper() });
+
+    // 初期状態は viewMode='none' / selectedView='feed' / selectedFeedId=null
+    await waitFor(() => {
+      expect(
+        screen.getByText("フィードを選択してください")
+      ).toBeInTheDocument();
+    });
+
+    // CrossFeedItemList は描画されていない
+    expect(
+      screen.queryByTestId("cross-feed-item-list")
+    ).not.toBeInTheDocument();
+  });
+
+  it("横断 → 個別 → 横断 の遷移後に crossFeedSessionSince が保持され同一 baseline で fetch されること（Req 4.7）", async () => {
+    const user = userEvent.setup();
+    render(<AppShell />, { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("all-new-items-entry")).toBeInTheDocument();
+    });
+
+    // 1. 横断一覧を開く → 初回 fetch で since_time が baseline として固定される
+    await user.click(screen.getByTestId("all-new-items-entry"));
+
+    await waitFor(() => {
+      // 初回 fetch（cross-feed GET）が呼ばれている
+      const crossFeedCalls = mockFetch.mock.calls.filter(
+        ([url]) => typeof url === "string" && url.startsWith("/api/items/cross-feed")
+      );
+      expect(crossFeedCalls.length).toBeGreaterThanOrEqual(1);
+    });
+
+    // 初回 PUT （Req 4.3）が完了するのを待つ
+    await waitFor(() => {
+      const putCalls = mockFetch.mock.calls.filter(
+        ([url, options]) =>
+          url === "/api/users/me/cross-feed-last-seen" &&
+          (options as RequestInit | undefined)?.method === "PUT"
+      );
+      expect(putCalls).toHaveLength(1);
+    });
+
+    // 2. 個別フィードへ遷移
+    await user.click(screen.getByText("Tech Blog"));
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: "全て" })).toBeInTheDocument();
+    });
+
+    // 3. 横断一覧に戻る
+    await user.click(screen.getByTestId("all-new-items-entry"));
+    await waitFor(() => {
+      expect(screen.getByTestId("cross-feed-item-list")).toBeInTheDocument();
+    });
+
+    // baseline が保持されているため、戻り時の cross-feed fetch には
+    // 固定された since_time が since= として渡されている
+    await waitFor(() => {
+      const sinceCalls = mockFetch.mock.calls
+        .map(([url]) => url as string)
+        .filter(
+          (url) =>
+            typeof url === "string" &&
+            url.startsWith("/api/items/cross-feed") &&
+            url.includes(
+              `since=${encodeURIComponent(CROSS_FEED_SINCE_TIME)}`
+            )
+        );
+      expect(sinceCalls.length).toBeGreaterThanOrEqual(1);
+    });
+
+    // 再度 PUT が呼ばれていない（同一セッション内では touch は 1 回のみ、Req 4.3）
+    const putCallsAfter = mockFetch.mock.calls.filter(
+      ([url, options]) =>
+        url === "/api/users/me/cross-feed-last-seen" &&
+        (options as RequestInit | undefined)?.method === "PUT"
+    );
+    expect(putCallsAfter).toHaveLength(1);
   });
 });
