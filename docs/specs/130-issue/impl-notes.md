@@ -11,6 +11,18 @@
   - 既存 19 テストには一切手を加えず、新規 5 テストを追加することで挙動変更がないことを担保した（NFR 1.1）。
 - 残存課題: なし。task 2 以降で `AppShell` から `dispatch({ type: "CLEAR_SELECTED_FEED" })` を呼ぶ wiring が予定されている（task 5）。本 task の実装はその下流に必要な reducer 機能を提供する。
 
+### Task 2
+
+- 採用方針: design.md「Components and Interfaces > FeedList（Modified）」節および tasks.md task 2 の指示通り、`FeedListProps` に `onOpenSettings: (subscription: Subscription) => void` を追加し、行コンテナを既存 `<button>` から `<div role="button" tabIndex={0}>` に変更してネスト button 問題を回避した。ギアボタン（`<button data-testid="feed-settings-button-<id>">`）を行末尾に配置し、Tailwind の `group-hover` / `group-focus-within` / `focus-visible:opacity-100` で表示制御。
+- 重要な判断:
+  - 行コンテナを `<div>` 化したが、既存テスト（`fireEvent.click(screen.getByText("Tech Blog"))` 等）は `<div>` 上でも click が発火するため互換性を維持できた（NFR 1.1）。`data-testid="feed-item-<id>"` / `data-selected` 属性も維持。
+  - キーボード起動は `onKeyDown(Enter | Space)` で `e.preventDefault()` してから `onSelectFeed` を呼び、`<button>` のネイティブ activate 挙動を再現（AC 1.5 / WAI-ARIA Practice 準拠）。
+  - ギアボタンの `onClick` は `e.stopPropagation()` で行 click ハンドラへの伝搬を止め、加えて `onKeyDown(Enter | Space)` でも `stopPropagation` を行い、ネイティブ button click と親 div の onKeyDown 二重発火を防いだ（AC 1.4 拡張）。
+  - app-shell.tsx の `<FeedList>` 利用箇所には no-op `onOpenSettings={() => {}}` を渡し、task 5 で正式 wiring が入るまで TypeScript エラーのみを解消（NFR 1.1: 挙動は完全に不変）。インライン JSX に渡す関数リテラルだが props 数が 4 件で軽量なため、再レンダ過敏なコンポーネントではない判断で `useCallback` 化はしていない。
+  - 既存 16 件のテストには既存テストの観点（render 後の DOM 表示）を一切壊さずに `onOpenSettings={() => {}}` props のみを追加し、新規 12 件のテストを追加（合計 28 件 pass）。
+  - Tailwind class の検証テスト（`expect(className).toContain("opacity-0")` 等）を入れたのは、`group-hover` 等の CSS 擬似クラスは jsdom が評価しないため、`opacity-0` の解除を runtime で検証できないことの代替として class 文字列レベルで担保するため。
+- 残存課題: なし。task 5 で AppShell の `handleOpenSettings` 実装と wiring を行い、no-op を置き換える予定。
+
 ## 受入基準カバレッジ（task 1 分のみ）
 
 | Requirement | テスト |
