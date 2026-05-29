@@ -143,6 +143,22 @@ type ItemRepository interface {
 	// 他ユーザーのスター記事は一切含まれない（NFR 2.1）。
 	ListStarredByUser(ctx context.Context, userID string, cursor time.Time, limit int) ([]StarredItemRow, error)
 
+	// ListNewAcrossFeeds はユーザーの全購読フィードから sinceTime より後の記事を横断取得する。
+	// items × subscriptions × feeds × item_states を 1 クエリで JOIN し、N+1 を回避する。
+	// cursorPublishedAt がゼロ値かつ cursorItemID が空文字の場合は cursor なし扱いで先頭から取得する。
+	// 非ゼロ値時は (i.published_at, i.id) < (cursorPublishedAt, cursorItemID) のタプル比較で
+	// 安定したページネーションを行う。
+	// 戻り値は published_at DESC, id DESC で決定論的に並ぶ。limit は SQL の LIMIT にそのまま反映され、
+	// 呼び出し側が limit+1 件を要求して HasMore 判定を行う前提（Issue #121 / Req 2.1, 2.2, 2.3, 4.2）。
+	ListNewAcrossFeeds(
+		ctx context.Context,
+		userID string,
+		sinceTime time.Time,
+		cursorPublishedAt time.Time,
+		cursorItemID string,
+		limit int,
+	) ([]CrossFeedItem, error)
+
 	// Create は新規記事を作成する。
 	Create(ctx context.Context, item *model.Item) error
 
@@ -170,6 +186,20 @@ type StarredItemRow struct {
 	model.ItemWithState
 	// FeedTitle は当該記事が所属するフィードのタイトル（feeds.title）。
 	FeedTitle string
+}
+
+// CrossFeedItem はフィード横断新着一覧の 1 行分のデータを表す。
+// model.ItemWithState（記事 + ユーザー状態）に発信元フィードのタイトルと favicon を併記する。
+// Issue #121 / Req 3.1, 3.2 によりフロントエンドで「どのフィードの記事か」と
+// favicon バッジを表示するため、items / feeds / item_states を 1 段で JOIN して取得する。
+type CrossFeedItem struct {
+	model.ItemWithState
+	// FeedTitle は当該記事が所属するフィードのタイトル（feeds.title）。
+	FeedTitle string
+	// FaviconData は当該フィードの favicon バイナリ。未設定の場合は nil（空スライス）。
+	FaviconData []byte
+	// FaviconMime は当該フィードの favicon の MIME タイプ。未設定の場合は空文字列。
+	FaviconMime string
 }
 
 // ExistingItems は同一性判定のための既存記事を guid_or_id / link / content_hash 別に索引した結果。
