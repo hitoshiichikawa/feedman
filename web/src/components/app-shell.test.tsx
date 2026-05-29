@@ -97,6 +97,20 @@ function setupMockFetch() {
         }),
       });
     }
+    // 横断検索 API（GET /api/items/search）を空結果で返す。
+    // ItemSearchResponse の形（items / next_cursor / has_more）を満たさないと
+    // SearchResults の allHits 構築で undefined 要素が混入しクラッシュするため、
+    // 検索モードの空状態表示を検証するには正しい空レスポンス形が必要。
+    if (typeof url === "string" && url.includes("/api/items/search")) {
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          items: [],
+          next_cursor: null,
+          has_more: false,
+        }),
+      });
+    }
     return Promise.resolve({
       ok: true,
       json: async () => ({}),
