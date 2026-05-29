@@ -98,7 +98,7 @@
   - _Requirements: 1.1, 2.1, 2.2, 2.3, 3.1, 3.2, 3.3, 3.4, NFR 1.2_
   - _Depends: 1, 2.1, 3_
 
-- [ ] 5. `AppShell` 統合テストでフィード内検索の連続操作を検証する
+- [x] 5. `AppShell` 統合テストでフィード内検索の連続操作を検証する
   - `web/src/components/app-shell.test.tsx` に統合テストを追加する。fetch モックは既存パターン
     を踏襲し、`/api/feeds`, `/api/items/search`, `/api/items` のレスポンスを差し替える:
     1. フィード選択 → キーワード入力 → Enter で `SearchResults` が表示され、同時に
