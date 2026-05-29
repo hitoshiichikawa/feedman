@@ -44,7 +44,7 @@
   - _Boundary: CrossFeedHandler, CrossFeedServiceAdapter, RouterDeps_
   - _Depends: 4_
 
-- [ ] 6. Frontend: FeedFavicon コンポーネント抽出と AppStateContext 拡張 (P)
+- [x] 6. Frontend: FeedFavicon コンポーネント抽出と AppStateContext 拡張 (P)
   - `web/src/components/feed-favicon.tsx` を新規作成し、既存 `web/src/components/feed-list.tsx` 内 private function `FeedFavicon` を **挙動不変** で切り出す（props 型 `{ feedId: string; faviconURL: string | null; feedTitle: string }` も同じ）。エクスポートは named export
   - `web/src/components/feed-favicon.test.tsx` を新規作成し既存挙動を保護: (a) faviconURL あり時に `<img>` 描画、(b) faviconURL null 時に `Rss` 代替アイコン描画、(c) `<img>` の `onError` で `Rss` に切替
   - `web/src/components/feed-list.tsx` を修正して新規 `feed-favicon.tsx` から import するように変更（内部 private function 定義は削除）
