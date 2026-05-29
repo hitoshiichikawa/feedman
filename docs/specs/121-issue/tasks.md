@@ -15,7 +15,7 @@
   - _Boundary: UserCrossFeedViewRepository_
   - _Depends: 1_
 
-- [ ] 3. ItemRepository.ListNewAcrossFeeds の追加（横断 JOIN クエリ実装） (P)
+- [x] 3. ItemRepository.ListNewAcrossFeeds の追加（横断 JOIN クエリ実装） (P)
   - `internal/repository/interfaces.go` の `ItemRepository` interface に `ListNewAcrossFeeds(ctx, userID, sinceTime, cursorPublishedAt, cursorItemID, limit) ([]CrossFeedItem, error)` を追加し、`CrossFeedItem struct { model.ItemWithState; FeedTitle string; FaviconData []byte; FaviconMime string }` を新設
   - `internal/repository/postgres_item_repo.go` に `ListNewAcrossFeeds` を実装。`items i JOIN subscriptions s ON s.feed_id=i.feed_id AND s.user_id=$1 JOIN feeds f ON f.id=i.feed_id LEFT JOIN item_states st ON st.item_id=i.id AND st.user_id=$1 WHERE i.published_at > $2 [AND (i.published_at, i.id) < ($3, $4)] ORDER BY i.published_at DESC, i.id DESC LIMIT $N` のクエリを構築（cursor 有無で分岐）
   - `internal/repository/postgres_item_repo_test.go` に integration test 3 件以上を追加: (a) 2 フィード購読 + 6 記事で `sinceTime` 以後の記事が `published_at DESC, id DESC` で取得される、(b) 同一 published_at で id 降順タイブレーク、(c) cursor 指定時に複合キー境界で次ページが正しく返る
