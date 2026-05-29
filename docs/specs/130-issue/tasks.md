@@ -58,7 +58,7 @@
   - _Boundary: AppShell_
   - _Depends: 2, 4_
 
-- [ ] 6. AppShell: 統合テスト（ホバー → ダイアログ → 解除 → 右ペインクリア / 非クリア / 失敗時）
+- [x] 6. AppShell: 統合テスト（ホバー → ダイアログ → 解除 → 右ペインクリア / 非クリア / 失敗時）
   - `web/src/components/app-shell.test.tsx` に以下のシナリオを追加する（既存テストパターン: `QueryClientProvider` + `AppStateProvider` + `ThemeProvider` を踏襲、`mockFetch` で HTTP を制御）:
     - (a) フィード行ホバー（`pointerEnter` / `mouseEnter`）→ ギアアイコン表示 → クリック → 「フィードの設定」ダイアログが表示される（AC 1.3, 2.1）
     - (b) ダイアログのキャンセル / Esc で閉じる（AC 2.5）
