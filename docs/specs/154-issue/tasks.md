@@ -19,7 +19,7 @@
   - _Boundary: types/item.ts_
   - _Depends: 1_
 
-- [ ] 3. 共通コンポーネント `ItemMetaActions` の新規作成 (P)
+- [x] 3. 共通コンポーネント `ItemMetaActions` の新規作成 (P)
   - `web/src/components/item-meta-actions.tsx` を新規作成する
   - Props: `{ itemId: string; isStarred: boolean; hatebuCount: number; hatebuFetchedAt: string | null; onToggleStar: (itemId: string, nextStarred: boolean) => void }`
   - はてブ数表示: `hatebuFetchedAt === null ? "-" : String(hatebuCount)` を `<span data-testid={"item-hatebu-count-" + itemId}>` で表示（`Bookmark` アイコン + 数値）
