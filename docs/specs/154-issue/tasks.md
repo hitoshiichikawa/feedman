@@ -52,7 +52,7 @@
   - _Boundary: ItemList, StarredItemList, ItemRow_
   - _Depends: 3, 4_
 
-- [ ] 6. `SearchResults` への `ItemMetaActions` 配線
+- [x] 6. `SearchResults` への `ItemMetaActions` 配線
   - `web/src/components/search-results.tsx` の `SearchResultRowProps` に `onToggleStar: (itemId: string, nextStarred: boolean) => void` を追加する
   - `SearchResultRow` 内のタイトル行で、既存の読み取り専用 `Star` アイコン（`data-testid={"search-result-star-" + id}`）を削除し、日時表示の右隣に `<ItemMetaActions ... />` を配置する（`hatebuCount={hit.hatebu_count}` / `hatebuFetchedAt={hit.hatebu_fetched_at}` / `isStarred={hit.is_starred}` / `onToggleStar={onToggleStar}` を渡す）
   - `SearchResults` 本体で `<SearchResultRow ... onToggleStar={handleToggleStar} />` を渡す
