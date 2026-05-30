@@ -91,3 +91,53 @@
     `undefined ?? null` 正規化」の方針は、本コンポーネントが props として正規化済みの
     `string | null` を受け取るため、本コンポーネント自体には影響しない（正規化は呼び出し側
     Task 6 で担保）。
+
+### Task 4
+
+- 採用方針: 既存 `useToggleStar` の `["items"]` 楽観更新パターン（cancelQueries →
+  getQueriesData snapshot → setQueryData で `pages[].items[].is_starred` を反転）を
+  `["item-search"]` にもそのまま複製し、3 フェーズ（onMutate / onError / onSettled）の
+  すべてで対称的に扱う構造とした。`["cross-feed-items"]` は task 指示に従い既存どおり
+  invalidate のみ（楽観更新の対象外）として、本 task のスコープを `["item-search"]`
+  追加に限定した。
+- 重要な判断:
+  - **context shape の拡張方針**: design.md 行 373-377 の `ToggleStarContext`
+    （`previousItems` / `previousSearch` / `previousCrossFeed` 3 グループ）を踏襲しつつ、
+    実装側は `previousCrossFeed` を含めない（cross-feed は invalidate のみで snapshot 不要)。
+    また既存 `previousData` フィールドを `previousItems` の alias として残置する後方互換
+    措置を採った（外部からの参照可能性は低いが、明示的に context type を `useMutation`
+    に注入する都合上、コードレベルで shape diff を最小化する判断）。alias の cleanup は
+    Issue 完結後の cleanup PR で実施する想定。
+  - **`["cross-feed-items"]` を楽観更新の対象外としたこと**: tasks.md 4 行目 / design.md
+    行 340-342 は `["items"]` と `["item-search"]` のみを楽観更新対象として明示しており、
+    `["cross-feed-items"]` は invalidate のみで設計上は十分（onSettled で必ず refetch される
+    ため、UI ラグは数百 ms 範囲）。design.md 行 376 の `previousCrossFeed` は将来の拡張
+    余地として残された設計記述だが、本 task ではスコープ外として扱う。
+  - **テストの cache seeding パターン**: 既存テストは `createWrapper()` が render ごとに
+    新しい QueryClient を作る設計だったため、テスト本体から `setQueryData` で seed したり
+    `getQueryData` で観測したりすることができなかった。本 task では追加テスト用に
+    `createSharedClientWrapper()` ヘルパーを新設し、`queryClient` と `wrapper` を同一
+    インスタンスから返すことで cache 操作と hook 呼び出しを共有 QueryClient 上で行えるよう
+    にした。これにより onMutate 直後の楽観更新と onError 後のロールバックを
+    `queryClient.getQueryData(searchKey)` で直接検証できる。
+  - **エラー mock の方針**: `apiClient.put` は non-ok response で `ApiError` を throw する
+    実装のため、`mockFetch.mockResolvedValue({ ok: false, status: 500, text: async () => ... })`
+    の形で 500 を返すと mutation が isError 状態に遷移する。これは既存 `use-cross-feed-items`
+    / `use-items` のテストで使われている定番パターンと整合。
+  - **テストファイル拡張子の齟齬**: tasks.md 行 40 は `web/src/hooks/use-item-state.test.ts`
+    と指定しているが、既存実装ファイルが `.test.tsx` 拡張（QueryClientProvider の JSX を
+    使う都合）であり、テストを別ファイルに分離するとモック共有や fixture 重複が発生する。
+    本 task では既存 `use-item-state.test.tsx` にそのまま追記する判断とした。これは
+    spec の細部齟齬であり PR 確認事項にも記載予定。
+  - **テスト件数**: AC (a)(b)(c) の 3 件 + cache 不在時の robustness 1 件の合計 4 件を
+    追加。(c) は既存挙動非回帰を「失敗系で `["items"]` もロールバックされる」観点で 1
+    ケース直接検証する形にした（既存テスト 3 件の pass で間接的に担保されている既存挙動を、
+    1 ケースだけ明示的に固定する規律）。
+- 残存課題:
+  - `previousData` alias の cleanup は Issue 完結後の cleanup PR で実施予定。現状で
+    外部から参照されていないが、context shape の 1st-class フィールドとして残置中。
+  - tsc baseline の既存 TS エラー（Task 2 で記録した 4 ファイル）は本 task では非影響。
+    Task 5 / 6 / 7 でも触れない方針を継続。
+  - `["cross-feed-items"]` への楽観更新が将来必要になった場合（例: cross-feed 一覧で
+    スター操作直後に表示反映の遅延が UX 上問題になるなど）は、design.md 行 376 の
+    `previousCrossFeed` グループを参考に追加実装する。本 task ではスコープ外。
