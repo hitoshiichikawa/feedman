@@ -11,7 +11,7 @@
   - _Requirements: 5.1, 5.2, 5.3, 5.4_
   - _Boundary: itemSearchHitResponse, ItemSearchServiceAdapter, ItemSearchSummary, ItemSearchHit, SearchByUserAndKeyword_
 
-- [ ] 2. TypeScript 型 `ItemSearchHit` への `hatebu_fetched_at` 追加 (P)
+- [x] 2. TypeScript 型 `ItemSearchHit` への `hatebu_fetched_at` 追加 (P)
   - `web/src/types/item.ts` の `ItemSearchHit` interface に `hatebu_fetched_at: string | null` を追加する
   - 既存 doc コメント「省略: `hatebu_fetched_at`」の記述を削除し、新フィールドの意味（未取得時は null、取得済みなら RFC3339 文字列）を追記する
   - 既存 `ItemSearchResponse` / 他フィールドの構造は不変であることを担保する
