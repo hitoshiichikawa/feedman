@@ -31,7 +31,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 2.1, 2.3, NFR 1.1, NFR 1.2, NFR 1.3, NFR 1.4, NFR 2.1_
   - _Boundary: ItemMetaActions_
 
-- [ ] 4. `useToggleStar` の `["item-search"]` キャッシュ拡張
+- [x] 4. `useToggleStar` の `["item-search"]` キャッシュ拡張
   - `web/src/hooks/use-item-state.ts` の `useToggleStar` を改修する
   - `onMutate`: 既存の `["items"]` 処理に加えて `queryClient.cancelQueries({ queryKey: ["item-search"] })` と `getQueriesData<InfiniteData<ItemSearchResponse>>({ queryKey: ["item-search"] })` のスナップショットを取得し、`setQueryData` で `pages[].items[].is_starred` を反転更新する
   - `onError`: 既存の `previousData` 復元に加えて `["item-search"]` の `previousData` も復元する
