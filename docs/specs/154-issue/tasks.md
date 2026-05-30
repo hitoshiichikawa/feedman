@@ -62,7 +62,7 @@
   - _Boundary: SearchResults, SearchResultRow_
   - _Depends: 2, 3, 4_
 
-- [ ] 7. `ItemDetail` ヘッダーからのメタ撤去
+- [x] 7. `ItemDetail` ヘッダーからのメタ撤去
   - `web/src/components/item-detail.tsx` のタイトル右側 `<div data-testid="item-detail-meta-group">` 全体（`hatebu-count` 表示 + `star-toggle` Button）を削除する
   - タイトル `<h3>` / タイトルリンク / `item-detail-title-row` / 著者表示 / 元記事リンク / 本文サニタイズ + 折りたたみ / 「続きを読む」トグル / 展開時の自動既読化 `useEffect` は不変であることを担保する
   - `ItemDetailProps` の `onToggleStar` prop は型互換維持のため残置するが、本体内で使用しないことを TSDoc コメントで明示する（cleanup は別 Issue）
