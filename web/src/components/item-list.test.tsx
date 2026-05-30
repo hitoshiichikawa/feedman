@@ -602,7 +602,7 @@ describe("ItemList コンポーネント: 記事詳細の展開表示", () => {
     expect(row).not.toContainElement(content);
   });
 
-  it("展開中の記事詳細にスター切替・はてブ数・元記事リンクが表示されること", async () => {
+  it("展開中の記事詳細に元記事リンクが表示され、はてブ数・スター切替は一覧側に集約されていること（Issue #154 Req 3.1 / 3.2）", async () => {
     // Arrange
     setupMockFetchWithDetail();
 
@@ -617,12 +617,17 @@ describe("ItemList コンポーネント: 記事詳細の展開表示", () => {
       { wrapper: createWrapper() }
     );
 
-    // Assert: AC 1.3
+    // Assert: 元記事リンクは詳細ヘッダーに残存する
     await waitFor(() => {
-      expect(screen.getByTestId("star-toggle")).toBeInTheDocument();
+      expect(screen.getByTestId("original-link")).toBeInTheDocument();
     });
-    expect(screen.getByTestId("hatebu-count")).toBeInTheDocument();
-    expect(screen.getByTestId("original-link")).toBeInTheDocument();
+    // Issue #154 Req 3.1 / 3.2: はてブ数・スター切替トグル・メタ情報グループは詳細ヘッダーから撤去された
+    expect(screen.queryByTestId("hatebu-count")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("star-toggle")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("item-detail-meta-group")).not.toBeInTheDocument();
+    // 一覧行側には新規 testid `item-star-toggle-${id}` / `item-hatebu-count-${id}` が出現
+    expect(screen.getByTestId("item-star-toggle-item-1")).toBeInTheDocument();
+    expect(screen.getByTestId("item-hatebu-count-item-1")).toBeInTheDocument();
   });
 
   it("いずれの記事も選択されていない場合は記事詳細エリアを表示しないこと", async () => {
@@ -756,7 +761,7 @@ describe("ItemList コンポーネント: 記事詳細の展開表示", () => {
     );
   });
 
-  it("詳細のスター切替ボタン押下でスター反転の更新リクエストを送信すること", async () => {
+  it("一覧側のスター切替ボタン押下でスター反転の更新リクエストを送信すること（Issue #154 Req 3.2 でスター操作は一覧側に集約）", async () => {
     // Arrange
     const user = userEvent.setup();
     setupMockFetchWithDetail();
@@ -773,10 +778,10 @@ describe("ItemList コンポーネント: 記事詳細の展開表示", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByTestId("star-toggle")).toBeInTheDocument();
+      expect(screen.getByTestId("item-star-toggle-item-1")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByTestId("star-toggle"));
+    await user.click(screen.getByTestId("item-star-toggle-item-1"));
 
     // Assert: AC 4.1（is_starred: false → true への反転を要求）
     await waitFor(() => {
