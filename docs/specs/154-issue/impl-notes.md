@@ -199,3 +199,62 @@
     非影響。
   - 本 task 完了時点で `cd web && npm test -- --run`（398 件）/ `npm run lint`
     （0 errors）は全 green。Go 側は本 task では変更なし。
+
+### Task 6
+
+- 採用方針: `SearchResultRowProps` に `onToggleStar: (itemId, nextStarred) => void` を
+  必須追加し、タイトル行内の `<span>` 日時表示の右隣（既存の読み取り専用 `Star`
+  アイコンがあった位置）に Task 3 で実装済みの `ItemMetaActions` を配置した。
+  `SearchResults` 本体で既存の `handleToggleStar` を `SearchResultRow` に
+  pass-through する形で配線し、Task 5 の `ItemList` / `StarredItemList` /
+  `CrossFeedItemList` と合わせて 3 一覧（通常 / スター横断 / 検索結果）すべてが
+  共通の `ItemMetaActions` を経由して `useToggleStar` mutation を発火する経路に
+  統一した（Req 1.1〜1.7 / 2.3 / 4.3 / 5.3 / 5.4）。
+- 重要な判断:
+  - **`hit.hatebu_fetched_at` の `?? null` 正規化**: Task 1 で Go 側 JSON タグを
+    `omitempty` で確定したため、検索 API レスポンスは未取得時にキーを省略する
+    （JSON 上は `undefined`）。Task 2 で TypeScript 型を `string | null` の必須
+    プロパティで定義したため厳密には `undefined` が来ないはずだが、design.md
+    Notes for Developers の方針に従い `hit.hatebu_fetched_at ?? null` で
+    防御的に正規化した。これは Task 5 の `ItemList` 配線（`item.hatebu_fetched_at`
+    をそのまま渡す）と差異があるが、`ItemSummary` 側は API の `omitempty` が
+    無い前提で `null` がそのまま来るのに対し、`ItemSearchHit` は将来の API
+    変更で `undefined` 化されても影響を受けない設計を優先した判断。
+  - **`onToggleStar` を必須 prop にした判断**: Task 5 の `ItemRow` と同じく
+    optional + default no-op ではなく必須プロパティとし、`SearchResults`
+    呼び出し側で必ず配線する規律を型レベルで強制した（NFR 3.2 の整合性確保）。
+  - **既存 `search-result-star-${id}` testid の撤去**: tasks.md の指示通り
+    完全削除した。既存テストは「既読記事と未読記事でスタイル状態が data-read
+    属性で区別されること」で `search-result-star-item-2` の存在 / 非存在を
+    検証していたため、`item-star-toggle-${id}` の aria-pressed 検証に置換した
+    （NFR 3.2 の「等価後継識別子で置き換える」要件）。
+  - **`<button>` ネスト警告**: Task 5 で記録した通り、`SearchResultRow` 自体が
+    `<button data-testid="search-result-row-${id}">` で行全体をクリック可能に
+    している既存設計のため、内側に `<Button data-testid="item-star-toggle-${id}">`
+    を配置すると `<button>` cannot contain a nested `<button>` の hydration
+    warning が React DevTools から出力される（テストでも stderr 出力されるが
+    13 件全 pass）。これは本 task の design.md / tasks.md が暗黙的に要求する
+    構造の結果で、本 task では既存構造を踏襲する判断を継続。PR 本文「確認事項」に
+    引き続き残し別 Issue 化を提案する。
+  - **テスト件数**: search-results.test.tsx に Task 6 関連 4 件（hatebu null →
+    `-` 分岐 / hatebu 取得済み数値分岐 [0 件・多数の境界 2 ケース] / 伝播抑止 +
+    mutation / testid 出現と旧 testid 撤去）を追加。既存 9 件は data-read
+    区別テストの testid 置換を除いて不変で非回帰を担保。test 全件 13 件 pass。
+  - **mock fetch のパターン**: 既存 `setupSearchFetch` / `setupErrorFetch`
+    ヘルパーは検索 API のみを ok 応答する設計だったため、mutation PUT テスト
+    では mockFetch を直接 `.mockImplementation` で上書きし、検索 API と
+    `/api/items/item-1/state` PUT の両方をルーティングする形にした。これは
+    item-list.test.tsx の `setupMockFetchWithDetail` と類似のパターン。
+- 残存課題:
+  - **HTML ネスト構造の整理**: Task 5 で記録した通り `<button>` 内 `<button>`
+    の警告は別 Issue で `SearchResultRow` / `ItemRow` を `<div role="button">`
+    化するか、行クリック展開を別 div の onClick へ分離する形で解消するのが
+    望ましい。本 task でも継続。PR 本文「確認事項」に記載予定。
+  - Task 7（ItemDetail ヘッダーメタ撤去）が後続。本 task で `item-detail.tsx` の
+    `star-toggle` / `hatebu-count` testid は撤去していない（Task 7 の責務）。
+    新規 testid `item-star-toggle-${id}` / `item-hatebu-count-${id}` は一意化
+    により衝突しない（NFR 3.3 を担保）。
+  - tsc baseline の既存 TS エラー（Task 2 で記録した 4 ファイル）は本 task では
+    非影響。
+  - 本 task 完了時点で `cd web && npm test -- --run`（402 件）/ `npm run lint`
+    （0 errors / 5 既存 warnings）/ `go test ./...` / `go vet ./...` は全 green。
