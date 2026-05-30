@@ -274,6 +274,165 @@ describe("StarredItemList コンポーネント", () => {
     ).toBe(true);
   });
 
+  // --- Issue #154 / Task 5: 横断スター一覧での ItemMetaActions 配線 ---
+  //
+  // (a) item-hatebu-count + item-star-toggle が各行右端に出現する
+  // (b) スター⭐️トグルクリックで mutation が呼ばれ、expandedItemId が変化しない（伝播抑止）
+  // (c) is_starred=true/false の見た目分岐（既存 page1 は両方 true のため null 補助は別記事行で確認）
+  // (d) 既存無限スクロール / 既読薄表示 / feed_title 併記の非回帰は既存テスト群で担保
+  it("横断スター一覧の各行右端に ItemMetaActions（item-hatebu-count + item-star-toggle）が出現し、既存 star-${id} が撤去されること（Req 1.1 / 1.2 / 4.2 / NFR 3.2）", async () => {
+    // Arrange / Act
+    mockFetch.mockImplementation((url: string) => {
+      if (typeof url === "string" && url.startsWith("/api/feeds/starred/items")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => mockStarredPage1,
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    render(<StarredItemList />, { wrapper: createWrapper() });
+
+    // Assert
+    await waitFor(() => {
+      expect(screen.getByText("Feed A の最新スター記事")).toBeInTheDocument();
+    });
+
+    expect(
+      screen.getByTestId("item-hatebu-count-item-1")
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("item-star-toggle-item-1")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("item-hatebu-count-item-2")
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("item-star-toggle-item-2")).toBeInTheDocument();
+    // 既存読み取り専用 Star testid（star-${id}）は撤去された
+    expect(screen.queryByTestId("star-item-1")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("star-item-2")).not.toBeInTheDocument();
+  });
+
+  it("hatebu_fetched_at の値に応じて `-` / 整数値を切り替えて表示すること（Req 1.3 / 1.4）", async () => {
+    // Arrange / Act
+    mockFetch.mockImplementation((url: string) => {
+      if (typeof url === "string" && url.startsWith("/api/feeds/starred/items")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => mockStarredPage1,
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    render(<StarredItemList />, { wrapper: createWrapper() });
+
+    // Assert: item-1 は取得済み hatebu_count=10 → "10"、item-2 は未取得 → "-"
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("item-hatebu-count-item-1")
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("item-hatebu-count-item-1")).toHaveTextContent(
+      "10"
+    );
+    expect(screen.getByTestId("item-hatebu-count-item-2")).toHaveTextContent(
+      "-"
+    );
+  });
+
+  it("一覧上のスター⭐️トグルクリックで mutation が呼ばれ、expandedItemId が変化しないこと（Req 2.1 / 2.3 / NFR 2.1）", async () => {
+    // Arrange
+    const user = userEvent.setup();
+    mockFetch.mockImplementation((url: string) => {
+      if (typeof url === "string" && url.startsWith("/api/feeds/starred/items")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => mockStarredPage1,
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    let latestState: ReturnType<typeof useAppState> | null = null;
+    render(
+      <>
+        <StarredItemList />
+        <StateProbe
+          onReady={(_d, state) => {
+            latestState = state;
+          }}
+        />
+      </>,
+      { wrapper: createWrapper() }
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("item-star-toggle-item-1")).toBeInTheDocument();
+    });
+
+    // Initial state: expandedItemId is null
+    expect(latestState?.expandedItemId).toBeNull();
+
+    // Act: click star toggle (item-1 is currently is_starred=true so PUT is_starred=false)
+    await user.click(screen.getByTestId("item-star-toggle-item-1"));
+
+    // Assert: PUT /api/items/item-1/state が is_starred=false で発火
+    await waitFor(() => {
+      expect(mockFetch).toHaveBeenCalledWith(
+        "/api/items/item-1/state",
+        expect.objectContaining({
+          method: "PUT",
+          body: JSON.stringify({ is_starred: false }),
+        })
+      );
+    });
+    // expandedItemId は null のまま（行クリック展開へ伝播していない）
+    expect(latestState?.expandedItemId).toBeNull();
+  });
+
+  it("is_starred の状態に応じて aria-pressed / aria-label が切り替わること（Req 1.5 / 1.6 / NFR 1.1 / 1.2）", async () => {
+    // Arrange: item-1 / item-2 は両方 is_starred=true、追加でカスタムレスポンスで 1 件 false を返す
+    const mixedResponse: StarredItemListResponse = {
+      items: [
+        {
+          ...mockStarredPage1.items[0],
+          id: "item-mixed-true",
+          is_starred: true,
+        },
+        {
+          ...mockStarredPage1.items[0],
+          id: "item-mixed-false",
+          is_starred: false,
+        },
+      ],
+      next_cursor: null,
+      has_more: false,
+    };
+    mockFetch.mockImplementation((url: string) => {
+      if (typeof url === "string" && url.startsWith("/api/feeds/starred/items")) {
+        return Promise.resolve({ ok: true, json: async () => mixedResponse });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    // Act
+    render(<StarredItemList />, { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("item-star-toggle-item-mixed-true")
+      ).toBeInTheDocument();
+    });
+
+    // Assert
+    const toggleTrue = screen.getByTestId("item-star-toggle-item-mixed-true");
+    const toggleFalse = screen.getByTestId("item-star-toggle-item-mixed-false");
+    expect(toggleTrue).toHaveAttribute("aria-pressed", "true");
+    expect(toggleTrue).toHaveAttribute("aria-label", "スターを解除する");
+    expect(toggleFalse).toHaveAttribute("aria-pressed", "false");
+    expect(toggleFalse).toHaveAttribute("aria-label", "スターを付ける");
+  });
+
   it("記事行クリックで EXPAND_ITEM が dispatch されて expandedItemId が更新されること（Req 2.8 / 3.1）", async () => {
     const user = userEvent.setup();
     mockFetch.mockImplementation((url: string) => {

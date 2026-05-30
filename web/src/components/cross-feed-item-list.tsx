@@ -187,6 +187,7 @@ export function CrossFeedItemList() {
                     item={itemSummary}
                     isExpanded={isExpanded}
                     onClick={() => handleSelectItem(item.id)}
+                    onToggleStar={handleToggleStar}
                   />
                   {/* フィード badge: favicon + フィード名（Req 3.1, 3.2, 3.4） */}
                   <div

@@ -848,6 +848,126 @@ describe("ItemList コンポーネント: 記事詳細の展開表示", () => {
     expect(screen.getAllByTestId("item-content")).toHaveLength(1);
   });
 
+  // --- Issue #154 / Task 5: 一覧行右端 ItemMetaActions 配線（Req 1.1〜1.7 / 2.3 / 2.5 / 4.1 / NFR 3.2） ---
+  //
+  // 詳細展開 ItemDetailArea テストと同じ describe ブロック配下に置く（fetch ルーティング
+  // を `setupMockFetchWithDetail` 経由で確保できるため）。
+  it("一覧行の右端に ItemMetaActions（item-hatebu-count + item-star-toggle）が出現すること（Req 1.1 / 1.2 / NFR 3.2）", async () => {
+    // Arrange / Act
+    setupMockFetch();
+    render(
+      <ItemList
+        feedId="feed-1"
+        onSelectItem={() => {}}
+        expandedItemId={null}
+        filter="all"
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    // Assert: 一覧の各行に新規 testid が出現し、既存読み取り専用 Star（star-${id}）は撤去
+    await waitFor(() => {
+      expect(screen.getByTestId("item-row-item-1")).toBeInTheDocument();
+    });
+
+    const row1 = screen.getByTestId("item-row-item-1");
+    expect(within(row1).getByTestId("item-hatebu-count-item-1")).toBeInTheDocument();
+    expect(within(row1).getByTestId("item-star-toggle-item-1")).toBeInTheDocument();
+    // 既存読み取り専用 Star testid は撤去された
+    expect(screen.queryByTestId("star-item-1")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("star-item-2")).not.toBeInTheDocument();
+  });
+
+  it("hatebu_fetched_at が null のときは数値ではなく `-` を表示すること（Req 1.3）", async () => {
+    // Arrange / Act
+    setupMockFetch();
+    render(
+      <ItemList
+        feedId="feed-1"
+        onSelectItem={() => {}}
+        expandedItemId={null}
+        filter="all"
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    // Assert: item-2 は hatebu_fetched_at = null のため `-` を表示
+    await waitFor(() => {
+      expect(screen.getByTestId("item-hatebu-count-item-2")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("item-hatebu-count-item-2")).toHaveTextContent("-");
+    // 取得済み記事（item-1）は数値 "10" を表示する
+    expect(screen.getByTestId("item-hatebu-count-item-1")).toHaveTextContent("10");
+  });
+
+  it("is_starred=true のとき塗りつぶしアイコン、false のときアウトラインアイコンを表示すること（Req 1.5 / 1.6）", async () => {
+    // Arrange / Act
+    setupMockFetch();
+    render(
+      <ItemList
+        feedId="feed-1"
+        onSelectItem={() => {}}
+        expandedItemId={null}
+        filter="all"
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    // Assert: item-1 は is_starred=false / item-2 は is_starred=true
+    await waitFor(() => {
+      expect(screen.getByTestId("item-star-toggle-item-1")).toBeInTheDocument();
+    });
+
+    const toggle1 = screen.getByTestId("item-star-toggle-item-1");
+    const toggle2 = screen.getByTestId("item-star-toggle-item-2");
+    expect(toggle1).toHaveAttribute("aria-pressed", "false");
+    expect(toggle1).toHaveAttribute("aria-label", "スターを付ける");
+    expect(toggle2).toHaveAttribute("aria-pressed", "true");
+    expect(toggle2).toHaveAttribute("aria-label", "スターを解除する");
+    // 塗り分け: 黄色 class はスター付きのみ、未スターは muted-foreground のみ
+    const star2 = toggle2.querySelector("svg");
+    expect(star2?.getAttribute("class") ?? "").toContain("fill-yellow-400");
+    const star1 = toggle1.querySelector("svg");
+    expect(star1?.getAttribute("class") ?? "").not.toContain("fill-yellow-400");
+  });
+
+  it("スター⭐️トグルクリックで mutation を発火し、行クリック展開（onSelectItem）に伝播しないこと（Req 2.1 / 2.3 / NFR 2.1）", async () => {
+    // Arrange
+    const user = userEvent.setup();
+    const onSelectItem = vi.fn();
+    setupMockFetch();
+
+    // Act
+    render(
+      <ItemList
+        feedId="feed-1"
+        onSelectItem={onSelectItem}
+        expandedItemId={null}
+        filter="all"
+      />,
+      { wrapper: createWrapper() }
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("item-star-toggle-item-1")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByTestId("item-star-toggle-item-1"));
+
+    // Assert: mutation 用 PUT が is_starred 反転で送信される
+    await waitFor(() => {
+      expect(mockFetch).toHaveBeenCalledWith(
+        "/api/items/item-1/state",
+        expect.objectContaining({
+          method: "PUT",
+          body: JSON.stringify({ is_starred: true }),
+        })
+      );
+    });
+    // 行クリック展開コールバック onSelectItem は発火しない（伝播抑止）
+    expect(onSelectItem).not.toHaveBeenCalled();
+  });
+
   it("展開中の記事を閉じる（expandedItemId=null）と詳細エリアが消えること", async () => {
     // Arrange
     setupMockFetchWithDetail();
