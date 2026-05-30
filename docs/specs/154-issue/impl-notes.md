@@ -258,3 +258,82 @@
     非影響。
   - 本 task 完了時点で `cd web && npm test -- --run`（402 件）/ `npm run lint`
     （0 errors / 5 既存 warnings）/ `go test ./...` / `go vet ./...` は全 green。
+
+### Task 7
+
+- 採用方針: `ItemDetail` ヘッダーのタイトル右側 `<div data-testid="item-detail-meta-group">`
+  全体（`hatebu-count` 表示 + `star-toggle` Button）を削除し、タイトル行は
+  `item-detail-title-row` 配下の `<h3>` タイトルリンク 1 要素のみに簡素化した。
+  著者表示 / 区切り・元記事リンク / 本文サニタイズ + 折りたたみ + 「続きを読む」
+  トグル / 展開時自動既読化 `useEffect` は完全に不変。Task 5 / 6 で配線済みの
+  一覧側 `ItemMetaActions`（`item-star-toggle-${id}` / `item-hatebu-count-${id}`）
+  にスター操作・はてブ数表示の責務が集約された（Req 3.1 / 3.2 / 3.3 / 3.4 / NFR 3.3）。
+- 重要な判断:
+  - **`ItemDetailProps.onToggleStar` の残置方針**: tasks.md 指示通り型シグネチャ
+    を残しつつ、関数本体の destructuring から外して未使用扱いにした。TSDoc に
+    「型互換維持のため残置するが、本コンポーネント本体では使用しない（Issue #154
+    Task 7 で詳細ヘッダーからメタを撤去し、スター操作は一覧側 ItemMetaActions に
+    集約された）。prop 自体の cleanup は別 Issue で行う」と明示。これにより
+    呼び出し側 `item-list.tsx` / `starred-item-list.tsx` / `cross-feed-item-list.tsx`
+    / `search-results.tsx` の `<ItemDetail ... onToggleStar={handleToggleStar} />`
+    呼び出しは breaking change を起こさず、cleanup PR で prop 削除と呼び出し側の
+    pass 除去を一括して行える。
+  - **import 削減**: `Star` / `Bookmark` の lucide-react import を削除。`Button` は
+    「続きを読む / 折りたたむ」トグル（`content-toggle`）で引き続き使用するため
+    残置、`cn` は `item-content` の className 合成で残置、`ExternalLink` は元記事
+    リンクで残置、`sanitizeContentHtml` / `useEffect` / `useLayoutEffect` /
+    `useMemo` / `useRef` / `useState` も全て本文折りたたみで残置。
+  - **タイトル行のレイアウト調整**: 旧実装は `<div className="flex items-start gap-3">`
+    で title 行を flex layout にして、`<h3 className="flex-1 min-w-0">` で title を
+    伸縮可能領域に置き、右側に固定幅 meta グループを配置していた。meta グループ
+    撤去後は flex の意味が無くなるため、`<div data-testid="item-detail-title-row">`
+    から `flex items-start gap-3` を、`<h3>` から `flex-1 min-w-0` を削除した
+    （タイトル単独配置で `min-w-0` 等の shrink hint は不要）。`item-detail-title-row`
+    testid 自体は test の構造検証で利用されるため維持。
+  - **既存テストの撤去 vs 否定検証への置換方針**: 旧 `item-detail.test.tsx` には
+    Issue #116 由来の「ヘッダーレイアウトと操作系の集約」describe（414 行）が
+    存在し、`hatebu-count` / `star-toggle` / `item-detail-meta-group` testid を
+    前提とした 16 件のテストが含まれていた。task 7 で当該 testid が DOM から消える
+    ため、これらは全件削除した（test を残して assertion を反転すると検証粒度が
+    崩れるため、削除 + 新規 describe `詳細ヘッダーからのはてブ数・スター撤去（#154）`
+    で AC 3.1 / 3.2 / NFR 3.3 を **明示的に non-existence で検証する 6 件 + Req 3.3
+    の維持確認 3 件 + 著者不在の境界ケース 1 件** を追加する形に再構成）。
+    タイトル / 著者 / 元記事リンク / 本文表示 / 折りたたみ / 自動既読化 /
+    サニタイズ系のテストはタッチせず継続して全 pass。
+  - **`item-list.test.tsx` への波及**: tasks.md の `_Boundary:_` は `ItemDetail`
+    のみだが、`item-list.test.tsx` の 2 件のテスト（「展開中の記事詳細にスター
+    切替・はてブ数・元記事リンクが表示されること」「詳細のスター切替ボタン押下で
+    スター反転の更新リクエストを送信すること」）が ItemDetail 内の `star-toggle` /
+    `hatebu-count` testid を参照していたため、これらが破綻する。boundary を逸脱
+    せずに「既存テストを壊さない」規約を満たすため、両テストを Task 7 の意味論に
+    合わせて更新した:
+    - 前者は「元記事リンクは詳細ヘッダーに残存 / `hatebu-count` `star-toggle`
+      `item-detail-meta-group` は撤去 / 一覧行側に新規 `item-star-toggle-item-1` /
+      `item-hatebu-count-item-1` が出現」の 3 種をまとめて検証する単一テストに
+      置換（テスト名も Issue #154 Req 3.1 / 3.2 を明記）。
+    - 後者は一覧行側 `item-star-toggle-item-1` クリックで PUT が発火することを
+      検証する形に置換（スター操作が一覧側に集約された経路を反映）。
+  - **`<button>` ネスト警告の継続**: Task 5 / 6 で記録済みの `<button>` 内
+    `<button>` 警告は本 task では関与せず（ItemDetail 内には行クリック button が
+    無いため）。一覧側の警告は別 Issue 化方針を継続。
+  - **テスト件数**: item-detail.test.tsx は 旧 39 件 → 新 22 件（折りたたみ系 5 +
+    本文/タイトル/著者/リンク系 9 + メタ撤去系 8）に再構成。`#154 詳細ヘッダー
+    からのはてブ数・スター撤去` describe で `hatebu-count` non-existence × 2 ケース
+    （取得済み + 未取得境界）/ `star-toggle` non-existence × 2 ケース（未スター +
+    スター付き境界）/ `item-detail-meta-group` non-existence × 1 / onToggleStar
+    callback 非発火検証 × 1 / Req 3.3 維持確認 × 1 / 著者不在境界 × 1 / 外部リンク
+    アイコン × 1。item-list.test.tsx は既存 33 件のうち 2 件を再構成し全件 pass。
+- 残存課題:
+  - **`ItemDetailProps.onToggleStar` の cleanup**: 別 Issue で型から削除し、
+    呼び出し側 4 ファイル（item-list.tsx / starred-item-list.tsx /
+    cross-feed-item-list.tsx / search-results.tsx）の `onToggleStar={...}` pass を
+    除去する。Issue 完結後の cleanup PR で対応する想定。
+  - **`<button>` ネスト警告**: Task 5 / 6 で記録した別 Issue 化方針を継続。本 task
+    では関与なし。
+  - **検証結果**: `cd web && npm test -- --run`（389 件）/ `npm run lint`
+    （0 errors / 5 既存 warnings）/ `go test ./...` / `go vet ./...` は全 green。
+    テスト総数が 402 → 389 に減ったのは item-detail.test.tsx の Issue #116 由来
+    16 件削除 + 新規 9 件追加 = ネット 7 件減と、item-list.test.tsx で 2 件を
+    1+1 件に再構成（差分 0）の合計で説明可能。
+  - **次 task**: Task 7 は本 Issue の最終 task であり後続なし。Issue 完結後の
+    cleanup PR で `ItemDetailProps.onToggleStar` 削除を推奨。
