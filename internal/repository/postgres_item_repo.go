@@ -859,6 +859,7 @@ func (r *PostgresItemRepo) SearchByUserAndKeyword(
 		SELECT
 		    i.id, i.feed_id, i.title, i.link, i.summary,
 		    i.published_at, i.is_date_estimated, i.hatebu_count,
+		    i.hatebu_fetched_at,
 		    f.title AS feed_title,
 		    f.favicon_data, f.favicon_mime,
 		    COALESCE(st.is_read, false)   AS is_read,
@@ -892,10 +893,12 @@ func (r *PostgresItemRepo) SearchByUserAndKeyword(
 		var hit model.ItemSearchHit
 		var link, summary, faviconMime sql.NullString
 		var publishedAt sql.NullTime
+		var hatebuFetchedAt sql.NullTime
 
 		if err := rows.Scan(
 			&hit.ID, &hit.FeedID, &hit.Title, &link, &summary,
 			&publishedAt, &hit.IsDateEstimated, &hit.HatebuCount,
+			&hatebuFetchedAt,
 			&hit.FeedTitle,
 			&hit.FaviconData, &faviconMime,
 			&hit.IsRead, &hit.IsStarred,
@@ -909,6 +912,11 @@ func (r *PostgresItemRepo) SearchByUserAndKeyword(
 		// items.published_at は NULLABLE。NULL の場合はゼロ値 time.Time{} を保持する。
 		if publishedAt.Valid {
 			hit.PublishedAt = publishedAt.Time
+		}
+		// items.hatebu_fetched_at は NULLABLE。NULL の場合は nil を保持し、
+		// 取得済みの場合はポインタ経由で時刻を保持する。
+		if hatebuFetchedAt.Valid {
+			hit.HatebuFetchedAt = &hatebuFetchedAt.Time
 		}
 
 		hits = append(hits, hit)
