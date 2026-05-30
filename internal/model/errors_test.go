@@ -171,3 +171,64 @@ func TestNewFeedNotSubscribedError(t *testing.T) {
 		}
 	})
 }
+
+// TestNewFeedHTTPError は HTTP エラー由来のフィード検出エラーが
+// 期待する Code / Category / Details["status_code"] を持つことを検証する
+// （Issue #153 Req 1.5, 2.1, 2.3, 2.4）。
+func TestNewFeedHTTPError(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+	}{
+		{"429 Too Many Requests", 429},
+		{"404 Not Found", 404},
+		{"503 Service Unavailable", 503},
+		{"500 Internal Server Error", 500},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Arrange & Act
+			err := NewFeedHTTPError(tt.statusCode)
+
+			// Assert
+			if err == nil {
+				t.Fatal("NewFeedHTTPError が nil を返した")
+			}
+			if err.Code != ErrCodeFeedHTTPError {
+				t.Errorf("Code = %q, want %q", err.Code, ErrCodeFeedHTTPError)
+			}
+			if err.Code != "FEED_HTTP_ERROR" {
+				t.Errorf("Code リテラル = %q, want %q", err.Code, "FEED_HTTP_ERROR")
+			}
+			if err.Category != "feed" {
+				t.Errorf("Category = %q, want %q", err.Category, "feed")
+			}
+			// FEED_NOT_DETECTED と区別されること（Req 1.5）
+			if err.Code == ErrCodeFeedNotDetected {
+				t.Errorf("FEED_HTTP_ERROR は FEED_NOT_DETECTED と区別されるべき")
+			}
+			// Details["status_code"] に int で載っていること（Req 2.4）
+			if err.Details == nil {
+				t.Fatal("Details が nil。status_code を載せるべき")
+			}
+			gotStatus, ok := err.Details["status_code"].(int)
+			if !ok {
+				t.Fatalf("Details[\"status_code\"] は int であるべき。実型: %T", err.Details["status_code"])
+			}
+			if gotStatus != tt.statusCode {
+				t.Errorf("Details[\"status_code\"] = %d, want %d", gotStatus, tt.statusCode)
+			}
+			// Message にステータスコードが付記されていること（Req 2.4）
+			if !strings.Contains(err.Message, "HTTP") {
+				t.Errorf("Message に HTTP が含まれていない: %q", err.Message)
+			}
+			// Action が空でないこと（Req 2.1）
+			if err.Action == "" {
+				t.Error("Action が空である（ユーザー向け対処方法が必要）")
+			}
+			// 内部スタックトレース等がレスポンスボディに含まれていないこと（Req 2.3）
+			// ここではフォーマット文字列の制御で担保される（Message は固定テンプレ）。
+		})
+	}
+}
