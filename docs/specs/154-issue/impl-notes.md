@@ -141,3 +141,61 @@
   - `["cross-feed-items"]` への楽観更新が将来必要になった場合（例: cross-feed 一覧で
     スター操作直後に表示反映の遅延が UX 上問題になるなど）は、design.md 行 376 の
     `previousCrossFeed` グループを参考に追加実装する。本 task ではスコープ外。
+
+### Task 5
+
+- 採用方針: `ItemRow` の props に `onToggleStar: (itemId, nextStarred) => void` を
+  必須追加し、タイトル行内の `<time>` 表示の右隣（既存の読み取り専用 `Star` アイコン
+  があった位置）に Task 3 で実装済みの `ItemMetaActions` を配置した。`ItemList` /
+  `StarredItemList` / `CrossFeedItemList` の 3 呼び出し側で既存の `handleToggleStar`
+  を pass-through する形で配線し、3 一覧すべてが共通の `ItemMetaActions` を経由して
+  `useToggleStar` mutation を発火する経路に統一した（Req 1.1〜1.7 / 2.3 / 4.1 / 4.2）。
+- 重要な判断:
+  - **`onToggleStar` を必須 prop にした判断**: optional + default no-op にする選択肢
+    もあったが、ItemRow の責務（一覧上スター⭐️操作の発火）を型レベルで強制する
+    方針に倒した（呼び出し側が必ず配線する規律。NFR 3.2 の整合性確保）。代償として
+    既存呼び出し側 `cross-feed-item-list.tsx` も同時に prop 配線が必要となったため、
+    本 task の単一 commit にまとめて含めた。
+  - **`cross-feed-item-list.tsx` への波及**: Task 5 の `_Boundary:_` は ItemList /
+    StarredItemList / ItemRow を列挙しているが、`ItemRow` の prop が breaking
+    change（required prop 追加）になるため、同じ `ItemRow` を import している
+    `CrossFeedItemList` も同時配線が必要だった（既存 `handleToggleStar` を渡す
+    1 行追加のみ）。これは Boundary 逸脱というより props 互換性を保つための必然の
+    pass-through で、`useToggleStar` の `["cross-feed-items"]` invalidate は Task 4
+    で既に対応済み（楽観更新ではなく refetch 経由の UX）。確認事項として PR 本文に
+    残す必要あり。
+  - **既存読み取り専用 Star testid（`star-${id}`）の撤去**: tasks.md の指示通り
+    `data-testid={"star-" + id}` を完全に削除した。これは NFR 3.2 の「等価後継
+    識別子で置き換える」要件を `item-star-toggle-${id}`（toggle 操作可能な後継）
+    で満たす形（design.md 行 234-235）。旧 testid を参照していた既存テストは存在
+    しなかったため移行コストはなかった。
+  - **HTML 構造の `<button>` ネスト警告**: `ItemRow` 自体が `<button data-testid=
+    "item-row-${id}">` で行全体をクリック可能にしている既存設計のため、内側に
+    `<Button data-testid="item-star-toggle-${id}">` を配置すると `<button>` cannot
+    contain a nested `<button>` の hydration warning が React DevTools から出力さ
+    れる。これは本 task の design.md / tasks.md が暗黙的に要求する構造（既存
+    `ItemRow` button のまま + `ItemMetaActions` 内 Button）の結果で、テストは全件
+    pass する。本来は `ItemRow` を `<div role="button">` へ書き換えるか、行クリック
+    を別途 click handler で処理する設計修正が望ましい。design.md にこの点の指針が
+    無いため本 task では既存構造を踏襲し、PR 本文「確認事項」に残して別 Issue 化を
+    提案する。
+  - **テスト件数**: item-list.test.tsx に Task 5 関連 4 件（testid 出現 / `-`
+    vs 数値分岐 / 塗り分け / 伝播抑止 + mutation）、starred-item-list.test.tsx に
+    4 件（testid 出現 / hatebu 分岐 / 伝播抑止 + mutation / aria 状態分岐）を追加。
+    既存 18 + 6 件は不変で非回帰を担保。
+  - **CrossFeedItemList のテスト**: 本 task では cross-feed-item-list.tsx の 1 行
+    pass-through 追加のみで既存テストは全件 pass。明示的な per-task 追加テストは
+    避けた（cross-feed は Task 5 の `_Requirements:_` 範囲外であり、Boundary
+    `CrossFeedItemList` は本タスクの責務に含まれない）。
+- 残存課題:
+  - **HTML ネスト構造の整理**: `<button>` 内 `<button>` の警告は別 Issue で
+    `ItemRow` を `<div role="button">` 化するか、行クリック展開を別 div の onClick
+    へ分離する形で解消するのが望ましい。PR 本文「確認事項」に記載予定。
+  - Task 6（SearchResults 配線）/ Task 7（ItemDetail ヘッダーメタ撤去）が後続。
+    既存 `item-detail.tsx` の `star-toggle` / `hatebu-count` testid は本 task で
+    撤去していない（Task 7 の責務）。新規 testid `item-star-toggle-${id}` /
+    `item-hatebu-count-${id}` は一意化により衝突しない（NFR 3.3 を担保）。
+  - tsc baseline の既存 TS エラー（Task 2 で記録した 4 ファイル）は本 task では
+    非影響。
+  - 本 task 完了時点で `cd web && npm test -- --run`（398 件）/ `npm run lint`
+    （0 errors）は全 green。Go 側は本 task では変更なし。
