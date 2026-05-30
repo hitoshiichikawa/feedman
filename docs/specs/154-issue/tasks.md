@@ -41,7 +41,7 @@
   - _Requirements: 2.1, 2.2, 2.4, 2.5, NFR 2.2, NFR 2.3_
   - _Boundary: useToggleStar_
 
-- [ ] 5. `ItemList` / `StarredItemList` への `ItemMetaActions` 配線
+- [x] 5. `ItemList` / `StarredItemList` への `ItemMetaActions` 配線
   - `web/src/components/item-list.tsx` の `ItemRow` プロパティに `onToggleStar: (itemId: string, nextStarred: boolean) => void` を追加する
   - `ItemRow` 内のタイトル行で、既存の読み取り専用 `Star` アイコン（`data-testid={"star-" + id}`）を削除し、日時表示の右隣に `<ItemMetaActions ... />` を配置する（`hatebuCount={item.hatebu_count}` / `hatebuFetchedAt={item.hatebu_fetched_at}` / `isStarred={item.is_starred}` / `onToggleStar={onToggleStar}` を渡す）
   - `ItemList` 本体で `<ItemRow ... onToggleStar={handleToggleStar} />` を渡す
