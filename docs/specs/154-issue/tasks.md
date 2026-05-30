@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. 検索 API レスポンスへの `hatebu_fetched_at` 追加（Go 5 レイヤ縦断）
+- [x] 1. 検索 API レスポンスへの `hatebu_fetched_at` 追加（Go 5 レイヤ縦断）
   - `internal/model/item.go` の `ItemSearchHit` に `HatebuFetchedAt *time.Time` を追加する
   - `internal/repository/postgres_item_repo.go` の `SearchByUserAndKeyword` の SELECT 句に `i.hatebu_fetched_at` を追加し、`sql.NullTime` で Scan して `hit.HatebuFetchedAt` に代入する（NULL → nil / 値あり → ポインタ）
   - `internal/itemsearch/service.go` の `ItemSearchSummary` に `HatebuFetchedAt *time.Time` を追加し、`Search` メソッドの summary 組み立てで repo 結果から pass-through する
