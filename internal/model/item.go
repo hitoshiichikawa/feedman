@@ -53,6 +53,11 @@ type ItemSearchHit struct {
 	IsRead          bool
 	IsStarred       bool
 	HatebuCount     int
+	// HatebuFetchedAt は items.hatebu_fetched_at の値を保持する。
+	// NULL（未取得）の場合は nil、取得済みの場合はポインタ経由で時刻を持つ。
+	// 通常一覧 / スター横断一覧 API と表示挙動を統一するため、検索 API でも
+	// 「未取得 → '-' / 取得済み → 数値」をフロントが判定するための情報源として利用する。
+	HatebuFetchedAt *time.Time
 }
 
 // ItemFilter は記事一覧のフィルタ種別を表す。

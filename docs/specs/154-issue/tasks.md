@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. 検索 API レスポンスへの `hatebu_fetched_at` 追加（Go 5 レイヤ縦断）
+- [x] 1. 検索 API レスポンスへの `hatebu_fetched_at` 追加（Go 5 レイヤ縦断）
   - `internal/model/item.go` の `ItemSearchHit` に `HatebuFetchedAt *time.Time` を追加する
   - `internal/repository/postgres_item_repo.go` の `SearchByUserAndKeyword` の SELECT 句に `i.hatebu_fetched_at` を追加し、`sql.NullTime` で Scan して `hit.HatebuFetchedAt` に代入する（NULL → nil / 値あり → ポインタ）
   - `internal/itemsearch/service.go` の `ItemSearchSummary` に `HatebuFetchedAt *time.Time` を追加し、`Search` メソッドの summary 組み立てで repo 結果から pass-through する
@@ -11,7 +11,7 @@
   - _Requirements: 5.1, 5.2, 5.3, 5.4_
   - _Boundary: itemSearchHitResponse, ItemSearchServiceAdapter, ItemSearchSummary, ItemSearchHit, SearchByUserAndKeyword_
 
-- [ ] 2. TypeScript 型 `ItemSearchHit` への `hatebu_fetched_at` 追加 (P)
+- [x] 2. TypeScript 型 `ItemSearchHit` への `hatebu_fetched_at` 追加 (P)
   - `web/src/types/item.ts` の `ItemSearchHit` interface に `hatebu_fetched_at: string | null` を追加する
   - 既存 doc コメント「省略: `hatebu_fetched_at`」の記述を削除し、新フィールドの意味（未取得時は null、取得済みなら RFC3339 文字列）を追記する
   - 既存 `ItemSearchResponse` / 他フィールドの構造は不変であることを担保する
@@ -19,7 +19,7 @@
   - _Boundary: types/item.ts_
   - _Depends: 1_
 
-- [ ] 3. 共通コンポーネント `ItemMetaActions` の新規作成 (P)
+- [x] 3. 共通コンポーネント `ItemMetaActions` の新規作成 (P)
   - `web/src/components/item-meta-actions.tsx` を新規作成する
   - Props: `{ itemId: string; isStarred: boolean; hatebuCount: number; hatebuFetchedAt: string | null; onToggleStar: (itemId: string, nextStarred: boolean) => void }`
   - はてブ数表示: `hatebuFetchedAt === null ? "-" : String(hatebuCount)` を `<span data-testid={"item-hatebu-count-" + itemId}>` で表示（`Bookmark` アイコン + 数値）
@@ -31,7 +31,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 2.1, 2.3, NFR 1.1, NFR 1.2, NFR 1.3, NFR 1.4, NFR 2.1_
   - _Boundary: ItemMetaActions_
 
-- [ ] 4. `useToggleStar` の `["item-search"]` キャッシュ拡張
+- [x] 4. `useToggleStar` の `["item-search"]` キャッシュ拡張
   - `web/src/hooks/use-item-state.ts` の `useToggleStar` を改修する
   - `onMutate`: 既存の `["items"]` 処理に加えて `queryClient.cancelQueries({ queryKey: ["item-search"] })` と `getQueriesData<InfiniteData<ItemSearchResponse>>({ queryKey: ["item-search"] })` のスナップショットを取得し、`setQueryData` で `pages[].items[].is_starred` を反転更新する
   - `onError`: 既存の `previousData` 復元に加えて `["item-search"]` の `previousData` も復元する
@@ -41,7 +41,7 @@
   - _Requirements: 2.1, 2.2, 2.4, 2.5, NFR 2.2, NFR 2.3_
   - _Boundary: useToggleStar_
 
-- [ ] 5. `ItemList` / `StarredItemList` への `ItemMetaActions` 配線
+- [x] 5. `ItemList` / `StarredItemList` への `ItemMetaActions` 配線
   - `web/src/components/item-list.tsx` の `ItemRow` プロパティに `onToggleStar: (itemId: string, nextStarred: boolean) => void` を追加する
   - `ItemRow` 内のタイトル行で、既存の読み取り専用 `Star` アイコン（`data-testid={"star-" + id}`）を削除し、日時表示の右隣に `<ItemMetaActions ... />` を配置する（`hatebuCount={item.hatebu_count}` / `hatebuFetchedAt={item.hatebu_fetched_at}` / `isStarred={item.is_starred}` / `onToggleStar={onToggleStar}` を渡す）
   - `ItemList` 本体で `<ItemRow ... onToggleStar={handleToggleStar} />` を渡す
@@ -52,7 +52,7 @@
   - _Boundary: ItemList, StarredItemList, ItemRow_
   - _Depends: 3, 4_
 
-- [ ] 6. `SearchResults` への `ItemMetaActions` 配線
+- [x] 6. `SearchResults` への `ItemMetaActions` 配線
   - `web/src/components/search-results.tsx` の `SearchResultRowProps` に `onToggleStar: (itemId: string, nextStarred: boolean) => void` を追加する
   - `SearchResultRow` 内のタイトル行で、既存の読み取り専用 `Star` アイコン（`data-testid={"search-result-star-" + id}`）を削除し、日時表示の右隣に `<ItemMetaActions ... />` を配置する（`hatebuCount={hit.hatebu_count}` / `hatebuFetchedAt={hit.hatebu_fetched_at}` / `isStarred={hit.is_starred}` / `onToggleStar={onToggleStar}` を渡す）
   - `SearchResults` 本体で `<SearchResultRow ... onToggleStar={handleToggleStar} />` を渡す
@@ -62,7 +62,7 @@
   - _Boundary: SearchResults, SearchResultRow_
   - _Depends: 2, 3, 4_
 
-- [ ] 7. `ItemDetail` ヘッダーからのメタ撤去
+- [x] 7. `ItemDetail` ヘッダーからのメタ撤去
   - `web/src/components/item-detail.tsx` のタイトル右側 `<div data-testid="item-detail-meta-group">` 全体（`hatebu-count` 表示 + `star-toggle` Button）を削除する
   - タイトル `<h3>` / タイトルリンク / `item-detail-title-row` / 著者表示 / 元記事リンク / 本文サニタイズ + 折りたたみ / 「続きを読む」トグル / 展開時の自動既読化 `useEffect` は不変であることを担保する
   - `ItemDetailProps` の `onToggleStar` prop は型互換維持のため残置するが、本体内で使用しないことを TSDoc コメントで明示する（cleanup は別 Issue）

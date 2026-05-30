@@ -377,6 +377,71 @@ func TestSearchByUserAndKeyword(t *testing.T) {
 		}
 	})
 
+	// Req 5.1, 5.3, 5.4: items.hatebu_fetched_at が NULL / 値ありの両方で
+	// ItemSearchHit.HatebuFetchedAt に正しくマッピングされる
+	t.Run("hatebu_fetched_atのNULLと値ありが正しくマッピングされる", func(t *testing.T) {
+		userID := insertTestUserForSearch(t, db, "hatebu-fetched-at@test.com")
+		feedID := insertTestFeedForSearch(t, db, "https://example.com/hatebu-fetched-at.xml", "Feed K")
+		insertTestSubscriptionForSearch(t, db, userID, feedID)
+
+		now := time.Now().UTC().Truncate(time.Second)
+		// 1 件目: hatebu_fetched_at に値あり
+		fetchedAt := now.Add(-2 * time.Hour)
+		var itemFetchedID string
+		err := db.QueryRow(
+			`INSERT INTO items (feed_id, title, content, published_at, hatebu_count, hatebu_fetched_at)
+			 VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+			feedID, "hatebu fetched item", "hatebufetched body", now, 3, fetchedAt,
+		).Scan(&itemFetchedID)
+		if err != nil {
+			t.Fatalf("取得済み記事の挿入に失敗: %v", err)
+		}
+		// 2 件目: hatebu_fetched_at は NULL（=デフォルト）
+		// published_at をずらして並び順を決定論的にする（item-fetched が先頭）
+		var itemUnfetchedID string
+		err = db.QueryRow(
+			`INSERT INTO items (feed_id, title, content, published_at, hatebu_count)
+			 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+			feedID, "hatebu unfetched item", "hatebufetched body 2", now.Add(-time.Second), 0,
+		).Scan(&itemUnfetchedID)
+		if err != nil {
+			t.Fatalf("未取得記事の挿入に失敗: %v", err)
+		}
+
+		pattern := "%hatebufetched%"
+		hits, err := repo.SearchByUserAndKeyword(ctx, userID, pattern, nil, "", time.Time{}, 100)
+		if err != nil {
+			t.Fatalf("SearchByUserAndKeyword がエラーを返した: %v", err)
+		}
+		if len(hits) != 2 {
+			t.Fatalf("検索ヒット件数が不正: got %d, want 2", len(hits))
+		}
+
+		// hits[0] = 取得済み（published_at が新しい方）
+		if hits[0].ID != itemFetchedID {
+			t.Fatalf("並び順想定外: hits[0].ID = %q, want %q", hits[0].ID, itemFetchedID)
+		}
+		if hits[0].HatebuFetchedAt == nil {
+			t.Errorf("取得済み記事の HatebuFetchedAt が nil（NULL ではない値が NULL として読み取られている）")
+		} else if !hits[0].HatebuFetchedAt.Equal(fetchedAt) {
+			t.Errorf("HatebuFetchedAt が一致しない: got %v, want %v", *hits[0].HatebuFetchedAt, fetchedAt)
+		}
+		if hits[0].HatebuCount != 3 {
+			t.Errorf("HatebuCount = %d, want 3", hits[0].HatebuCount)
+		}
+
+		// hits[1] = 未取得（hatebu_fetched_at が NULL）
+		if hits[1].ID != itemUnfetchedID {
+			t.Fatalf("並び順想定外: hits[1].ID = %q, want %q", hits[1].ID, itemUnfetchedID)
+		}
+		if hits[1].HatebuFetchedAt != nil {
+			t.Errorf("未取得記事の HatebuFetchedAt が nil でない（NULL を nil に変換できていない）: got %v", *hits[1].HatebuFetchedAt)
+		}
+		if hits[1].HatebuCount != 0 {
+			t.Errorf("HatebuCount = %d, want 0", hits[1].HatebuCount)
+		}
+	})
+
 	// Req 5.3: 検索実行前後で item_states / items が変化しないことを検証する
 	t.Run("検索実行前後で item_states と items が変化しない", func(t *testing.T) {
 		userID := insertTestUserForSearch(t, db, "invariant@test.com")

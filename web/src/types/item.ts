@@ -86,7 +86,6 @@ export type { SearchScope } from "@/contexts/app-state";
  *
  * 既存 ItemSummary との差分:
  * - 追加: `feed_title`, `favicon_url`
- * - 省略: `hatebu_fetched_at`（検索 API レスポンスに含まれないため）
  */
 export interface ItemSearchHit {
   id: string;
@@ -99,6 +98,12 @@ export interface ItemSearchHit {
   published_at: string | null;
   is_date_estimated: boolean;
   hatebu_count: number;
+  /**
+   * はてなブックマーク取得日時。未取得時は null（RFC3339 文字列または null）。
+   * 検索 API は Go 側で `omitempty` のため未取得時はレスポンスから省略されることがあり、
+   * 呼び出し側は `undefined ?? null` で正規化して受け取る（design.md Notes for Developers 参照）。
+   */
+  hatebu_fetched_at: string | null;
   /** 記事が属するフィードのタイトル（横断検索結果のバッジ表示で使用） */
   feed_title: string;
   /**

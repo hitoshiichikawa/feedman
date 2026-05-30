@@ -80,6 +80,7 @@ const mockGlobalResults: ItemSearchResponse = {
       published_at: "2026-02-27T10:00:00Z",
       is_date_estimated: false,
       hatebu_count: 12,
+      hatebu_fetched_at: null,
       feed_title: "Frontend Weekly",
       favicon_url: "data:image/png;base64,AAA",
       is_read: false,
@@ -94,6 +95,7 @@ const mockGlobalResults: ItemSearchResponse = {
       published_at: "2026-02-26T10:00:00Z",
       is_date_estimated: true,
       hatebu_count: 3,
+      hatebu_fetched_at: null,
       feed_title: "TS Newsletter",
       favicon_url: null,
       is_read: true,
@@ -116,6 +118,7 @@ const mockFeedResults: ItemSearchResponse = {
       published_at: "2026-02-27T10:00:00Z",
       is_date_estimated: false,
       hatebu_count: 5,
+      hatebu_fetched_at: null,
       feed_title: "DevOps Blog",
       favicon_url: "data:image/png;base64,XYZ",
       is_read: false,
@@ -314,14 +317,16 @@ describe("SearchResults", () => {
       screen.getByTestId("search-result-row-item-2").getAttribute("data-read")
     ).toBe("true");
 
-    // item-2 はスター付き
-    expect(
-      screen.getByTestId("search-result-star-item-2")
-    ).toBeInTheDocument();
-    // item-1 はスターなし
-    expect(
-      screen.queryByTestId("search-result-star-item-1")
-    ).toBeNull();
+    // item-2 はスター付き / item-1 はスター無し（Issue #154 / Task 6 で
+    // 旧 `search-result-star-${id}` testid は `item-star-toggle-${id}` の
+    // toggle ボタンに置き換え。aria-pressed で状態を判定する。NFR 3.2）
+    const toggle1 = screen.getByTestId("item-star-toggle-item-1");
+    const toggle2 = screen.getByTestId("item-star-toggle-item-2");
+    expect(toggle1).toHaveAttribute("aria-pressed", "false");
+    expect(toggle2).toHaveAttribute("aria-pressed", "true");
+    // 旧読み取り専用 Star testid は撤去された
+    expect(screen.queryByTestId("search-result-star-item-1")).toBeNull();
+    expect(screen.queryByTestId("search-result-star-item-2")).toBeNull();
   });
 
   it("推定日付フラグが立っている記事には (推定) ラベルが表示されること", async () => {
@@ -348,6 +353,176 @@ describe("SearchResults", () => {
     ).toBeNull();
   });
 
+  // --- Issue #154 / Task 6: SearchResults への ItemMetaActions 配線
+  //     （Req 1.1〜1.7 / 2.3 / 2.5 / 4.3 / 5.3 / 5.4 / 6.7 / NFR 3.2） ---
+
+  it("hatebu_fetched_at が null のとき検索結果行の hatebu 表示は `-` を表示すること（Req 1.3 / 5.3）", async () => {
+    // Arrange: mockGlobalResults の 2 件はいずれも hatebu_fetched_at = null
+    setupSearchFetch(mockGlobalResults);
+
+    // Act
+    renderWithProviders(<SearchResults />, (dispatch) => {
+      dispatch({
+        type: "SET_SEARCH_QUERY",
+        query: "typescript",
+        scope: "global",
+      });
+    });
+
+    // Assert: いずれの行も `-` を表示し、hatebu_count の数値 (12 / 3) は出ない
+    await waitFor(() => {
+      expect(screen.getByTestId("item-hatebu-count-item-1")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("item-hatebu-count-item-1")).toHaveTextContent("-");
+    expect(screen.getByTestId("item-hatebu-count-item-2")).toHaveTextContent("-");
+  });
+
+  it("hatebu_fetched_at が文字列のとき検索結果行の hatebu 表示は hatebu_count の整数値を表示すること（Req 1.4 / 5.4）", async () => {
+    // Arrange: 取得済み記事を返す fixture（hatebu_fetched_at に時刻文字列）
+    const responseWithFetched: ItemSearchResponse = {
+      items: [
+        {
+          id: "item-fetched-zero",
+          feed_id: "feed-a",
+          title: "はてブ 0 件取得済み",
+          link: "https://example.com/article-zero",
+          summary: "",
+          published_at: "2026-02-27T10:00:00Z",
+          is_date_estimated: false,
+          hatebu_count: 0,
+          hatebu_fetched_at: "2026-02-27T09:00:00Z",
+          feed_title: "Feed A",
+          favicon_url: null,
+          is_read: false,
+          is_starred: false,
+        },
+        {
+          id: "item-fetched-many",
+          feed_id: "feed-b",
+          title: "はてブ多数取得済み",
+          link: "https://example.com/article-many",
+          summary: "",
+          published_at: "2026-02-26T10:00:00Z",
+          is_date_estimated: false,
+          hatebu_count: 42,
+          hatebu_fetched_at: "2026-02-26T09:00:00Z",
+          feed_title: "Feed B",
+          favicon_url: null,
+          is_read: false,
+          is_starred: false,
+        },
+      ],
+      next_cursor: null,
+      has_more: false,
+    };
+    setupSearchFetch(responseWithFetched);
+
+    // Act
+    renderWithProviders(<SearchResults />, (dispatch) => {
+      dispatch({
+        type: "SET_SEARCH_QUERY",
+        query: "anything",
+        scope: "global",
+      });
+    });
+
+    // Assert: 取得済み 0 件 → `0`、取得済み多数 → `42` を表示（`-` ではなく数値）
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("item-hatebu-count-item-fetched-zero")
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.getByTestId("item-hatebu-count-item-fetched-zero")
+    ).toHaveTextContent("0");
+    expect(
+      screen.getByTestId("item-hatebu-count-item-fetched-many")
+    ).toHaveTextContent("42");
+  });
+
+  it("スター⭐️トグルクリックで mutation を発火し、行展開（EXPAND_ITEM）が発火しないこと（Req 2.1 / 2.3 / 2.5 / NFR 2.1）", async () => {
+    // Arrange: mutation 結果は使わないが、PUT を受けて 200 で返す mock
+    setupSearchFetch(mockGlobalResults);
+    const user = userEvent.setup();
+    // search 用 fetch に加え、mutation PUT を OK で受ける mock を上書き
+    mockFetch.mockImplementation((url: string, init?: RequestInit) => {
+      if (typeof url === "string" && url.startsWith("/api/items/search")) {
+        return Promise.resolve({ ok: true, json: async () => mockGlobalResults });
+      }
+      if (
+        typeof url === "string" &&
+        url === "/api/items/item-1/state" &&
+        init?.method === "PUT"
+      ) {
+        return Promise.resolve({ ok: true, json: async () => ({}) });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    const { getState } = renderWithProviders(<SearchResults />, (dispatch) => {
+      dispatch({
+        type: "SET_SEARCH_QUERY",
+        query: "typescript",
+        scope: "global",
+      });
+    });
+
+    // Act
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("item-star-toggle-item-1")
+      ).toBeInTheDocument();
+    });
+    await user.click(screen.getByTestId("item-star-toggle-item-1"));
+
+    // Assert (a): mutation PUT が is_starred 反転で送信される（false → true）
+    await waitFor(() => {
+      expect(mockFetch).toHaveBeenCalledWith(
+        "/api/items/item-1/state",
+        expect.objectContaining({
+          method: "PUT",
+          body: JSON.stringify({ is_starred: true }),
+        })
+      );
+    });
+    // Assert (b): 行クリック展開（EXPAND_ITEM）が発火しないため expandedItemId は変化しない
+    expect(getState().expandedItemId).toBeNull();
+  });
+
+  it("検索結果行に ItemMetaActions（item-hatebu-count + item-star-toggle）が出現すること（Req 1.1 / 1.2 / NFR 3.2）", async () => {
+    // Arrange / Act
+    setupSearchFetch(mockGlobalResults);
+    renderWithProviders(<SearchResults />, (dispatch) => {
+      dispatch({
+        type: "SET_SEARCH_QUERY",
+        query: "typescript",
+        scope: "global",
+      });
+    });
+
+    // Assert: 各行に新規 testid が出現し、既存読み取り専用 Star testid は撤去
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("search-result-row-item-1")
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.getByTestId("item-hatebu-count-item-1")
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("item-star-toggle-item-1")
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("item-hatebu-count-item-2")
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("item-star-toggle-item-2")
+    ).toBeInTheDocument();
+    // 既存 read-only star testid は撤去された
+    expect(screen.queryByTestId("search-result-star-item-1")).toBeNull();
+    expect(screen.queryByTestId("search-result-star-item-2")).toBeNull();
+  });
+
   it("published_at が null の記事でも結果カードが描画されること（境界値）", async () => {
     const responseWithNullDate: ItemSearchResponse = {
       items: [
@@ -360,6 +535,7 @@ describe("SearchResults", () => {
           published_at: null,
           is_date_estimated: false,
           hatebu_count: 0,
+          hatebu_fetched_at: null,
           feed_title: "Some Feed",
           favicon_url: null,
           is_read: false,

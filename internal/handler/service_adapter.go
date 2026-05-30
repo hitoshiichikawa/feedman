@@ -302,6 +302,7 @@ func (a *ItemSearchServiceAdapter) Search(
 			IsRead:          it.IsRead,
 			IsStarred:       it.IsStarred,
 			HatebuCount:     it.HatebuCount,
+			HatebuFetchedAt: it.HatebuFetchedAt,
 		}
 		// favicon の生バイト + MIME が揃っている場合のみ data URL を組み立てる。
 		// 既存 subscription.Service.ListSubscriptions と同じ流儀
