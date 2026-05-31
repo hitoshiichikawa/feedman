@@ -44,14 +44,6 @@ const mockItem: ItemDetailType = {
   author: "テスト著者",
 };
 
-/** はてブ未取得の記事データ */
-const mockItemNoHatebu: ItemDetailType = {
-  ...mockItem,
-  id: "item-2",
-  hatebu_count: 0,
-  hatebu_fetched_at: null,
-};
-
 /**
  * mockFetchの設定ヘルパー
  */
@@ -114,99 +106,8 @@ describe("ItemDetail コンポーネント", () => {
     expect(linkButton).toHaveAttribute("href", "https://example.com/article-1");
     expect(linkButton).toHaveAttribute("target", "_blank");
     expect(linkButton).toHaveAttribute("rel", "noopener noreferrer");
-    // Req 4.3: 「元記事を開く」テキストとアイコンを伴うリンクであること
+    // Req 3.3: 「元記事を開く」テキストとアイコンを伴うリンクであること
     expect(linkButton).toHaveTextContent("元記事を開く");
-  });
-
-  it("はてなブックマーク数が表示されること", () => {
-    render(
-      <ItemDetail
-        item={mockItem}
-        onMarkAsRead={() => {}}
-        onToggleStar={() => {}}
-      />,
-      { wrapper: createWrapper() }
-    );
-
-    const hatebuCount = screen.getByTestId("hatebu-count");
-    expect(hatebuCount).toBeInTheDocument();
-    expect(hatebuCount).toHaveTextContent("42");
-  });
-
-  it("はてブ未取得時は「-」が表示されること", () => {
-    render(
-      <ItemDetail
-        item={mockItemNoHatebu}
-        onMarkAsRead={() => {}}
-        onToggleStar={() => {}}
-      />,
-      { wrapper: createWrapper() }
-    );
-
-    const hatebuCount = screen.getByTestId("hatebu-count");
-    expect(hatebuCount).toHaveTextContent("-");
-  });
-
-  // Req 3.3: 取得済みかつ 0 件のとき「0」を表示する（境界値）
-  it("はてブ取得済みかつ0件のとき「0」が表示されること", () => {
-    const zeroItem: ItemDetailType = {
-      ...mockItem,
-      hatebu_count: 0,
-      hatebu_fetched_at: "2026-02-27T09:00:00Z",
-    };
-
-    render(
-      <ItemDetail
-        item={zeroItem}
-        onMarkAsRead={() => {}}
-        onToggleStar={() => {}}
-      />,
-      { wrapper: createWrapper() }
-    );
-
-    const hatebuCount = screen.getByTestId("hatebu-count");
-    expect(hatebuCount).toHaveTextContent("0");
-  });
-
-  it("スター切替ボタンをクリックするとonToggleStarが呼ばれること", async () => {
-    const user = userEvent.setup();
-    const onToggleStar = vi.fn();
-
-    render(
-      <ItemDetail
-        item={mockItem}
-        onMarkAsRead={() => {}}
-        onToggleStar={onToggleStar}
-      />,
-      { wrapper: createWrapper() }
-    );
-
-    const starButton = screen.getByTestId("star-toggle");
-    await user.click(starButton);
-
-    // 現在is_starred=falseなので、trueに切り替えるリクエストが呼ばれること
-    expect(onToggleStar).toHaveBeenCalledWith("item-1", true);
-  });
-
-  it("スター付き記事のスターボタンをクリックするとfalseで呼ばれること", async () => {
-    const user = userEvent.setup();
-    const onToggleStar = vi.fn();
-    const starredItem = { ...mockItem, is_starred: true };
-
-    render(
-      <ItemDetail
-        item={starredItem}
-        onMarkAsRead={() => {}}
-        onToggleStar={onToggleStar}
-      />,
-      { wrapper: createWrapper() }
-    );
-
-    const starButton = screen.getByTestId("star-toggle");
-    await user.click(starButton);
-
-    // 現在is_starred=trueなので、falseに切り替えるリクエストが呼ばれること
-    expect(onToggleStar).toHaveBeenCalledWith("item-1", false);
   });
 
   it("展開時にonMarkAsReadが呼ばれること", () => {
@@ -221,7 +122,7 @@ describe("ItemDetail コンポーネント", () => {
       { wrapper: createWrapper() }
     );
 
-    // コンポーネントのマウント時（展開時）にonMarkAsReadが呼ばれること
+    // コンポーネントのマウント時（展開時）にonMarkAsReadが呼ばれること（Req 3.4）
     expect(onMarkAsRead).toHaveBeenCalledWith("item-1");
   });
 
@@ -237,7 +138,7 @@ describe("ItemDetail コンポーネント", () => {
       { wrapper: createWrapper() }
     );
 
-    // 既に既読なのでonMarkAsReadは呼ばれない
+    // 既に既読なのでonMarkAsReadは呼ばれない（Req 3.4 既存挙動維持）
     expect(onMarkAsRead).not.toHaveBeenCalled();
   });
 
@@ -251,6 +152,7 @@ describe("ItemDetail コンポーネント", () => {
       { wrapper: createWrapper() }
     );
 
+    // Req 3.3: タイトル維持
     expect(screen.getByText("テスト記事のタイトル")).toBeInTheDocument();
   });
 
@@ -264,6 +166,7 @@ describe("ItemDetail コンポーネント", () => {
       { wrapper: createWrapper() }
     );
 
+    // Req 3.3: 著者維持
     expect(screen.getByText("テスト著者")).toBeInTheDocument();
   });
 
@@ -537,10 +440,10 @@ describe("ItemDetail コンポーネント", () => {
     });
   });
 
-  // Issue #116: ヘッダーのレイアウト統合・スター切替のアイコン化・元記事リンクの再配置
-  describe("ヘッダーレイアウトと操作系の集約（#116）", () => {
-    // Req 1.1 / 1.2: タイトル要素・はてブ数表示・スター切替コントロールが同一のヘッダー領域に左右配置される
-    it("タイトル・はてブ数・スター切替が同一のヘッダー行に配置されること", () => {
+  // Issue #154 / Task 7: 詳細ヘッダーからのメタ撤去（Req 3.1 / 3.2 / NFR 3.3）
+  describe("詳細ヘッダーからのはてブ数・スター撤去（#154）", () => {
+    // Req 3.1: 詳細ヘッダーにはてなブックマーク数表示を表示しない
+    it("ヘッダー領域にはてブ数表示（hatebu-count）が存在しないこと", () => {
       // Arrange
       render(
         <ItemDetail
@@ -551,40 +454,109 @@ describe("ItemDetail コンポーネント", () => {
         { wrapper: createWrapper() }
       );
 
-      // Act
+      // Assert: 旧 testid が DOM から完全に撤去されていること
+      expect(screen.queryByTestId("hatebu-count")).not.toBeInTheDocument();
+    });
+
+    // Req 3.1: はてブ未取得記事でも hatebu-count は出現しない（境界）
+    it("はてブ未取得記事でもヘッダー領域に hatebu-count が出現しないこと", () => {
+      // Arrange
+      const noHatebuItem: ItemDetailType = {
+        ...mockItem,
+        hatebu_count: 0,
+        hatebu_fetched_at: null,
+      };
+
+      render(
+        <ItemDetail
+          item={noHatebuItem}
+          onMarkAsRead={() => {}}
+          onToggleStar={() => {}}
+        />,
+        { wrapper: createWrapper() }
+      );
+
+      // Assert
+      expect(screen.queryByTestId("hatebu-count")).not.toBeInTheDocument();
+    });
+
+    // Req 3.2: 詳細ヘッダーにスター切替トグルを表示しない（未スター時）
+    it("ヘッダー領域にスター切替トグル（star-toggle）が存在しないこと（未スター時）", () => {
+      // Arrange
+      render(
+        <ItemDetail
+          item={mockItem}
+          onMarkAsRead={() => {}}
+          onToggleStar={() => {}}
+        />,
+        { wrapper: createWrapper() }
+      );
+
+      // Assert
+      expect(screen.queryByTestId("star-toggle")).not.toBeInTheDocument();
+    });
+
+    // Req 3.2: スター付き記事でもスター切替トグルは存在しない
+    it("ヘッダー領域にスター切替トグル（star-toggle）が存在しないこと（スター付き時）", () => {
+      // Arrange
+      const starredItem: ItemDetailType = { ...mockItem, is_starred: true };
+
+      render(
+        <ItemDetail
+          item={starredItem}
+          onMarkAsRead={() => {}}
+          onToggleStar={() => {}}
+        />,
+        { wrapper: createWrapper() }
+      );
+
+      // Assert
+      expect(screen.queryByTestId("star-toggle")).not.toBeInTheDocument();
+    });
+
+    // NFR 3.3 / Req 3.1 / 3.2: メタ情報グループ自体が DOM から撤去されている
+    it("ヘッダーのメタ情報グループ（item-detail-meta-group）が存在しないこと", () => {
+      // Arrange
+      render(
+        <ItemDetail
+          item={mockItem}
+          onMarkAsRead={() => {}}
+          onToggleStar={() => {}}
+        />,
+        { wrapper: createWrapper() }
+      );
+
+      // Assert
+      expect(
+        screen.queryByTestId("item-detail-meta-group")
+      ).not.toBeInTheDocument();
+    });
+
+    // Req 3.2: onToggleStar prop は型互換維持のため残置されているが、本体内で呼び出されない
+    it("詳細ヘッダー内のクリックで onToggleStar が呼ばれないこと（ヘッダーに star トグルが存在しないため）", async () => {
+      // Arrange
+      const user = userEvent.setup();
+      const onToggleStar = vi.fn();
+
+      render(
+        <ItemDetail
+          item={mockItem}
+          onMarkAsRead={() => {}}
+          onToggleStar={onToggleStar}
+        />,
+        { wrapper: createWrapper() }
+      );
+
+      // Act: タイトル行をクリックしても callback は発火しない
       const titleRow = screen.getByTestId("item-detail-title-row");
-      const hatebu = screen.getByTestId("hatebu-count");
-      const star = screen.getByTestId("star-toggle");
-
-      // Assert: いずれもタイトル行コンテナの子孫として存在する
-      expect(titleRow).toContainElement(hatebu);
-      expect(titleRow).toContainElement(star);
-      // タイトルテキストも同コンテナ内に存在する
-      expect(titleRow).toHaveTextContent("テスト記事のタイトル");
-    });
-
-    // Req 1.5: はてブ数表示とスター切替がメタ情報グループとして隣接配置される
-    it("はてブ数とスター切替が同一のメタ情報グループに隣接して配置されること", () => {
-      // Arrange
-      render(
-        <ItemDetail
-          item={mockItem}
-          onMarkAsRead={() => {}}
-          onToggleStar={() => {}}
-        />,
-        { wrapper: createWrapper() }
-      );
-
-      // Act
-      const metaGroup = screen.getByTestId("item-detail-meta-group");
+      await user.click(titleRow);
 
       // Assert
-      expect(metaGroup).toContainElement(screen.getByTestId("hatebu-count"));
-      expect(metaGroup).toContainElement(screen.getByTestId("star-toggle"));
+      expect(onToggleStar).not.toHaveBeenCalled();
     });
 
-    // Req 2.1: スター切替コントロールに文字列ラベル（「スター」「スター解除」）を表示しない
-    it("スター切替コントロールにテキストラベルが表示されないこと（未スター時）", () => {
+    // Req 3.3: タイトル / 著者 / 元記事リンク / タイトル行コンテナは維持される
+    it("タイトル・著者・元記事リンク・タイトル行コンテナが維持されること", () => {
       // Arrange
       render(
         <ItemDetail
@@ -595,222 +567,18 @@ describe("ItemDetail コンポーネント", () => {
         { wrapper: createWrapper() }
       );
 
-      // Act
-      const starButton = screen.getByTestId("star-toggle");
-
-      // Assert: 旧文言「スター」「スター解除」は本文として描画されない
-      // textContent はアイコンのみで空、もしくは空白のみであること
-      expect(starButton.textContent?.trim()).toBe("");
+      // Assert: 既存 testid が引き続き存在
+      expect(screen.getByTestId("item-detail-title-row")).toBeInTheDocument();
+      expect(screen.getByTestId("item-detail-author")).toBeInTheDocument();
+      expect(
+        screen.getByTestId("item-detail-author-separator")
+      ).toBeInTheDocument();
+      expect(screen.getByTestId("original-link")).toBeInTheDocument();
+      // タイトル文字列も表示されている
+      expect(screen.getByText("テスト記事のタイトル")).toBeInTheDocument();
     });
 
-    it("スター切替コントロールにテキストラベルが表示されないこと（スター付き時）", () => {
-      // Arrange
-      const starredItem = { ...mockItem, is_starred: true };
-      render(
-        <ItemDetail
-          item={starredItem}
-          onMarkAsRead={() => {}}
-          onToggleStar={() => {}}
-        />,
-        { wrapper: createWrapper() }
-      );
-
-      // Act
-      const starButton = screen.getByTestId("star-toggle");
-
-      // Assert
-      expect(starButton.textContent?.trim()).toBe("");
-    });
-
-    // Req 2.7 / NFR 2.1: 支援技術が状態と用途を識別できる ARIA 属性を持つ
-    it("スター切替コントロールに状態を示す aria-label と aria-pressed が付与されること（未スター時）", () => {
-      // Arrange
-      render(
-        <ItemDetail
-          item={mockItem}
-          onMarkAsRead={() => {}}
-          onToggleStar={() => {}}
-        />,
-        { wrapper: createWrapper() }
-      );
-
-      // Act
-      const starButton = screen.getByTestId("star-toggle");
-
-      // Assert
-      expect(starButton).toHaveAttribute("aria-pressed", "false");
-      expect(starButton.getAttribute("aria-label")).toMatch(/スター/);
-    });
-
-    it("スター切替コントロールに状態を示す aria-pressed が付与されること（スター付き時）", () => {
-      // Arrange
-      const starredItem = { ...mockItem, is_starred: true };
-      render(
-        <ItemDetail
-          item={starredItem}
-          onMarkAsRead={() => {}}
-          onToggleStar={() => {}}
-        />,
-        { wrapper: createWrapper() }
-      );
-
-      // Act
-      const starButton = screen.getByTestId("star-toggle");
-
-      // Assert
-      expect(starButton).toHaveAttribute("aria-pressed", "true");
-    });
-
-    // Req 2.2 / 2.3: 未スター時は塗りなしアイコン / スター付き時は塗りありアイコン
-    it("未スター時はアイコンが塗りなし（text-muted-foreground）であること", () => {
-      // Arrange
-      render(
-        <ItemDetail
-          item={mockItem}
-          onMarkAsRead={() => {}}
-          onToggleStar={() => {}}
-        />,
-        { wrapper: createWrapper() }
-      );
-
-      // Act
-      const starButton = screen.getByTestId("star-toggle");
-      const icon = starButton.querySelector("svg");
-
-      // Assert
-      expect(icon).not.toBeNull();
-      expect(icon?.getAttribute("class") ?? "").toContain("text-muted-foreground");
-      expect(icon?.getAttribute("class") ?? "").not.toContain("fill-yellow-400");
-    });
-
-    it("スター付き時はアイコンが塗りあり（fill-yellow-400）であること", () => {
-      // Arrange
-      const starredItem = { ...mockItem, is_starred: true };
-      render(
-        <ItemDetail
-          item={starredItem}
-          onMarkAsRead={() => {}}
-          onToggleStar={() => {}}
-        />,
-        { wrapper: createWrapper() }
-      );
-
-      // Act
-      const starButton = screen.getByTestId("star-toggle");
-      const icon = starButton.querySelector("svg");
-
-      // Assert
-      expect(icon).not.toBeNull();
-      expect(icon?.getAttribute("class") ?? "").toContain("fill-yellow-400");
-    });
-
-    // Req 3.4 / 3.5: はてブ数表示はアイコン + 数値、ツールチップで意味を補足
-    it("はてブ数表示にブックマークアイコンとツールチップが付与されること（取得済み）", () => {
-      // Arrange
-      render(
-        <ItemDetail
-          item={mockItem}
-          onMarkAsRead={() => {}}
-          onToggleStar={() => {}}
-        />,
-        { wrapper: createWrapper() }
-      );
-
-      // Act
-      const hatebu = screen.getByTestId("hatebu-count");
-
-      // Assert: アイコン要素と数値テキストの両方が存在する
-      expect(hatebu.querySelector("svg")).not.toBeNull();
-      expect(hatebu).toHaveTextContent("42");
-      // ツールチップ（title 属性）が "はてなブックマーク数" を含むこと
-      expect(hatebu.getAttribute("title") ?? "").toMatch(/はてなブックマーク数/);
-    });
-
-    it("はてブ数表示のツールチップが未取得時に「未取得」を含むこと", () => {
-      // Arrange
-      render(
-        <ItemDetail
-          item={mockItemNoHatebu}
-          onMarkAsRead={() => {}}
-          onToggleStar={() => {}}
-        />,
-        { wrapper: createWrapper() }
-      );
-
-      // Act
-      const hatebu = screen.getByTestId("hatebu-count");
-
-      // Assert
-      expect(hatebu.getAttribute("title") ?? "").toMatch(/未取得/);
-    });
-
-    // Req 4.1: 旧アクションバー（独立した横並び帯）が廃止されること
-    // 旧実装の「元記事を開く」「はてブ数」「テキスト付きスター」の 3 要素を 1 つの兄弟要素内に
-    // 並べる帯が存在していた。新実装ではメタ情報グループにはてブ数とスターのみが含まれ、
-    // 元記事リンクは別行（著者行）に再配置される。
-    it("元記事リンクがメタ情報グループの外側（著者行）に再配置されていること", () => {
-      // Arrange
-      render(
-        <ItemDetail
-          item={mockItem}
-          onMarkAsRead={() => {}}
-          onToggleStar={() => {}}
-        />,
-        { wrapper: createWrapper() }
-      );
-
-      // Act
-      const metaGroup = screen.getByTestId("item-detail-meta-group");
-      const originalLink = screen.getByTestId("original-link");
-
-      // Assert: 元記事リンクはメタ情報グループの子孫ではない
-      expect(metaGroup).not.toContainElement(originalLink);
-    });
-
-    // Req 4.2 / 4.4: 著者名と元記事を開くが同一行に中点区切りで配置される
-    it("著者名と元記事リンクが同一行に中点区切りで配置されること", () => {
-      // Arrange
-      render(
-        <ItemDetail
-          item={mockItem}
-          onMarkAsRead={() => {}}
-          onToggleStar={() => {}}
-        />,
-        { wrapper: createWrapper() }
-      );
-
-      // Act
-      const author = screen.getByTestId("item-detail-author");
-      const separator = screen.getByTestId("item-detail-author-separator");
-      const originalLink = screen.getByTestId("original-link");
-
-      // Assert: 著者名と元記事リンクが同じ親要素を共有していること
-      expect(author.parentElement).toBe(originalLink.parentElement);
-      // 区切り記号も同じ親要素内に存在し、中点であること
-      expect(separator.parentElement).toBe(author.parentElement);
-      expect(separator).toHaveTextContent("・");
-    });
-
-    // Req 4.4: 元記事を開くリンクに外部リンクアイコンが付随表示される
-    it("元記事リンクに外部リンクアイコンが付随表示されること", () => {
-      // Arrange
-      render(
-        <ItemDetail
-          item={mockItem}
-          onMarkAsRead={() => {}}
-          onToggleStar={() => {}}
-        />,
-        { wrapper: createWrapper() }
-      );
-
-      // Act
-      const originalLink = screen.getByTestId("original-link");
-
-      // Assert: SVG アイコン要素が含まれること
-      expect(originalLink.querySelector("svg")).not.toBeNull();
-    });
-
-    // Req 4.5: 著者情報が存在しない場合は区切り記号を伴わず元記事リンクのみ表示
+    // Req 4.5（既存）: 著者情報が無い場合は区切り記号と著者を表示せず元記事リンクのみ
     it("著者情報が存在しない場合は区切り記号を表示せず元記事リンクのみ表示すること", () => {
       // Arrange
       const noAuthorItem: ItemDetailType = { ...mockItem, author: "" };
@@ -830,106 +598,26 @@ describe("ItemDetail コンポーネント", () => {
       expect(
         screen.queryByTestId("item-detail-author-separator")
       ).not.toBeInTheDocument();
-      // 元記事リンクは引き続き表示される
       expect(screen.getByTestId("original-link")).toBeInTheDocument();
     });
 
-    // Req 5.2 / 5.3: スター切替直後にコントロールのアイコン表示が反転後の状態を反映する
-    // 楽観的 UI 更新は親側（useToggleStar フック）の責務だが、押下後に親から渡される
-    // 新しい is_starred 値で再レンダリングしたときアイコンが反転することを担保する。
-    it("スター付き状態で再レンダリングするとアイコンが塗りありに切り替わること", () => {
+    // Req 3.3: 元記事リンクに外部リンクアイコンが付随表示される（既存挙動維持）
+    it("元記事リンクに外部リンクアイコンが付随表示されること", () => {
       // Arrange
-      const { rerender } = render(
-        <ItemDetail
-          item={mockItem}
-          onMarkAsRead={() => {}}
-          onToggleStar={() => {}}
-        />,
-        { wrapper: createWrapper() }
-      );
-
-      // Act: 親が is_starred=true で再レンダリング
-      rerender(
-        <ItemDetail
-          item={{ ...mockItem, is_starred: true }}
-          onMarkAsRead={() => {}}
-          onToggleStar={() => {}}
-        />
-      );
-
-      // Assert
-      const icon = screen.getByTestId("star-toggle").querySelector("svg");
-      expect(icon?.getAttribute("class") ?? "").toContain("fill-yellow-400");
-      expect(screen.getByTestId("star-toggle")).toHaveAttribute(
-        "aria-pressed",
-        "true"
-      );
-    });
-
-    // Req 5.3: スター切替の更新リクエストが失敗したときアイコン表示を操作前の状態に戻す
-    // 楽観的 UI 更新 → 失敗ロールバックは親側（useToggleStar）の責務。ItemDetail は
-    // 親から渡された is_starred の値を素直に反映することを検証する（rerender でロールバックを模倣）。
-    it("更新失敗で is_starred が元の値に戻されたときアイコン表示が操作前の状態に戻ること", () => {
-      // Arrange: スター付きで開始
-      const starredItem = { ...mockItem, is_starred: true };
-      const { rerender } = render(
-        <ItemDetail
-          item={starredItem}
-          onMarkAsRead={() => {}}
-          onToggleStar={() => {}}
-        />,
-        { wrapper: createWrapper() }
-      );
-
-      // 楽観的に未スターへ反転（押下直後）
-      rerender(
-        <ItemDetail
-          item={{ ...starredItem, is_starred: false }}
-          onMarkAsRead={() => {}}
-          onToggleStar={() => {}}
-        />
-      );
-
-      // Act: 更新失敗で親がロールバック → is_starred=true に戻る
-      rerender(
-        <ItemDetail
-          item={{ ...starredItem, is_starred: true }}
-          onMarkAsRead={() => {}}
-          onToggleStar={() => {}}
-        />
-      );
-
-      // Assert: 操作前と同じ「塗りあり / aria-pressed=true」状態
-      const icon = screen.getByTestId("star-toggle").querySelector("svg");
-      expect(icon?.getAttribute("class") ?? "").toContain("fill-yellow-400");
-      expect(screen.getByTestId("star-toggle")).toHaveAttribute(
-        "aria-pressed",
-        "true"
-      );
-    });
-
-    // NFR 2.1: キーボード（Tab フォーカス・Enter 押下）でスター反転が呼び出せる
-    it("スター切替コントロールがキーボード（Enter）で操作できること", async () => {
-      // Arrange
-      const user = userEvent.setup();
-      const onToggleStar = vi.fn();
       render(
         <ItemDetail
           item={mockItem}
           onMarkAsRead={() => {}}
-          onToggleStar={onToggleStar}
+          onToggleStar={() => {}}
         />,
         { wrapper: createWrapper() }
       );
 
-      // Act: フォーカス遷移は環境依存があるためボタンに直接フォーカスを当てる
-      const starButton = screen.getByTestId("star-toggle");
-      starButton.focus();
-      expect(starButton).toHaveFocus();
-      await user.keyboard("{Enter}");
+      // Act
+      const originalLink = screen.getByTestId("original-link");
 
-      // Assert
-      expect(onToggleStar).toHaveBeenCalledWith("item-1", true);
+      // Assert: SVG アイコン要素が含まれること
+      expect(originalLink.querySelector("svg")).not.toBeNull();
     });
   });
 });

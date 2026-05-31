@@ -133,6 +133,7 @@ export function StarredItemList() {
                     item={item}
                     isExpanded={isExpanded}
                     onClick={() => handleSelectItem(item.id)}
+                    onToggleStar={handleToggleStar}
                   />
                   {/* feed_title を行直下に薄い文字色で 1 行表示（Req 2.4） */}
                   <div

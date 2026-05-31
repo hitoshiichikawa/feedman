@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ExternalLink, Star, Bookmark } from "lucide-react";
+import { ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { sanitizeContentHtml } from "@/lib/sanitize";
@@ -19,22 +19,29 @@ interface ItemDetailProps {
   item: ItemDetailType;
   /** 既読にするコールバック */
   onMarkAsRead: (itemId: string) => void;
-  /** スター切替コールバック */
+  /**
+   * スター切替コールバック。
+   *
+   * 型互換維持のため残置するが、本コンポーネント本体では使用しない
+   * （Issue #154 / Task 7 で詳細ヘッダーからメタを撤去し、スター操作は一覧側
+   * `ItemMetaActions` に集約された）。prop 自体の cleanup は別 Issue で行う。
+   */
   onToggleStar: (itemId: string, isStarred: boolean) => void;
 }
 
 /**
  * 記事展開表示コンポーネント
  *
- * ヘッダー領域にタイトル（左）・はてなブックマーク数表示・スター切替
- * （アイコンのみのトグル）を同一行に左右配置し、著者名と「元記事を開く」リンクを
- * 中点区切りで隣接配置する。本文はサニタイズ済み HTML を 300px で折りたたみ、
+ * ヘッダー領域はタイトル（外部リンク化）と、著者名・「元記事を開く」リンクの
+ * 中点区切り行のみで構成する。本文はサニタイズ済み HTML を 300px で折りたたみ、
  * 「続きを読む」トグルで全文展開する。展開時に未読記事は自動的に既読にする。
+ *
+ * Issue #154 / Task 7 によりはてなブックマーク数表示とスター切替トグルは
+ * 詳細ヘッダーから撤去された（一覧側 `ItemMetaActions` に集約）。
  */
 export function ItemDetail({
   item,
   onMarkAsRead,
-  onToggleStar,
 }: ItemDetailProps) {
   // 展開時に未読なら自動的に既読にする
   useEffect(() => {
@@ -44,10 +51,6 @@ export function ItemDetail({
     // item.idが変わった時のみ実行（展開された記事が変わった時）
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [item.id]);
-
-  /** はてブ数の表示テキスト */
-  const hatebuDisplay =
-    item.hatebu_fetched_at === null ? "-" : String(item.hatebu_count);
 
   // 記事本文を DOM 挿入前にクライアント側でサニタイズする（多層防御）。
   // 同一記事本文に対する再計算を避けるため item.content をキーにメモ化する。
@@ -79,23 +82,13 @@ export function ItemDetail({
   // 折りたたみ中（閾値超過かつ未展開）はクリップとフェードアウトを表示する。
   const isCollapsed = isOverflowing && !isExpanded;
 
-  // スター切替コントロールのアクセシブル名。状態と用途を支援技術へ伝える（Req 2.7）。
-  const starLabel = item.is_starred ? "スターを解除する" : "スターを付ける";
-  // はてブ数のツールチップ。未取得時は数値ではなく取得状況を伝える（Req 3.5）。
-  const hatebuTitle = item.hatebu_fetched_at
-    ? `はてなブックマーク数: ${item.hatebu_count}`
-    : "はてなブックマーク数未取得";
-
   return (
     <div className="border-t bg-background px-4 py-4 space-y-4">
-      {/* ヘッダー: タイトル(左) + メタ情報(右) を同一行に左右配置（Req 1.1〜1.5） */}
+      {/* ヘッダー: タイトル + 著者・元記事リンク行 */}
       <div className="space-y-1">
-        <div
-          data-testid="item-detail-title-row"
-          className="flex items-start gap-3"
-        >
-          {/* タイトルリンク（長文時は折り返し、shrink を許容するため min-w-0 を付与）。 */}
-          <h3 className="flex-1 min-w-0 text-lg font-semibold leading-tight">
+        <div data-testid="item-detail-title-row">
+          {/* タイトルリンク（長文時は折り返し）。 */}
+          <h3 className="text-lg font-semibold leading-tight">
             <a
               href={item.link}
               target="_blank"
@@ -105,51 +98,9 @@ export function ItemDetail({
               {item.title}
             </a>
           </h3>
-
-          {/* タイトル右側のメタ情報グループ（はてブ数 + スター切替）。
-             縮小せず常にタイトル右端に整列する（Req 1.3, 1.4, 1.5）。 */}
-          <div
-            data-testid="item-detail-meta-group"
-            className="flex flex-shrink-0 items-center gap-1"
-          >
-            {/* はてなブックマーク数（アイコン + 数値、ツールチップで意味を補足） */}
-            <span
-              data-testid="hatebu-count"
-              className="inline-flex items-center gap-1 text-sm text-muted-foreground px-1"
-              title={hatebuTitle}
-            >
-              <Bookmark className="w-4 h-4" aria-hidden="true" />
-              {hatebuDisplay}
-            </span>
-
-            {/* スター切替コントロール（アイコンのみのトグル、Req 2.1〜2.7 / NFR 2.1, 2.2）。
-               size="icon-sm" で 32px の正方形ヒット領域を確保し、
-               ghost variant のホバー時 bg-accent と rounded-full で丸い背景強調を提供する。 */}
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              data-testid="star-toggle"
-              aria-label={starLabel}
-              aria-pressed={item.is_starred}
-              title={starLabel}
-              className="rounded-full"
-              onClick={() => onToggleStar(item.id, !item.is_starred)}
-            >
-              <Star
-                aria-hidden="true"
-                className={cn(
-                  "w-4 h-4",
-                  item.is_starred
-                    ? "fill-yellow-400 text-yellow-400"
-                    : "text-muted-foreground"
-                )}
-              />
-            </Button>
-          </div>
         </div>
 
-        {/* 著者名 ・ 元記事を開く（Req 4.2, 4.3, 4.4, 4.5）。
+        {/* 著者名 ・ 元記事を開く（Req 3.3 で維持）。
            著者情報が無い場合は中点を伴わず元記事リンクのみを表示する。 */}
         <p className="flex flex-wrap items-center gap-x-2 text-sm text-muted-foreground">
           {item.author && (

@@ -700,10 +700,11 @@ func TestSearch_RepoError(t *testing.T) {
 
 // TestSearch_HitsConvertedToSummaries: ItemSearchHit の各フィールドが ItemSearchSummary に
 // 正しくマッピングされる。FaviconURL は nil（Adapter 層の責務）であり、FaviconData /
-// FaviconMime が pass-through される。
+// FaviconMime / HatebuFetchedAt が pass-through される。
 func TestSearch_HitsConvertedToSummaries(t *testing.T) {
 	// Arrange
 	publishedAt := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
+	hatebuFetchedAt := time.Date(2026, 5, 29, 10, 0, 0, 0, time.UTC)
 	hit := model.ItemSearchHit{
 		ID:              "item-x",
 		FeedID:          "feed-x",
@@ -718,6 +719,7 @@ func TestSearch_HitsConvertedToSummaries(t *testing.T) {
 		IsRead:          true,
 		IsStarred:       true,
 		HatebuCount:     42,
+		HatebuFetchedAt: &hatebuFetchedAt,
 	}
 	repo := &mockItemSearchRepo{returnHits: []model.ItemSearchHit{hit}}
 	subRepo := &mockSubRepo{}
@@ -746,9 +748,68 @@ func TestSearch_HitsConvertedToSummaries(t *testing.T) {
 		IsRead:          true,
 		IsStarred:       true,
 		HatebuCount:     42,
+		HatebuFetchedAt: &hatebuFetchedAt,
 	}
 	if !reflect.DeepEqual(got.Items[0], want) {
 		t.Errorf("Items[0] = %+v, want %+v", got.Items[0], want)
+	}
+}
+
+// TestSearch_HatebuFetchedAt_NilAndNonNilPassthrough は ItemSearchHit.HatebuFetchedAt が
+// nil（未取得）と非 nil（取得済み）の両方で、ItemSearchSummary に pass-through される
+// ことを検証する（Req 5.1, 5.3, 5.4）。
+//
+// (a) 取得済み → Summary.HatebuFetchedAt が同じ時刻のポインタとして伝搬する
+// (b) 未取得 → Summary.HatebuFetchedAt が nil として伝搬する
+func TestSearch_HatebuFetchedAt_NilAndNonNilPassthrough(t *testing.T) {
+	// Arrange
+	publishedAt := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
+	hatebuFetchedAt := time.Date(2026, 5, 29, 10, 0, 0, 0, time.UTC)
+	hits := []model.ItemSearchHit{
+		{
+			ID:              "item-fetched",
+			FeedID:          "feed-1",
+			FeedTitle:       "Feed One",
+			Title:           "fetched",
+			PublishedAt:     publishedAt,
+			HatebuCount:     5,
+			HatebuFetchedAt: &hatebuFetchedAt,
+		},
+		{
+			ID:              "item-unfetched",
+			FeedID:          "feed-1",
+			FeedTitle:       "Feed One",
+			Title:           "unfetched",
+			PublishedAt:     publishedAt.Add(-time.Second),
+			HatebuCount:     0,
+			HatebuFetchedAt: nil,
+		},
+	}
+	repo := &mockItemSearchRepo{returnHits: hits}
+	subRepo := &mockSubRepo{}
+	svc := NewSearchService(repo, subRepo)
+
+	// Act
+	got, err := svc.Search(context.Background(), "user-1", "test", nil, "", 10)
+	// Assert
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got.Items) != 2 {
+		t.Fatalf("len(Items) = %d, want 2", len(got.Items))
+	}
+
+	// (a) 取得済み記事: Summary.HatebuFetchedAt は非 nil で、同じ時刻を持つ
+	if got.Items[0].HatebuFetchedAt == nil {
+		t.Fatal("取得済み記事の Summary.HatebuFetchedAt が nil（pass-through 失敗）")
+	}
+	if !got.Items[0].HatebuFetchedAt.Equal(hatebuFetchedAt) {
+		t.Errorf("Items[0].HatebuFetchedAt = %v, want %v", *got.Items[0].HatebuFetchedAt, hatebuFetchedAt)
+	}
+
+	// (b) 未取得記事: Summary.HatebuFetchedAt は nil
+	if got.Items[1].HatebuFetchedAt != nil {
+		t.Errorf("未取得記事の Summary.HatebuFetchedAt が nil でない: got %v", *got.Items[1].HatebuFetchedAt)
 	}
 }
 

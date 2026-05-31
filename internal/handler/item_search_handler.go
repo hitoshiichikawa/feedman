@@ -57,18 +57,22 @@ func NewItemSearchHandler(service ItemSearchServiceInterface) *ItemSearchHandler
 // 生バイト + MIME を Adapter 層で組み立てた結果が入る。欠落時は nil を入れ、JSON では
 // `omitempty` でフィールドごと省略する（既存 subscription レスポンスと同じ流儀）。
 type itemSearchHitResponse struct {
-	ID              string    `json:"id"`
-	FeedID          string    `json:"feed_id"`
-	FeedTitle       string    `json:"feed_title"`
-	FaviconURL      *string   `json:"favicon_url,omitempty"`
-	Title           string    `json:"title"`
-	Link            string    `json:"link"`
-	Summary         string    `json:"summary"`
-	PublishedAt     time.Time `json:"published_at"`
-	IsDateEstimated bool      `json:"is_date_estimated"`
-	IsRead          bool      `json:"is_read"`
-	IsStarred       bool      `json:"is_starred"`
-	HatebuCount     int       `json:"hatebu_count"`
+	ID              string     `json:"id"`
+	FeedID          string     `json:"feed_id"`
+	FeedTitle       string     `json:"feed_title"`
+	FaviconURL      *string    `json:"favicon_url,omitempty"`
+	Title           string     `json:"title"`
+	Link            string     `json:"link"`
+	Summary         string     `json:"summary"`
+	PublishedAt     time.Time  `json:"published_at"`
+	IsDateEstimated bool       `json:"is_date_estimated"`
+	IsRead          bool       `json:"is_read"`
+	IsStarred       bool       `json:"is_starred"`
+	HatebuCount     int        `json:"hatebu_count"`
+	// HatebuFetchedAt は items.hatebu_fetched_at の値。nil の場合は JSON から
+	// omit され、フロント側は通常一覧 / スター横断一覧と同じ「未取得 → '-'」表示判定で
+	// `-` を表示する。取得済みの場合は時刻文字列として出力する。
+	HatebuFetchedAt *time.Time `json:"hatebu_fetched_at,omitempty"`
 }
 
 // itemSearchResponse は GET /api/items/search のレスポンス。

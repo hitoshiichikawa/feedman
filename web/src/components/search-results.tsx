@@ -1,13 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useRef } from "react";
-import { Star } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAppState, useAppDispatch } from "@/contexts/app-state";
 import { useItemSearch } from "@/hooks/use-item-search";
 import { useItemDetail } from "@/hooks/use-items";
 import { useMarkAsRead, useToggleStar } from "@/hooks/use-item-state";
 import { ItemDetail } from "@/components/item-detail";
+import { ItemMetaActions } from "@/components/item-meta-actions";
 import type {
   ItemDetail as ItemDetailType,
   ItemSearchHit,
@@ -151,6 +151,7 @@ export function SearchResults() {
                   isExpanded={isExpanded}
                   showFeedBadge={state.searchScope === "global"}
                   onClick={() => handleSelectItem(hit.id)}
+                  onToggleStar={handleToggleStar}
                 />
                 {isExpanded && (
                   <SearchResultDetailArea
@@ -245,6 +246,14 @@ interface SearchResultRowProps {
   /** true のとき feed_title + favicon バッジを表示する（横断検索時 / Req 4.2） */
   showFeedBadge: boolean;
   onClick: () => void;
+  /**
+   * スター⭐️切替コールバック（Issue #154 / Task 6 で追加）。
+   *
+   * 検索結果行右端の `ItemMetaActions` から発火し、`useToggleStar` mutation を呼び出す。
+   * クリックイベントは `ItemMetaActions` 側で `e.stopPropagation()` 済みのため、
+   * 行クリック展開（`onClick`）は発火しない（Req 2.3 / NFR 2.1）。
+   */
+  onToggleStar: (itemId: string, nextStarred: boolean) => void;
 }
 
 /**
@@ -253,12 +262,17 @@ interface SearchResultRowProps {
  * `showFeedBadge` が true のとき favicon と feed_title を併記する（Req 4.2）。
  * 検索結果固有の構造（next_cursor / has_more が API レスポンスに含まれる）と
  * 通常一覧の `ItemRow` で構造体が異なるため、共通化はせず併設する設計を採った。
+ *
+ * Issue #154 / Task 6: タイトル行の右端に `ItemMetaActions`（はてブ数 + スター⭐️
+ * トグル）を配置し、従来の読み取り専用 `Star` アイコンを置き換える（Req 1.1〜1.7 /
+ * 2.3 / 4.3 / 5.3 / 5.4）。
  */
 function SearchResultRow({
   hit,
   isExpanded,
   showFeedBadge,
   onClick,
+  onToggleStar,
 }: SearchResultRowProps) {
   const date = hit.published_at !== null ? new Date(hit.published_at) : null;
   const formattedDate = date !== null ? formatDate(date) : "日付不明";
@@ -325,12 +339,18 @@ function SearchResultRow({
           )}
         </span>
 
-        {hit.is_starred && (
-          <Star
-            className="flex-shrink-0 w-4 h-4 fill-yellow-400 text-yellow-400"
-            data-testid={`search-result-star-${hit.id}`}
-          />
-        )}
+        {/* 検索結果行右端メタ表示: はてブ数 + スター⭐️トグル（Issue #154 / Req 1.1〜1.7 / 2.3 / 5.3 / 5.4）
+            日時表示の右隣に配置し、既存の読み取り専用 `Star` アイコンを置き換える。
+            クリック時の伝播抑止は `ItemMetaActions` 側で行うため、行クリック展開は発火しない。
+            `hit.hatebu_fetched_at` は Go 側 omitempty により未取得時 undefined となる可能性が
+            あるため、`?? null` で正規化する（design.md Notes for Developers）。 */}
+        <ItemMetaActions
+          itemId={hit.id}
+          isStarred={hit.is_starred}
+          hatebuCount={hit.hatebu_count}
+          hatebuFetchedAt={hit.hatebu_fetched_at ?? null}
+          onToggleStar={onToggleStar}
+        />
       </div>
 
       {/* 概要（空のときは描画しない） */}

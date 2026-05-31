@@ -139,6 +139,101 @@ func TestItemSearchHandler_Search_Global_Success(t *testing.T) {
 	}
 }
 
+// TestItemSearchHandler_Search_HatebuFetchedAt_PresentAndOmitted は検索 API レスポンスで
+// hatebu_fetched_at フィールドが (a) 取得済み記事では JSON に含まれ RFC3339Nano 時刻として
+// 出力され、(b) 未取得記事（HatebuFetchedAt=nil）では omitempty により JSON から省略される
+// ことを検証する（Req 5.1, 5.3, 5.4）。これにより通常一覧 / スター横断一覧と表示判定を
+// 統一できる。
+func TestItemSearchHandler_Search_HatebuFetchedAt_PresentAndOmitted(t *testing.T) {
+	// Arrange
+	fetchedAt := time.Date(2026, 5, 29, 10, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(time.Second)
+	svc := &mockItemSearchService{
+		searchFn: func(_ context.Context, _, _ string, _ *string, _ string, _ int) (*itemSearchResponse, error) {
+			return &itemSearchResponse{
+				Items: []itemSearchHitResponse{
+					{
+						ID:              "item-fetched",
+						FeedID:          "feed-a",
+						FeedTitle:       "Feed A",
+						Title:           "Fetched item",
+						Link:            "https://example.com/1",
+						PublishedAt:     now,
+						HatebuCount:     0,
+						HatebuFetchedAt: &fetchedAt, // 取得済み（はてブ 0 件）
+					},
+					{
+						ID:              "item-unfetched",
+						FeedID:          "feed-a",
+						FeedTitle:       "Feed A",
+						Title:           "Unfetched item",
+						Link:            "https://example.com/2",
+						PublishedAt:     now,
+						HatebuCount:     0,
+						HatebuFetchedAt: nil, // 未取得
+					},
+				},
+			}, nil
+		},
+	}
+	h := NewItemSearchHandler(svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/items/search?q=foo", nil)
+	req = withUserID(req, "user-1")
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Search(w, req)
+
+	// Assert
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusOK)
+	}
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	items, ok := body["items"].([]interface{})
+	if !ok || len(items) != 2 {
+		t.Fatalf("items invalid: %v", body["items"])
+	}
+
+	// 1 件目: 取得済み → hatebu_fetched_at が JSON に含まれる
+	first := items[0].(map[string]interface{})
+	gotFetchedAt, hasFetchedAt := first["hatebu_fetched_at"]
+	if !hasFetchedAt {
+		t.Fatal("取得済み記事で hatebu_fetched_at フィールドが JSON から欠落している")
+	}
+	gotFetchedAtStr, ok := gotFetchedAt.(string)
+	if !ok {
+		t.Fatalf("hatebu_fetched_at が文字列でない: got %T", gotFetchedAt)
+	}
+	parsedFetchedAt, err := time.Parse(time.RFC3339Nano, gotFetchedAtStr)
+	if err != nil {
+		t.Fatalf("hatebu_fetched_at が RFC3339Nano 形式でない: %v", err)
+	}
+	if !parsedFetchedAt.Equal(fetchedAt) {
+		t.Errorf("hatebu_fetched_at = %v, want %v", parsedFetchedAt, fetchedAt)
+	}
+
+	// 2 件目: 未取得 → hatebu_fetched_at は JSON に含まれない（omitempty）
+	second := items[1].(map[string]interface{})
+	if _, hasUnfetched := second["hatebu_fetched_at"]; hasUnfetched {
+		t.Errorf("未取得記事で hatebu_fetched_at フィールドが JSON に含まれている（omitempty 失敗）: got %v", second["hatebu_fetched_at"])
+	}
+
+	// 既存フィールドが両件で保持されていること（Req 5.2 非回帰）
+	for i, it := range []map[string]interface{}{first, second} {
+		if it["feed_title"] != "Feed A" {
+			t.Errorf("items[%d].feed_title = %v, want Feed A", i, it["feed_title"])
+		}
+		if it["hatebu_count"] != float64(0) {
+			t.Errorf("items[%d].hatebu_count = %v, want 0", i, it["hatebu_count"])
+		}
+	}
+}
+
 // --- 200 OK: フィード内検索成功 ---
 
 // TestItemSearchHandler_Search_Feed_Success は q=foo&feed_id=<uuid> のフィード内検索で
