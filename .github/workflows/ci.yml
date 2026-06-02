@@ -47,8 +47,11 @@ jobs:
         # 静的バイナリ構成（CGO_ENABLED=0）と同条件でビルドできることを確認する。
         run: CGO_ENABLED=0 go build -o /tmp/feedman ./cmd/feedman
 
+      # go test ./... はパッケージを並列実行するため、同一のテスト DB (feedman_test) を
+      # 共有する internal/database / internal/repository / internal/app がスキーマを
+      # 同時に作り替えて衝突する（issue #158）。 -p 1 でパッケージ直列化により回避する。
       - name: Run tests
-        run: go test ./...
+        run: go test -p 1 ./...
 
   go-vet:
     name: Go Static Analysis (go vet)
