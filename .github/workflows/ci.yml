@@ -48,7 +48,12 @@ jobs:
         run: CGO_ENABLED=0 go build -o /tmp/feedman ./cmd/feedman
 
       - name: Run tests
-        run: go test ./...
+        # Issue #158: internal/database / internal/repository が同一テスト用 DB を共有しており、
+        # パッケージ間並列実行で migrate 冪等性検証中に他パッケージの DDL/DML が混入し
+        # `pq: relation "users" already exists` 等の flaky 失敗が発生する。
+        # `-p 1` でパッケージ間の並列度を 1 に抑制し、DB 共有レースを根本回避する
+        # （パッケージ内部の `t.Parallel()` は引き続き有効）。
+        run: go test -p 1 ./...
 
   go-vet:
     name: Go Static Analysis (go vet)

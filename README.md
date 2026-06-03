@@ -336,7 +336,27 @@ CORSMiddleware → SessionMiddleware → RateLimitMiddleware(General)
 ### バックエンドのテスト
 
 ```bash
-go test ./...
+# CI と同じ並列度抑制ポリシー（パッケージ間並列度を 1 に固定）で実行する。
+# `internal/database` / `internal/repository` の DB 結合テストが同一テスト用 DB を
+# 共有しているため、パッケージ間並列実行で `pq: relation "users" already exists` 等の
+# flaky 失敗が発生する（Issue #158）。`-p 1` で直列化することでレースを根本回避する。
+# パッケージ **内部** の `t.Parallel()` は引き続き有効（パッケージ間並列のみ抑制）。
+go test -p 1 ./...
+```
+
+DB 結合テスト（`internal/database` / `internal/repository`）を実際に走らせるには、
+ローカルで PostgreSQL を起動し `TEST_DATABASE_URL` を設定するか、default 接続先
+（`postgres://feedman:feedman@localhost:5432/feedman_test?sslmode=disable`）が到達可能な
+状態にしておく必要がある。未到達の場合、DB 結合テストは従来通り `t.Skipf` で skip される。
+
+```bash
+# 例: ローカルで docker run を使ってテスト用 DB を起動する
+docker run -d --rm --name feedman-test-db \
+  -e POSTGRES_USER=feedman -e POSTGRES_PASSWORD=feedman -e POSTGRES_DB=feedman_test \
+  -p 5432:5432 postgres:16
+
+export TEST_DATABASE_URL='postgres://feedman:feedman@localhost:5432/feedman_test?sslmode=disable'
+go test -p 1 ./...
 ```
 
 ### フロントエンドのテスト
