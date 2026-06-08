@@ -1,7 +1,7 @@
 module github.com/hitoshi/feedman
 
 go 1.25.0
-toolchain go1.25.10
+toolchain go1.25.11
 
 require (
 	github.com/go-chi/chi/v5 v5.2.5
