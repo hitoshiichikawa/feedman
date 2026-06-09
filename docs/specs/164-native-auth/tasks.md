@@ -13,7 +13,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
 
 - [ ] 2. Model: AuthCode / RefreshTokenFamily / RefreshToken の struct を追加
-- [ ] 2.1 `internal/model/auth_code.go` を新規作成 (P)
+- [x] 2.1 `internal/model/auth_code.go` を新規作成 (P)
   - `model.AuthCode` を design.md の Struct Sketch どおりに定義（`CodeHash` / `UserID` /
     `PKCEChallenge` / `ExpiresAt` / `Used` / `CreatedAt`、平文 `Code` フィールドは持たない）
   - doc comment は「平文 code は保持しない」旨を明記（NFR 1.1）
