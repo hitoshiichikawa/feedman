@@ -41,6 +41,18 @@
   - `time` の精度差を吸収するため、Case 1 では `expires_at` を `.UTC().Truncate(time.Microsecond)` してから比較し、PostgreSQL `TIMESTAMPTZ` の microsecond 精度と Go の nanosecond 精度の差で flaky にならないようにした。
 - 残存課題: Task 5 (PostgresRefreshTokenRepo) も同一 cleanup 集合（refresh_tokens / refresh_token_families / auth_codes を含む）と `time.Microsecond` truncate の流儀を踏襲する想定。Task 6 のセキュリティ回帰テスト（平文の逆引きで 0 件確認）と interface compile-time check 集約は本 task でも実装しなかった（Task 6 の scope）。
 
+### Task 5
+
+- 採用方針: design.md §Components and Interfaces > PostgresRefreshTokenRepo の方針 (1 メソッド 1 SQL を基本 + RevokeFamily のみ 2 UPDATE / compile-time check / sentinel error 利用) を踏襲し、`internal/repository/postgres_refresh_token_repo.go` に `PostgresRefreshTokenRepo`(`*sql.DB` field + `NewPostgresRefreshTokenRepo` + `CreateFamily` / `CreateToken` / `FindByHash` / `MarkRotated` / `RevokeFamily` / `DeleteByUserID` の 6 メソッド + `var _ RefreshTokenRepository = (*PostgresRefreshTokenRepo)(nil)`) を実装。DB 結合テストは Task 4 (`postgres_auth_code_repo_db_test.go`) と同一 cleanup SQL 集合・同一 `time.Microsecond` truncate 流儀で揃え、design.md §Testing Strategy の RefreshTokenRepo 6 ケースを 1 つの `TestPostgresRefreshTokenRepo_DB` 関数配下の 6 サブテストで実装した。
+- 重要な判断:
+  - `MarkRotated` は WHERE 句で `rotated_at IS NULL` を判定し、`RowsAffected = 0` で `ErrRefreshTokenAlreadyRotated` を返す race 安全な単一 UPDATE に統一（Task 4 の MarkUsed と同パターン）。既存 rotated_at 値の保持を Case 2 のサブテストで検証している。
+  - `RevokeFamily` は family・token の 2 UPDATE を 1 メソッド内で逐次実行し、両方とも `SET revoked_at = COALESCE(revoked_at, $1)` で既存値を保持することで二重 revoke を冪等化した。design.md の「ベストエフォート冪等（外側 tx 化は呼び出し側に委ねる）」方針に整合。Case 4 で 1 回目と異なる revokedAt を 2 回目に渡し、既存値（1 回目の値）が保持されることを family / token 両方で検証している。
+  - `DeleteByUserID` は `DELETE FROM refresh_token_families WHERE user_id = $1` の 1 文のみを発行し、`refresh_tokens` は `family_id` への FK `ON DELETE CASCADE` で自動削除する design.md の選好（後者の単純化案）を採用。Case 5 で user A の token が 0 件になり user B が無影響であることを検証している。
+  - `CreateFamily` / `CreateToken` の id / created_at は Task 4 (`PostgresAuthCodeRepo`) と完全に同じ COALESCE 委譲方式（`COALESCE($N::uuid, gen_random_uuid())` / `COALESCE($M::timestamptz, now())` + `RETURNING id, created_at`）で実装。RotatedAt / RevokedAt は `*time.Time` のまま渡すと `lib/pq` が NULL として扱うため、COALESCE を介さず直接バインドで十分（明示 NULL 表現が不要）。
+  - エラー message は "failed to create refresh_token_family" / "failed to create refresh_token" / "failed to find refresh_token" / "failed to mark refresh_token rotated" / "failed to revoke refresh_token_family" / "failed to revoke refresh_tokens by family" / "failed to delete refresh_token_families by user" の 7 種固定とし、token_hash / family_id / user_id / id のいずれも message に含めない（NFR 1.2 / Task 3 の sentinel 文言方針と整合）。
+  - DB 結合テストの cleanup SQL は Task 4 と完全一致（`refresh_tokens` / `refresh_token_families` / `auth_codes` を先頭で DROP）。同一 DB を使い回す開発機での再 up 失敗リスクを Task 4 と同条件で解消する。`time.Microsecond` truncate は ExpiresAt / RotatedAt / RevokedAt の比較で flaky 回避目的に揃えた。
+- 残存課題: Task 6 のセキュリティ回帰テスト（平文 `"plain-token-xxx"` 等の逆引きで 0 件確認）と interface compile-time check 集約（`TestPostgresRefreshTokenRepo_ImplementsInterface` 等）と sentinel error 判別 unit test は Task 6 の scope なので本 task では着手していない。
+
 ## 確認事項
 
 （現時点で人間判断を仰ぐ事項はなし）
