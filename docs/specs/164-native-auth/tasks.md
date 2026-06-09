@@ -27,7 +27,7 @@
   - _Requirements: 3.1, 3.2_
   - _Boundary: model.RefreshTokenFamily, model.RefreshToken_
 
-- [ ] 3. Repository interface と sentinel error を `interfaces.go` に追加
+- [x] 3. Repository interface と sentinel error を `interfaces.go` に追加
   - `internal/repository/interfaces.go` に `AuthCodeRepository` interface（`Create` /
     `FindByHash` / `MarkUsed`）と `RefreshTokenRepository` interface（`CreateFamily` /
     `CreateToken` / `FindByHash` / `MarkRotated` / `RevokeFamily` / `DeleteByUserID`）を
