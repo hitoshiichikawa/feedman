@@ -53,6 +53,16 @@
   - DB 結合テストの cleanup SQL は Task 4 と完全一致（`refresh_tokens` / `refresh_token_families` / `auth_codes` を先頭で DROP）。同一 DB を使い回す開発機での再 up 失敗リスクを Task 4 と同条件で解消する。`time.Microsecond` truncate は ExpiresAt / RotatedAt / RevokedAt の比較で flaky 回避目的に揃えた。
 - 残存課題: Task 6 のセキュリティ回帰テスト（平文 `"plain-token-xxx"` 等の逆引きで 0 件確認）と interface compile-time check 集約（`TestPostgresRefreshTokenRepo_ImplementsInterface` 等）と sentinel error 判別 unit test は Task 6 の scope なので本 task では着手していない。
 
+### Task 6
+
+- 採用方針: Task 6 で求められた 3 項目 (1) セキュリティ回帰テスト (NFR 1.1 自動検出) (2) interface compile-time check の集約 (Req 4.3) (3) sentinel error 判別 unit test (NFR 1.2) を、それぞれ責務に応じたファイル配置で追加した。具体的には sentinel error 判別を新規 `internal/repository/errors_test.go` の `TestSentinelErrors_AreDistinct`（4 サブテスト）、interface 集約を既存 `internal/repository/tx_test.go` の末尾に `TestPostgresAuthCodeRepo_ImplementsInterface` / `TestPostgresRefreshTokenRepo_ImplementsInterface` の 2 関数として追加、セキュリティ回帰を既存 2 つの `*_db_test.go` 内のサブテスト（auth_code は Case 6、refresh_token は Case 7）として追加した。
+- 重要な判断:
+  - sentinel error 判別 test は DB 接続を必要としないため、新規 `errors_test.go`（unit test 専用）に独立配置した。`tx_test.go` への同居も検討したが、tx_test.go は「DB 関連 helper / interface check の薄い集約点」という位置付けが既に確立しており、純粋 unit test である sentinel 判別はファイル責務を分離する方が読みやすいと判断した。また errors.Is の自己一致 / 相互区別 / wrap 後の判別 / 固定文言の 4 観点を 1 つの `TestSentinelErrors_AreDistinct` 配下のサブテストとして並べることで、NFR 1.2 回帰の網羅性を 1 関数で見通せる構成にした。固定文言の正本（"auth_code is not usable" / "refresh_token already rotated"）は Task 3 で interfaces.go に確定した文言と完全一致させており、文言が変更された場合に test 側で気付ける形になっている。
+  - interface compile-time check は実装ファイル側にも残っている `var _ AuthCodeRepository = (*PostgresAuthCodeRepo)(nil)` /`var _ RefreshTokenRepository = (*PostgresRefreshTokenRepo)(nil)` をそのまま温存した上で、tasks.md の指示どおり `tx_test.go` 同様の集約箇所にも複製した。test 関数として「実行時に呼ばれるが body は `var _ ... = ...` 1 行だけ」のスタイルで配置（既存 `TestDBTX_SatisfiedBySQLTypes` の流儀に揃えた）。これにより interface drift（メソッドシグネチャ変更や追加など）は 2 箇所（実装ファイル直下 / tx_test.go）の compile-time check で同時に検出される構造になる。
+  - セキュリティ回帰テストは「平文文字列が code_hash / token_hash カラムにそのまま書かれていないこと」を直接 SELECT で確認するアプローチを採用した。Create では呼び出し側で hash 化された値を保存する前提だが、本リポジトリ層は hash 化責務を持たないため「実装上 hash と平文が異なる文字列であることを表現する」目的で test 内では `"hash::" + plainCode` のような prefix 付き文字列を hash 表現として用い、平文側 `plainCode` で SELECT すると 0 件、`hash` 値で SELECT すると 1 件、を 1 つのテーブル状態で同時検証した。auth_code 側では pkce_challenge カラムへの平文混入も併せて確認する防御的回帰を追加（NFR 1.1 の「永続化領域に平文を 0 件」を column-level で網羅）。
+  - 既存テスト構造を尊重し、`postgres_auth_code_repo_db_test.go` のセキュリティ回帰サブテストは Case 5（CASCADE 削除）の前に Case 6 として挿入。これは Case 5 が users 削除を伴うため後続の独立性確保の意味合いから「平文回帰 → CASCADE」の順とした方が個別 Case 間の干渉が明示的に分離されるため。`postgres_refresh_token_repo_db_test.go` も同様に最終 Case 6（not-found）の前に Case 7 として挿入した（Case 番号は新規追加であり既存 6 ケースの番号自体は不変）。
+- 残存課題: なし。本 Task 6 で全 Implementation Plan は完了した。後続 Issue（#165 以降の handler 層）が本 repository を呼び出す際、本セキュリティ回帰テストと sentinel error 判別 test は repository 改修時の guard として作用する想定。
+
 ## 確認事項
 
 （現時点で人間判断を仰ぐ事項はなし）
