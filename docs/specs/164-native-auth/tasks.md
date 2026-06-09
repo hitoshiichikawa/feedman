@@ -52,7 +52,7 @@
   - _Requirements: 2.1, 2.4, 2.5, 2.6, 2.7, 4.4, NFR 1.1, NFR 1.2, NFR 3.1, NFR 3.2_
   - _Depends: 1, 3_
 
-- [ ] 5. PostgresRefreshTokenRepo の実装と DB 結合テスト
+- [x] 5. PostgresRefreshTokenRepo の実装と DB 結合テスト
   - `internal/repository/postgres_refresh_token_repo.go` を新規作成し、`RefreshTokenRepository`
     の全メソッドを実装（compile-time check 含む）
   - `MarkRotated` は `UPDATE ... WHERE id = $1 AND rotated_at IS NULL` で `RowsAffected = 0`
