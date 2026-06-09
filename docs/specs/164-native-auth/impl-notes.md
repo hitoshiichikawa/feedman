@@ -30,6 +30,17 @@
   - `import` に `"errors"` を追加。`"time"` は既存 import で `RefreshTokenRepository.MarkRotated(ctx, id, rotatedAt time.Time)` および `RevokeFamily(ctx, familyID, revokedAt time.Time)` のシグネチャでそのまま流用できる。
 - 残存課題: なし。Task 4(PostgresAuthCodeRepo 実装)・Task 5(PostgresRefreshTokenRepo 実装)は本 interface を直接 satisfy する形で進められる。compile-time check(`var _ AuthCodeRepository = (*PostgresAuthCodeRepo)(nil)` 等)は各実装ファイル側で追加する設計通り。
 
+### Task 4
+
+- 採用方針: design.md §Components and Interfaces > PostgresAuthCodeRepo の方針 (1 メソッド 1 SQL / compile-time check / sentinel error 利用) を踏襲し、`internal/repository/postgres_auth_code_repo.go` に `PostgresAuthCodeRepo`(`*sql.DB` field + `NewPostgresAuthCodeRepo` + `Create` / `FindByHash` / `MarkUsed` の 3 メソッド + `var _ AuthCodeRepository = (*PostgresAuthCodeRepo)(nil)`) を実装。DB 結合テストは `postgres_subscription_repo_db_test.go` の setup 慣習に揃え、design.md §Testing Strategy の AuthCodeRepo 5 ケースを 1 つの `TestPostgresAuthCodeRepo_DB` 関数配下の 5 サブテストで実装した。
+- 重要な判断:
+  - `MarkUsed` は WHERE 句で `used = false AND expires_at > now()` をまとめて判定し、`RowsAffected = 0` の単一分岐で `ErrAuthCodeNotUsable` を返す race 安全な単一 UPDATE 文に統一。「not-found / 既使用 / 期限切れ」を SQL レベルで区別しないことで実装と Postcondition の両方を簡潔化（design.md の指示どおり）。
+  - `Create` の `id` と `created_at` は、空文字 / zero-value のとき `interface{}` の nil を渡し SQL 側 `COALESCE($1::uuid, gen_random_uuid())` / `COALESCE($7::timestamptz, now())` で DB デフォルトに委ねる方式を採用。これにより呼び出し側は UUID 生成義務を負わずに済み、後続 Task 5 / handler 側でも同等の使い勝手で発行できる。`INSERT ... RETURNING id, created_at` で確定値を Go の struct にも反映するので、呼び出し直後に `code.ID` を MarkUsed 引数として使える。
+  - エラー message は "failed to create auth_code: %w" / "failed to find auth_code: %w" / "failed to mark auth_code used: %w" の 3 種固定とし、`code_hash` / `user_id` / `id` のいずれも message に含めない（NFR 1.2）。Task 3 で sentinel error メッセージを「機密値を含まない一般固定文言」に統一した方針と整合。
+  - DB 結合テストの cleanup SQL では、既存 `setupSubscriptionTestDB` の cleanup 集合に加え `refresh_tokens` / `refresh_token_families` / `auth_codes` を先頭で明示 DROP した。これにより Task 1 残存課題（同一 DB を使い回す開発機での再 up 失敗リスク）を本ファイル独自の setup 経路では解消できる。Task 5 / Task 6 でも同じ cleanup を採用すれば handler 側 db_test まで一貫する見込み。
+  - `time` の精度差を吸収するため、Case 1 では `expires_at` を `.UTC().Truncate(time.Microsecond)` してから比較し、PostgreSQL `TIMESTAMPTZ` の microsecond 精度と Go の nanosecond 精度の差で flaky にならないようにした。
+- 残存課題: Task 5 (PostgresRefreshTokenRepo) も同一 cleanup 集合（refresh_tokens / refresh_token_families / auth_codes を含む）と `time.Microsecond` truncate の流儀を踏襲する想定。Task 6 のセキュリティ回帰テスト（平文の逆引きで 0 件確認）と interface compile-time check 集約は本 task でも実装しなかった（Task 6 の scope）。
+
 ## 確認事項
 
 （現時点で人間判断を仰ぐ事項はなし）
