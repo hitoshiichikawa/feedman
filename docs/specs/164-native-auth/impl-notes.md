@@ -1,0 +1,68 @@
+# Implementation Notes
+
+## Implementation Notes
+
+### Task 1
+
+- 採用方針: design.md の Physical Data Model に厳密に従い `auth_codes` / `refresh_token_families` / `refresh_tokens` の 3 テーブルを 1 つの migration（`20260610120000_add_native_auth_tables`）で追加した。
+- 重要な判断:
+  - timestamp は最新既存 migration（`20260528130000_add_user_cross_feed_views`）より後で、本日（2026-06-10 UTC）を反映した `20260610120000` を採用。design.md 例示の `20260609120000` は「PR 作成時に確定する暫定値」と解した。
+  - `code_hash` / `token_hash` には `UNIQUE` 列制約を直接付与し、`UNIQUE INDEX` を別建てせずに自動生成インデックス（`auth_codes_code_hash_key` / `refresh_tokens_token_hash_key`）に統一した（design.md の "UNIQUE (code_hash)" 要件を満たし、SQL を簡潔に保つため）。
+  - down は FK 依存順を尊重して `refresh_tokens` → `refresh_token_families` → `auth_codes` の順で `DROP TABLE IF EXISTS` を発行。既存 `sessions` / `users` 等は一切触れていない（NFR 2.1）。
+- 残存課題: 既存 `internal/database/migrate_test.go` の `setupTestDB` の `cleanupSQL` は新規 3 テーブルを drop 対象に含めていない。fresh DB（CI / docker compose 再生成）では問題ないが、開発機で同一 DB を使い回して `go test` を繰り返す場合、`schema_migrations` 削除後の再 up で `CREATE TABLE auth_codes` が「already exists」で落ちる可能性がある。本 task のスコープでは「既存テストの拡張は不要」と明記されているため見送ったが、Task 4 / Task 5 で `*_db_test.go` を追加する段階で開発機での運用性を見て対応要否を判断する想定。
+
+### Task 2
+
+- 採用方針: design.md §model.AuthCode / §model.RefreshTokenFamily / §model.RefreshToken の Struct Sketch を 1 文字単位で踏襲し、`internal/model/auth_code.go`（AuthCode）と `internal/model/refresh_token.go`（Family + Token を 1 ファイル）に分割配置した。
+- 重要な判断:
+  - 平文フィールド（`Code` / `Token`）は一切定義せず、doc comment で NFR 1.1（平文を保持しない）を明示。後続 Task 3 の repository interface / Task 4・5 の Postgres 実装でも本方針が前提となる。
+  - パッケージコメント `// Package model はドメインモデルを定義する。` は既存 `user.go` 先頭で 1 度だけ宣言される慣習に従い、新規ファイル先頭は型の doc comment から開始した（Go の慣習）。
+  - `RotatedAt` / `RevokedAt` は `*time.Time`（pointer）で NULL を表現し、SQL の `TIMESTAMPTZ NULL` 列とそのまま対応させる。`RefreshTokenFamily.UserID` を冗長に保持するのは design.md §Physical Data Model の意図（DeleteByUserID 経路を family JOIN なしで簡潔化）に整合させるため。
+- 残存課題: なし。Task 3 で `interfaces.go` に追加する `AuthCodeRepository` / `RefreshTokenRepository` の引数・戻り値型はここで追加した struct を直接参照すれば足りる。
+
+### Task 3
+
+- 採用方針: design.md §Components and Interfaces > Service Interface セクションのシグネチャを 1 文字単位で踏襲し、`internal/repository/interfaces.go` に `AuthCodeRepository`(3 メソッド)と `RefreshTokenRepository`(6 メソッド)を追加。sentinel error 2 種(`ErrAuthCodeNotUsable` / `ErrRefreshTokenAlreadyRotated`)を `var Err... = errors.New(...)` 形式で同パッケージに export した。
+- 重要な判断:
+  - 配置場所は既存 `SessionRepository` 直後にした(auth/session 系の論理的隣接性を保ち、Issue grep 時の発見性を上げるため)。既存 interface 群(`UserRepository` / `SessionRepository` / `FeedRepository` ほか)のコード・順序は変更していない。
+  - sentinel error は既存の `errors.go` 型(別名既存ファイル)ではなく interfaces.go の先頭(import 直下)に集約配置した。design.md §Sentinel Errors の指針「`var ErrXxx = errors.New(...)` 形式で十分」に従い、追加ファイル無しで完結させるほうが diff が小さい。エラーメッセージは "auth_code is not usable" / "refresh_token already rotated" の固定文言で、機密値(code_hash / token_hash / user_id)を含まない(NFR 1.2)。
+  - `FindByHash` not-found は `(nil, nil)` を返す既存パターン(`SessionRepository.FindByID` / `UserRepository.FindByID` 等)に整合させた。sentinel error にしない理由は呼び出し側の判定簡潔化と既存規約遵守。
+  - `import` に `"errors"` を追加。`"time"` は既存 import で `RefreshTokenRepository.MarkRotated(ctx, id, rotatedAt time.Time)` および `RevokeFamily(ctx, familyID, revokedAt time.Time)` のシグネチャでそのまま流用できる。
+- 残存課題: なし。Task 4(PostgresAuthCodeRepo 実装)・Task 5(PostgresRefreshTokenRepo 実装)は本 interface を直接 satisfy する形で進められる。compile-time check(`var _ AuthCodeRepository = (*PostgresAuthCodeRepo)(nil)` 等)は各実装ファイル側で追加する設計通り。
+
+### Task 4
+
+- 採用方針: design.md §Components and Interfaces > PostgresAuthCodeRepo の方針 (1 メソッド 1 SQL / compile-time check / sentinel error 利用) を踏襲し、`internal/repository/postgres_auth_code_repo.go` に `PostgresAuthCodeRepo`(`*sql.DB` field + `NewPostgresAuthCodeRepo` + `Create` / `FindByHash` / `MarkUsed` の 3 メソッド + `var _ AuthCodeRepository = (*PostgresAuthCodeRepo)(nil)`) を実装。DB 結合テストは `postgres_subscription_repo_db_test.go` の setup 慣習に揃え、design.md §Testing Strategy の AuthCodeRepo 5 ケースを 1 つの `TestPostgresAuthCodeRepo_DB` 関数配下の 5 サブテストで実装した。
+- 重要な判断:
+  - `MarkUsed` は WHERE 句で `used = false AND expires_at > now()` をまとめて判定し、`RowsAffected = 0` の単一分岐で `ErrAuthCodeNotUsable` を返す race 安全な単一 UPDATE 文に統一。「not-found / 既使用 / 期限切れ」を SQL レベルで区別しないことで実装と Postcondition の両方を簡潔化（design.md の指示どおり）。
+  - `Create` の `id` と `created_at` は、空文字 / zero-value のとき `interface{}` の nil を渡し SQL 側 `COALESCE($1::uuid, gen_random_uuid())` / `COALESCE($7::timestamptz, now())` で DB デフォルトに委ねる方式を採用。これにより呼び出し側は UUID 生成義務を負わずに済み、後続 Task 5 / handler 側でも同等の使い勝手で発行できる。`INSERT ... RETURNING id, created_at` で確定値を Go の struct にも反映するので、呼び出し直後に `code.ID` を MarkUsed 引数として使える。
+  - エラー message は "failed to create auth_code: %w" / "failed to find auth_code: %w" / "failed to mark auth_code used: %w" の 3 種固定とし、`code_hash` / `user_id` / `id` のいずれも message に含めない（NFR 1.2）。Task 3 で sentinel error メッセージを「機密値を含まない一般固定文言」に統一した方針と整合。
+  - DB 結合テストの cleanup SQL では、既存 `setupSubscriptionTestDB` の cleanup 集合に加え `refresh_tokens` / `refresh_token_families` / `auth_codes` を先頭で明示 DROP した。これにより Task 1 残存課題（同一 DB を使い回す開発機での再 up 失敗リスク）を本ファイル独自の setup 経路では解消できる。Task 5 / Task 6 でも同じ cleanup を採用すれば handler 側 db_test まで一貫する見込み。
+  - `time` の精度差を吸収するため、Case 1 では `expires_at` を `.UTC().Truncate(time.Microsecond)` してから比較し、PostgreSQL `TIMESTAMPTZ` の microsecond 精度と Go の nanosecond 精度の差で flaky にならないようにした。
+- 残存課題: Task 5 (PostgresRefreshTokenRepo) も同一 cleanup 集合（refresh_tokens / refresh_token_families / auth_codes を含む）と `time.Microsecond` truncate の流儀を踏襲する想定。Task 6 のセキュリティ回帰テスト（平文の逆引きで 0 件確認）と interface compile-time check 集約は本 task でも実装しなかった（Task 6 の scope）。
+
+### Task 5
+
+- 採用方針: design.md §Components and Interfaces > PostgresRefreshTokenRepo の方針 (1 メソッド 1 SQL を基本 + RevokeFamily のみ 2 UPDATE / compile-time check / sentinel error 利用) を踏襲し、`internal/repository/postgres_refresh_token_repo.go` に `PostgresRefreshTokenRepo`(`*sql.DB` field + `NewPostgresRefreshTokenRepo` + `CreateFamily` / `CreateToken` / `FindByHash` / `MarkRotated` / `RevokeFamily` / `DeleteByUserID` の 6 メソッド + `var _ RefreshTokenRepository = (*PostgresRefreshTokenRepo)(nil)`) を実装。DB 結合テストは Task 4 (`postgres_auth_code_repo_db_test.go`) と同一 cleanup SQL 集合・同一 `time.Microsecond` truncate 流儀で揃え、design.md §Testing Strategy の RefreshTokenRepo 6 ケースを 1 つの `TestPostgresRefreshTokenRepo_DB` 関数配下の 6 サブテストで実装した。
+- 重要な判断:
+  - `MarkRotated` は WHERE 句で `rotated_at IS NULL` を判定し、`RowsAffected = 0` で `ErrRefreshTokenAlreadyRotated` を返す race 安全な単一 UPDATE に統一（Task 4 の MarkUsed と同パターン）。既存 rotated_at 値の保持を Case 2 のサブテストで検証している。
+  - `RevokeFamily` は family・token の 2 UPDATE を 1 メソッド内で逐次実行し、両方とも `SET revoked_at = COALESCE(revoked_at, $1)` で既存値を保持することで二重 revoke を冪等化した。design.md の「ベストエフォート冪等（外側 tx 化は呼び出し側に委ねる）」方針に整合。Case 4 で 1 回目と異なる revokedAt を 2 回目に渡し、既存値（1 回目の値）が保持されることを family / token 両方で検証している。
+  - `DeleteByUserID` は `DELETE FROM refresh_token_families WHERE user_id = $1` の 1 文のみを発行し、`refresh_tokens` は `family_id` への FK `ON DELETE CASCADE` で自動削除する design.md の選好（後者の単純化案）を採用。Case 5 で user A の token が 0 件になり user B が無影響であることを検証している。
+  - `CreateFamily` / `CreateToken` の id / created_at は Task 4 (`PostgresAuthCodeRepo`) と完全に同じ COALESCE 委譲方式（`COALESCE($N::uuid, gen_random_uuid())` / `COALESCE($M::timestamptz, now())` + `RETURNING id, created_at`）で実装。RotatedAt / RevokedAt は `*time.Time` のまま渡すと `lib/pq` が NULL として扱うため、COALESCE を介さず直接バインドで十分（明示 NULL 表現が不要）。
+  - エラー message は "failed to create refresh_token_family" / "failed to create refresh_token" / "failed to find refresh_token" / "failed to mark refresh_token rotated" / "failed to revoke refresh_token_family" / "failed to revoke refresh_tokens by family" / "failed to delete refresh_token_families by user" の 7 種固定とし、token_hash / family_id / user_id / id のいずれも message に含めない（NFR 1.2 / Task 3 の sentinel 文言方針と整合）。
+  - DB 結合テストの cleanup SQL は Task 4 と完全一致（`refresh_tokens` / `refresh_token_families` / `auth_codes` を先頭で DROP）。同一 DB を使い回す開発機での再 up 失敗リスクを Task 4 と同条件で解消する。`time.Microsecond` truncate は ExpiresAt / RotatedAt / RevokedAt の比較で flaky 回避目的に揃えた。
+- 残存課題: Task 6 のセキュリティ回帰テスト（平文 `"plain-token-xxx"` 等の逆引きで 0 件確認）と interface compile-time check 集約（`TestPostgresRefreshTokenRepo_ImplementsInterface` 等）と sentinel error 判別 unit test は Task 6 の scope なので本 task では着手していない。
+
+### Task 6
+
+- 採用方針: Task 6 で求められた 3 項目 (1) セキュリティ回帰テスト (NFR 1.1 自動検出) (2) interface compile-time check の集約 (Req 4.3) (3) sentinel error 判別 unit test (NFR 1.2) を、それぞれ責務に応じたファイル配置で追加した。具体的には sentinel error 判別を新規 `internal/repository/errors_test.go` の `TestSentinelErrors_AreDistinct`（4 サブテスト）、interface 集約を既存 `internal/repository/tx_test.go` の末尾に `TestPostgresAuthCodeRepo_ImplementsInterface` / `TestPostgresRefreshTokenRepo_ImplementsInterface` の 2 関数として追加、セキュリティ回帰を既存 2 つの `*_db_test.go` 内のサブテスト（auth_code は Case 6、refresh_token は Case 7）として追加した。
+- 重要な判断:
+  - sentinel error 判別 test は DB 接続を必要としないため、新規 `errors_test.go`（unit test 専用）に独立配置した。`tx_test.go` への同居も検討したが、tx_test.go は「DB 関連 helper / interface check の薄い集約点」という位置付けが既に確立しており、純粋 unit test である sentinel 判別はファイル責務を分離する方が読みやすいと判断した。また errors.Is の自己一致 / 相互区別 / wrap 後の判別 / 固定文言の 4 観点を 1 つの `TestSentinelErrors_AreDistinct` 配下のサブテストとして並べることで、NFR 1.2 回帰の網羅性を 1 関数で見通せる構成にした。固定文言の正本（"auth_code is not usable" / "refresh_token already rotated"）は Task 3 で interfaces.go に確定した文言と完全一致させており、文言が変更された場合に test 側で気付ける形になっている。
+  - interface compile-time check は実装ファイル側にも残っている `var _ AuthCodeRepository = (*PostgresAuthCodeRepo)(nil)` /`var _ RefreshTokenRepository = (*PostgresRefreshTokenRepo)(nil)` をそのまま温存した上で、tasks.md の指示どおり `tx_test.go` 同様の集約箇所にも複製した。test 関数として「実行時に呼ばれるが body は `var _ ... = ...` 1 行だけ」のスタイルで配置（既存 `TestDBTX_SatisfiedBySQLTypes` の流儀に揃えた）。これにより interface drift（メソッドシグネチャ変更や追加など）は 2 箇所（実装ファイル直下 / tx_test.go）の compile-time check で同時に検出される構造になる。
+  - セキュリティ回帰テストは「平文文字列が code_hash / token_hash カラムにそのまま書かれていないこと」を直接 SELECT で確認するアプローチを採用した。Create では呼び出し側で hash 化された値を保存する前提だが、本リポジトリ層は hash 化責務を持たないため「実装上 hash と平文が異なる文字列であることを表現する」目的で test 内では `"hash::" + plainCode` のような prefix 付き文字列を hash 表現として用い、平文側 `plainCode` で SELECT すると 0 件、`hash` 値で SELECT すると 1 件、を 1 つのテーブル状態で同時検証した。auth_code 側では pkce_challenge カラムへの平文混入も併せて確認する防御的回帰を追加（NFR 1.1 の「永続化領域に平文を 0 件」を column-level で網羅）。
+  - 既存テスト構造を尊重し、`postgres_auth_code_repo_db_test.go` のセキュリティ回帰サブテストは Case 5（CASCADE 削除）の前に Case 6 として挿入。これは Case 5 が users 削除を伴うため後続の独立性確保の意味合いから「平文回帰 → CASCADE」の順とした方が個別 Case 間の干渉が明示的に分離されるため。`postgres_refresh_token_repo_db_test.go` も同様に最終 Case 6（not-found）の前に Case 7 として挿入した（Case 番号は新規追加であり既存 6 ケースの番号自体は不変）。
+- 残存課題: なし。本 Task 6 で全 Implementation Plan は完了した。後続 Issue（#165 以降の handler 層）が本 repository を呼び出す際、本セキュリティ回帰テストと sentinel error 判別 test は repository 改修時の guard として作用する想定。
+
+## 確認事項
+
+（現時点で人間判断を仰ぐ事項はなし）

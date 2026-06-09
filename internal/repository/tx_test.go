@@ -34,3 +34,18 @@ func TestSQLTx_QuerierReturnsUnderlyingTx(t *testing.T) {
 		t.Errorf("Querier() = %v, want underlying *sql.Tx %v", q, tx)
 	}
 }
+
+// TestPostgresAuthCodeRepo_ImplementsInterface は PostgresAuthCodeRepo が
+// AuthCodeRepository を満たすことを compile-time に検証する（Req 4.3）。
+// 各実装ファイル内の `var _ AuthCodeRepository = (*PostgresAuthCodeRepo)(nil)` と
+// 同等の保証を集約箇所（tx_test.go）にも追加することで、interface drift を 2 箇所で
+// 検出できるようにする。
+func TestPostgresAuthCodeRepo_ImplementsInterface(t *testing.T) {
+	var _ AuthCodeRepository = (*PostgresAuthCodeRepo)(nil)
+}
+
+// TestPostgresRefreshTokenRepo_ImplementsInterface は PostgresRefreshTokenRepo が
+// RefreshTokenRepository を満たすことを compile-time に検証する（Req 4.3）。
+func TestPostgresRefreshTokenRepo_ImplementsInterface(t *testing.T) {
+	var _ RefreshTokenRepository = (*PostgresRefreshTokenRepo)(nil)
+}

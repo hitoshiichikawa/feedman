@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. Migration: native auth 用 3 テーブルの up/down を追加
+- [x] 1. Migration: native auth 用 3 テーブルの up/down を追加
   - `internal/database/migrations/<timestamp>_add_native_auth_tables.up.sql` を新規作成し、
     `auth_codes` / `refresh_token_families` / `refresh_tokens` を design.md の Physical Data
     Model どおりに作成（カラム / 型 / UNIQUE 制約 / INDEX / `users.id` への FK
@@ -12,22 +12,22 @@
     ことを目視確認（既存テストの拡張は本タスクでは不要）
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
 
-- [ ] 2. Model: AuthCode / RefreshTokenFamily / RefreshToken の struct を追加
-- [ ] 2.1 `internal/model/auth_code.go` を新規作成 (P)
+- [x] 2. Model: AuthCode / RefreshTokenFamily / RefreshToken の struct を追加
+- [x] 2.1 `internal/model/auth_code.go` を新規作成 (P)
   - `model.AuthCode` を design.md の Struct Sketch どおりに定義（`CodeHash` / `UserID` /
     `PKCEChallenge` / `ExpiresAt` / `Used` / `CreatedAt`、平文 `Code` フィールドは持たない）
   - doc comment は「平文 code は保持しない」旨を明記（NFR 1.1）
   - _Requirements: 2.1, 2.2, 2.3, 2.5_
   - _Boundary: model.AuthCode_
 
-- [ ] 2.2 `internal/model/refresh_token.go` を新規作成 (P)
+- [x] 2.2 `internal/model/refresh_token.go` を新規作成 (P)
   - `model.RefreshTokenFamily` と `model.RefreshToken` を design.md の Struct Sketch どおりに
     定義（`RotatedAt` / `RevokedAt` は `*time.Time`、平文 `Token` フィールドは持たない）
   - doc comment に rotation/revocation の semantics を明記
   - _Requirements: 3.1, 3.2_
   - _Boundary: model.RefreshTokenFamily, model.RefreshToken_
 
-- [ ] 3. Repository interface と sentinel error を `interfaces.go` に追加
+- [x] 3. Repository interface と sentinel error を `interfaces.go` に追加
   - `internal/repository/interfaces.go` に `AuthCodeRepository` interface（`Create` /
     `FindByHash` / `MarkUsed`）と `RefreshTokenRepository` interface（`CreateFamily` /
     `CreateToken` / `FindByHash` / `MarkRotated` / `RevokeFamily` / `DeleteByUserID`）を
@@ -38,7 +38,7 @@
   - _Requirements: 2.4, 2.5, 2.6, 3.3, 3.4, 3.5, 3.6, 4.1, 4.2, 4.3_
   - _Depends: 2.1, 2.2_
 
-- [ ] 4. PostgresAuthCodeRepo の実装と DB 結合テスト
+- [x] 4. PostgresAuthCodeRepo の実装と DB 結合テスト
   - `internal/repository/postgres_auth_code_repo.go` を新規作成し、`AuthCodeRepository` の
     全メソッドを実装（`*sql.DB` field + `NewPostgresAuthCodeRepo` + `var _ AuthCodeRepository
     = (*PostgresAuthCodeRepo)(nil)`）
@@ -52,7 +52,7 @@
   - _Requirements: 2.1, 2.4, 2.5, 2.6, 2.7, 4.4, NFR 1.1, NFR 1.2, NFR 3.1, NFR 3.2_
   - _Depends: 1, 3_
 
-- [ ] 5. PostgresRefreshTokenRepo の実装と DB 結合テスト
+- [x] 5. PostgresRefreshTokenRepo の実装と DB 結合テスト
   - `internal/repository/postgres_refresh_token_repo.go` を新規作成し、`RefreshTokenRepository`
     の全メソッドを実装（compile-time check 含む）
   - `MarkRotated` は `UPDATE ... WHERE id = $1 AND rotated_at IS NULL` で `RowsAffected = 0`
@@ -67,7 +67,7 @@
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 4.4, NFR 1.1, NFR 1.2, NFR 3.1, NFR 3.2_
   - _Depends: 1, 3_
 
-- [ ] 6. セキュリティ回帰テストと interface compile-time check の集約
+- [x] 6. セキュリティ回帰テストと interface compile-time check の集約
   - `internal/repository/postgres_auth_code_repo_db_test.go` または `postgres_refresh_token_repo_db_test.go`
     の中で、平文 `"plain-code-xxx"` / `"plain-token-xxx"` で `SELECT` しても 0 件が返ることを
     確認するセキュリティ回帰ケースを 1 件追加（NFR 1.1 の自動検出）

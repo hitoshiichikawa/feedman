@@ -4,10 +4,23 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/hitoshi/feedman/internal/model"
 )
+
+// ErrAuthCodeNotUsable は AuthCodeRepository.MarkUsed の対象 auth_code が
+// 見つからない・期限切れ・既に使用済みのいずれかで、使用済み確定を成功させられない
+// ことを示す sentinel error（Req 2.6）。
+// メッセージには code_hash や user_id 等の機密値を含めない（NFR 1.2）。
+var ErrAuthCodeNotUsable = errors.New("auth_code is not usable")
+
+// ErrRefreshTokenAlreadyRotated は RefreshTokenRepository.MarkRotated の対象
+// refresh_token が既に rotation 済みのため、再度 rotated として確定できないことを
+// 示す sentinel error（Req 3.3）。
+// メッセージには token_hash や user_id 等の機密値を含めない（NFR 1.2）。
+var ErrRefreshTokenAlreadyRotated = errors.New("refresh_token already rotated")
 
 // UserRepository はユーザーデータの永続化インターフェース。
 type UserRepository interface {
@@ -38,6 +51,63 @@ type SessionRepository interface {
 	// DeleteByID は指定IDのセッションを削除する。
 	DeleteByID(ctx context.Context, id string) error
 	// DeleteByUserID は指定ユーザーの全セッションを削除する。
+	DeleteByUserID(ctx context.Context, userID string) error
+}
+
+// AuthCodeRepository は native auth の一時認可コード永続化操作を公開する。
+//
+// 親 Issue #163 / 本 spec #164 で導入される native auth フローのうち、OAuth callback
+// が発行する一時 auth_code の保存・hash 一致参照・単回利用確定のみを公開する。
+// 平文 code は引数にも戻り値にも一切含めない（NFR 1.1 / 1.2）。
+type AuthCodeRepository interface {
+	// Create は AuthCode を新規保存する。
+	// code.CodeHash / code.UserID / code.PKCEChallenge / code.ExpiresAt は
+	// 呼び出し側で確定済みであること（Req 2.3）。
+	Create(ctx context.Context, code *model.AuthCode) error
+
+	// FindByHash は code_hash に一致する未削除レコードを 1 件返す。
+	// 見つからない場合は (nil, nil) を返す（既存 FindByID パターンに整合、Req 2.4）。
+	FindByHash(ctx context.Context, codeHash string) (*model.AuthCode, error)
+
+	// MarkUsed は当該 ID の auth_code を used = true に遷移させる（Req 2.5）。
+	// 当該レコードが 1) 既に used = true, 2) expires_at <= now(), 3) 存在しない の
+	// いずれかの場合は ErrAuthCodeNotUsable を返し、永続化状態は変更しない（Req 2.6）。
+	MarkUsed(ctx context.Context, id string) error
+}
+
+// RefreshTokenRepository は native auth の refresh token / family 永続化操作を公開する。
+//
+// 親 Issue #163 / 本 spec #164 で導入される native auth フローのうち、refresh token の
+// 発行・rotation・family 単位 revoke・ユーザー単位削除のみを公開する。平文 token は
+// 引数にも戻り値にも一切含めない（NFR 1.1 / 1.2）。
+//
+// 本 interface は 1 メソッド 1 SQL を基本とし、複数操作の atomic 性が必要な
+// orchestration（rotation = 旧 token rotate + 新 token create）は呼び出し側に委ねる。
+type RefreshTokenRepository interface {
+	// CreateFamily は新規 family を保存する。token 発行の前に呼ぶ（Req 3.2）。
+	CreateFamily(ctx context.Context, family *model.RefreshTokenFamily) error
+
+	// CreateToken は family に属する refresh token を保存する（Req 3.1, 3.2）。
+	// token.TokenHash / FamilyID / UserID / ExpiresAt は呼び出し側で確定済みであること。
+	CreateToken(ctx context.Context, token *model.RefreshToken) error
+
+	// FindByHash は token_hash に一致する 1 件を返す（Req 3.5）。
+	// 見つからない場合は (nil, nil) を返す。
+	// 戻り値の token が RotatedAt / RevokedAt を持つかは呼び出し側で判定する。
+	FindByHash(ctx context.Context, tokenHash string) (*model.RefreshToken, error)
+
+	// MarkRotated は当該 ID の refresh_token の rotated_at を set する（Req 3.3）。
+	// 既に rotated_at が set 済みの場合は ErrRefreshTokenAlreadyRotated を返す。
+	MarkRotated(ctx context.Context, id string, rotatedAt time.Time) error
+
+	// RevokeFamily は当該 family を revoked にし、family 配下の全 token の revoked_at を
+	// 一括で set する（Req 3.4）。当該 family が既に revoked の場合は冪等に成功する
+	// （二重 revoke 安全）。
+	RevokeFamily(ctx context.Context, familyID string, revokedAt time.Time) error
+
+	// DeleteByUserID は当該ユーザーに属する全ての refresh_token と family を削除する
+	// （Req 3.6）。FK ON DELETE CASCADE で users 削除時にも到達するが、明示的削除経路
+	// （アカウント削除フロー以外の運用削除）も提供する。
 	DeleteByUserID(ctx context.Context, userID string) error
 }
 
