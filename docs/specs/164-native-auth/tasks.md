@@ -20,7 +20,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.5_
   - _Boundary: model.AuthCode_
 
-- [ ] 2.2 `internal/model/refresh_token.go` を新規作成 (P)
+- [x] 2.2 `internal/model/refresh_token.go` を新規作成 (P)
   - `model.RefreshTokenFamily` と `model.RefreshToken` を design.md の Struct Sketch どおりに
     定義（`RotatedAt` / `RevokedAt` は `*time.Time`、平文 `Token` フィールドは持たない）
   - doc comment に rotation/revocation の semantics を明記
