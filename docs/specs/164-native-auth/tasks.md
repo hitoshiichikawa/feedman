@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. Migration: native auth 用 3 テーブルの up/down を追加
+- [x] 1. Migration: native auth 用 3 テーブルの up/down を追加
   - `internal/database/migrations/<timestamp>_add_native_auth_tables.up.sql` を新規作成し、
     `auth_codes` / `refresh_token_families` / `refresh_tokens` を design.md の Physical Data
     Model どおりに作成（カラム / 型 / UNIQUE 制約 / INDEX / `users.id` への FK
