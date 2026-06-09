@@ -12,7 +12,7 @@
     ことを目視確認（既存テストの拡張は本タスクでは不要）
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
 
-- [ ] 2. Model: AuthCode / RefreshTokenFamily / RefreshToken の struct を追加
+- [x] 2. Model: AuthCode / RefreshTokenFamily / RefreshToken の struct を追加
 - [x] 2.1 `internal/model/auth_code.go` を新規作成 (P)
   - `model.AuthCode` を design.md の Struct Sketch どおりに定義（`CodeHash` / `UserID` /
     `PKCEChallenge` / `ExpiresAt` / `Used` / `CreatedAt`、平文 `Code` フィールドは持たない）
