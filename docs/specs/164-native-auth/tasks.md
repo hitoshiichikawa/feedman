@@ -67,7 +67,7 @@
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 4.4, NFR 1.1, NFR 1.2, NFR 3.1, NFR 3.2_
   - _Depends: 1, 3_
 
-- [ ] 6. セキュリティ回帰テストと interface compile-time check の集約
+- [x] 6. セキュリティ回帰テストと interface compile-time check の集約
   - `internal/repository/postgres_auth_code_repo_db_test.go` または `postgres_refresh_token_repo_db_test.go`
     の中で、平文 `"plain-code-xxx"` / `"plain-token-xxx"` で `SELECT` しても 0 件が返ることを
     確認するセキュリティ回帰ケースを 1 件追加（NFR 1.1 の自動検出）
