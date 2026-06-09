@@ -38,7 +38,7 @@
   - _Requirements: 2.4, 2.5, 2.6, 3.3, 3.4, 3.5, 3.6, 4.1, 4.2, 4.3_
   - _Depends: 2.1, 2.2_
 
-- [ ] 4. PostgresAuthCodeRepo の実装と DB 結合テスト
+- [x] 4. PostgresAuthCodeRepo の実装と DB 結合テスト
   - `internal/repository/postgres_auth_code_repo.go` を新規作成し、`AuthCodeRepository` の
     全メソッドを実装（`*sql.DB` field + `NewPostgresAuthCodeRepo` + `var _ AuthCodeRepository
     = (*PostgresAuthCodeRepo)(nil)`）
