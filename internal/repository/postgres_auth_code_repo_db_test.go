@@ -229,6 +229,55 @@ func TestPostgresAuthCodeRepo_DB(t *testing.T) {
 		}
 	})
 
+	// Case 6 (NFR 1.1 セキュリティ回帰): 平文 code 文字列で逆引き SELECT しても 0 件
+	// 永続化領域に「平文 code を書いていない」ことを自動検出するための回帰テスト。
+	// Create は code_hash を保存するため、平文の "plain-code-xxx" 文字列を直接
+	// code_hash カラムへ SELECT に投げてもヒットしてはならない。
+	t.Run("平文codeでSELECTしても0件を返す_NFR1.1回帰", func(t *testing.T) {
+		userID := insertTestUserForAuthCode(t, db, "plaintext-regression@test.com")
+		// 平文相当の文字列を仮定し、その hash 表現を別途保存する。
+		plainCode := "plain-code-xxx-regression-1234567"
+		// 実装上、hash は平文と異なる文字列であることを表現するため "hash::" prefix を付ける。
+		codeHash := "hash::" + plainCode
+		code := newTestAuthCode(userID, codeHash, time.Now().Add(60*time.Second).UTC())
+		if err := repo.Create(ctx, code); err != nil {
+			t.Fatalf("Create に失敗: %v", err)
+		}
+
+		// 平文文字列を code_hash カラムへ直接 SELECT すると 0 件
+		var countByPlain int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM auth_codes WHERE code_hash = $1`, plainCode,
+		).Scan(&countByPlain); err != nil {
+			t.Fatalf("平文 SELECT (code_hash) に失敗: %v", err)
+		}
+		if countByPlain != 0 {
+			t.Errorf("平文 code が code_hash として書かれている: got %d, want 0 (NFR 1.1 違反)", countByPlain)
+		}
+
+		// pkce_challenge カラムへの平文混入も無いことを念のため確認（防御的回帰）
+		var countByPKCE int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM auth_codes WHERE pkce_challenge = $1`, plainCode,
+		).Scan(&countByPKCE); err != nil {
+			t.Fatalf("平文 SELECT (pkce_challenge) に失敗: %v", err)
+		}
+		if countByPKCE != 0 {
+			t.Errorf("平文 code が pkce_challenge として書かれている: got %d, want 0 (NFR 1.1 違反)", countByPKCE)
+		}
+
+		// 一方、hash 値で SELECT すれば 1 件ヒット（保存自体は成立している）
+		var countByHash int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM auth_codes WHERE code_hash = $1`, codeHash,
+		).Scan(&countByHash); err != nil {
+			t.Fatalf("hash SELECT に失敗: %v", err)
+		}
+		if countByHash != 1 {
+			t.Errorf("hash 値での SELECT 件数が不正: got %d, want 1（保存自体が失敗している可能性）", countByHash)
+		}
+	})
+
 	// Case 5 (Req 1.5 / 3.6 同系統 cascade): users 削除時に auth_codes が cascade 削除される
 	t.Run("users削除時にauth_codesがCASCADE削除される", func(t *testing.T) {
 		userID := insertTestUserForAuthCode(t, db, "cascade@test.com")

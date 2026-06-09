@@ -397,6 +397,48 @@ func TestPostgresRefreshTokenRepo_DB(t *testing.T) {
 		}
 	})
 
+	// Case 7 (NFR 1.1 セキュリティ回帰): 平文 token 文字列で逆引き SELECT しても 0 件
+	// 永続化領域に「平文 token を書いていない」ことを自動検出するための回帰テスト。
+	// Create は token_hash を保存するため、平文の "plain-token-xxx" 文字列を直接
+	// token_hash カラムへ SELECT に投げてもヒットしてはならない。
+	t.Run("平文tokenでSELECTしても0件を返す_NFR1.1回帰", func(t *testing.T) {
+		userID := insertTestUserForRefreshToken(t, db, "plaintext-regression@test.com")
+		family := newTestRefreshTokenFamily(userID)
+		if err := repo.CreateFamily(ctx, family); err != nil {
+			t.Fatalf("CreateFamily に失敗: %v", err)
+		}
+		// 平文相当の文字列を仮定し、その hash 表現を別途保存する。
+		plainToken := "plain-token-xxx-regression-12345"
+		// 実装上、hash は平文と異なる文字列であることを表現するため "hash::" prefix を付ける。
+		tokenHash := "hash::" + plainToken
+		token := newTestRefreshToken(family.ID, userID, tokenHash, time.Now().Add(24*time.Hour).UTC())
+		if err := repo.CreateToken(ctx, token); err != nil {
+			t.Fatalf("CreateToken に失敗: %v", err)
+		}
+
+		// 平文文字列を token_hash カラムへ直接 SELECT すると 0 件
+		var countByPlain int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM refresh_tokens WHERE token_hash = $1`, plainToken,
+		).Scan(&countByPlain); err != nil {
+			t.Fatalf("平文 SELECT (token_hash) に失敗: %v", err)
+		}
+		if countByPlain != 0 {
+			t.Errorf("平文 token が token_hash として書かれている: got %d, want 0 (NFR 1.1 違反)", countByPlain)
+		}
+
+		// hash 値で SELECT すれば 1 件ヒット（保存自体は成立している）
+		var countByHash int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM refresh_tokens WHERE token_hash = $1`, tokenHash,
+		).Scan(&countByHash); err != nil {
+			t.Fatalf("hash SELECT に失敗: %v", err)
+		}
+		if countByHash != 1 {
+			t.Errorf("hash 値での SELECT 件数が不正: got %d, want 1（保存自体が失敗している可能性）", countByHash)
+		}
+	})
+
 	// Case 6 (Req 3.5 異常系 not-found): 存在しない hash で FindByHash が (nil, nil) を返す
 	t.Run("FindByHash_存在しないhashで(nil,nil)を返す", func(t *testing.T) {
 		got, err := repo.FindByHash(ctx, "hash-does-not-exist-deadbeef-ref")
