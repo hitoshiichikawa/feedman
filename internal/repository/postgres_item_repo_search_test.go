@@ -44,6 +44,9 @@ func setupItemSearchTestDB(t *testing.T) *sql.DB {
 	}
 
 	cleanupSQL := `
+		DROP TABLE IF EXISTS refresh_tokens CASCADE;
+		DROP TABLE IF EXISTS refresh_token_families CASCADE;
+		DROP TABLE IF EXISTS auth_codes CASCADE;
 		DROP TABLE IF EXISTS user_cross_feed_views CASCADE;
 		DROP TABLE IF EXISTS sessions CASCADE;
 		DROP TABLE IF EXISTS user_settings CASCADE;
