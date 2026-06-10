@@ -640,8 +640,16 @@ func (r *PostgresItemRepo) FindExistingForUpsert(
 	return result, nil
 }
 
+// allowedItemQueryColumns は queryItemsByColumn が SQL に埋め込める識別子の allowlist。
+// 同一性判定で使う 3 カラムのみを許可し、それ以外は実行前にエラーとする。
+var allowedItemQueryColumns = map[string]bool{
+	"guid_or_id":   true,
+	"link":         true,
+	"content_hash": true,
+}
+
 // queryItemsByColumn は feed_id と指定カラムの IN 句で既存記事をまとめて取得し、keyFn で索引する。
-// values が空のときは DB へアクセスしない。
+// values が空のときは DB へアクセスしない。column は allowedItemQueryColumns で検証する。
 func (r *PostgresItemRepo) queryItemsByColumn(
 	ctx context.Context,
 	feedID, column string,
@@ -651,6 +659,13 @@ func (r *PostgresItemRepo) queryItemsByColumn(
 ) error {
 	if len(values) == 0 {
 		return nil
+	}
+
+	// column は SQL に識別子として直接埋め込まれるため、許可カラムのみに限定する。
+	// values は $N プレースホルダで安全だが、column は防御的に allowlist で検証し、
+	// 将来の呼び出し追加時に動的値が混入しても SQL インジェクションにならないようにする。
+	if !allowedItemQueryColumns[column] {
+		return fmt.Errorf("queryItemsByColumn: 不正なカラム名です: %q", column)
 	}
 
 	args := make([]interface{}, 0, len(values)+1)
