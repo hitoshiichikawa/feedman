@@ -6,7 +6,6 @@ package crossfeed
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"strings"
 	"time"
@@ -226,9 +225,6 @@ func toCrossFeedItemSummary(row repository.CrossFeedItem) CrossFeedItemSummary {
 		},
 		FeedTitle: row.FeedTitle,
 	}
-	if len(row.FaviconData) > 0 && row.FaviconMime != "" {
-		dataURL := fmt.Sprintf("data:%s;base64,%s", row.FaviconMime, base64.StdEncoding.EncodeToString(row.FaviconData))
-		summary.FeedFaviconURL = &dataURL
-	}
+	summary.FeedFaviconURL = model.FaviconDataURL(row.FaviconData, row.FaviconMime)
 	return summary
 }

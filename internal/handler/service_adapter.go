@@ -2,8 +2,6 @@ package handler
 
 import (
 	"context"
-	"encoding/base64"
-	"fmt"
 	"time"
 
 	"github.com/hitoshi/feedman/internal/crossfeed"
@@ -304,13 +302,9 @@ func (a *ItemSearchServiceAdapter) Search(
 			HatebuCount:     it.HatebuCount,
 			HatebuFetchedAt: it.HatebuFetchedAt,
 		}
-		// favicon の生バイト + MIME が揃っている場合のみ data URL を組み立てる。
-		// 既存 subscription.Service.ListSubscriptions と同じ流儀
-		// （`data:<mime>;base64,<base64>`）で整形し、欠落時は nil を保持する。
-		if len(it.FaviconData) > 0 && it.FaviconMime != "" {
-			dataURL := fmt.Sprintf("data:%s;base64,%s", it.FaviconMime, base64.StdEncoding.EncodeToString(it.FaviconData))
-			hit.FaviconURL = &dataURL
-		}
+		// favicon の生バイト + MIME が揃っている場合のみ data URL を組み立てる
+		// （欠落時は nil を保持）。整形ロジックは model.FaviconDataURL に集約。
+		hit.FaviconURL = model.FaviconDataURL(it.FaviconData, it.FaviconMime)
 		hits[i] = hit
 	}
 

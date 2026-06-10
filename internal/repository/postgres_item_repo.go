@@ -22,173 +22,65 @@ func NewPostgresItemRepo(db *sql.DB) *PostgresItemRepo {
 
 // FindByID は指定IDの記事を取得する。見つからない場合はnilを返す。
 func (r *PostgresItemRepo) FindByID(ctx context.Context, id string) (*model.Item, error) {
-	item := &model.Item{}
-	var publishedAt sql.NullTime
-	var hatebuFetchedAt sql.NullTime
-	var guidOrID, link, content, summary, author, contentHash sql.NullString
-
-	err := r.db.QueryRowContext(ctx,
-		`SELECT id, feed_id, guid_or_id, title, link, content, summary, author,
-		        published_at, is_date_estimated, fetched_at, content_hash,
-		        hatebu_count, hatebu_fetched_at, created_at, updated_at
+	item, err := scanItem(r.db.QueryRowContext(ctx,
+		`SELECT `+itemSelectColumns+`
 		 FROM items WHERE id = $1`,
 		id,
-	).Scan(
-		&item.ID, &item.FeedID, &guidOrID, &item.Title, &link,
-		&content, &summary, &author,
-		&publishedAt, &item.IsDateEstimated, &item.FetchedAt, &contentHash,
-		&item.HatebuCount, &hatebuFetchedAt, &item.CreatedAt, &item.UpdatedAt,
-	)
-
+	))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("記事の取得に失敗しました: %w", err)
 	}
-
-	item.GuidOrID = nullStringValue(guidOrID)
-	item.Link = nullStringValue(link)
-	item.Content = nullStringValue(content)
-	item.Summary = nullStringValue(summary)
-	item.Author = nullStringValue(author)
-	item.ContentHash = nullStringValue(contentHash)
-	if publishedAt.Valid {
-		item.PublishedAt = &publishedAt.Time
-	}
-	if hatebuFetchedAt.Valid {
-		item.HatebuFetchedAt = &hatebuFetchedAt.Time
-	}
-
 	return item, nil
 }
 
 // FindByFeedAndGUID はfeed_idとguid_or_idで記事を検索する。
 func (r *PostgresItemRepo) FindByFeedAndGUID(ctx context.Context, feedID, guid string) (*model.Item, error) {
-	item := &model.Item{}
-	var publishedAt sql.NullTime
-	var hatebuFetchedAt sql.NullTime
-	var guidOrID, link, content, summary, author, contentHash sql.NullString
-
-	err := r.db.QueryRowContext(ctx,
-		`SELECT id, feed_id, guid_or_id, title, link, content, summary, author,
-		        published_at, is_date_estimated, fetched_at, content_hash,
-		        hatebu_count, hatebu_fetched_at, created_at, updated_at
+	item, err := scanItem(r.db.QueryRowContext(ctx,
+		`SELECT `+itemSelectColumns+`
 		 FROM items WHERE feed_id = $1 AND guid_or_id = $2`,
 		feedID, guid,
-	).Scan(
-		&item.ID, &item.FeedID, &guidOrID, &item.Title, &link,
-		&content, &summary, &author,
-		&publishedAt, &item.IsDateEstimated, &item.FetchedAt, &contentHash,
-		&item.HatebuCount, &hatebuFetchedAt, &item.CreatedAt, &item.UpdatedAt,
-	)
-
+	))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("GUID による記事の検索に失敗しました: %w", err)
 	}
-
-	item.GuidOrID = nullStringValue(guidOrID)
-	item.Link = nullStringValue(link)
-	item.Content = nullStringValue(content)
-	item.Summary = nullStringValue(summary)
-	item.Author = nullStringValue(author)
-	item.ContentHash = nullStringValue(contentHash)
-	if publishedAt.Valid {
-		item.PublishedAt = &publishedAt.Time
-	}
-	if hatebuFetchedAt.Valid {
-		item.HatebuFetchedAt = &hatebuFetchedAt.Time
-	}
-
 	return item, nil
 }
 
 // FindByFeedAndLink はfeed_idとlinkで記事を検索する。
 func (r *PostgresItemRepo) FindByFeedAndLink(ctx context.Context, feedID, link string) (*model.Item, error) {
-	item := &model.Item{}
-	var publishedAt sql.NullTime
-	var hatebuFetchedAt sql.NullTime
-	var guidOrID, linkVal, content, summary, author, contentHash sql.NullString
-
-	err := r.db.QueryRowContext(ctx,
-		`SELECT id, feed_id, guid_or_id, title, link, content, summary, author,
-		        published_at, is_date_estimated, fetched_at, content_hash,
-		        hatebu_count, hatebu_fetched_at, created_at, updated_at
+	item, err := scanItem(r.db.QueryRowContext(ctx,
+		`SELECT `+itemSelectColumns+`
 		 FROM items WHERE feed_id = $1 AND link = $2`,
 		feedID, link,
-	).Scan(
-		&item.ID, &item.FeedID, &guidOrID, &item.Title, &linkVal,
-		&content, &summary, &author,
-		&publishedAt, &item.IsDateEstimated, &item.FetchedAt, &contentHash,
-		&item.HatebuCount, &hatebuFetchedAt, &item.CreatedAt, &item.UpdatedAt,
-	)
-
+	))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("link による記事の検索に失敗しました: %w", err)
 	}
-
-	item.GuidOrID = nullStringValue(guidOrID)
-	item.Link = nullStringValue(linkVal)
-	item.Content = nullStringValue(content)
-	item.Summary = nullStringValue(summary)
-	item.Author = nullStringValue(author)
-	item.ContentHash = nullStringValue(contentHash)
-	if publishedAt.Valid {
-		item.PublishedAt = &publishedAt.Time
-	}
-	if hatebuFetchedAt.Valid {
-		item.HatebuFetchedAt = &hatebuFetchedAt.Time
-	}
-
 	return item, nil
 }
 
 // FindByContentHash はfeed_idとcontent_hashで記事を検索する。
 func (r *PostgresItemRepo) FindByContentHash(ctx context.Context, feedID, contentHash string) (*model.Item, error) {
-	item := &model.Item{}
-	var publishedAt sql.NullTime
-	var hatebuFetchedAt sql.NullTime
-	var guidOrID, link, content, summary, author, contentHashVal sql.NullString
-
-	err := r.db.QueryRowContext(ctx,
-		`SELECT id, feed_id, guid_or_id, title, link, content, summary, author,
-		        published_at, is_date_estimated, fetched_at, content_hash,
-		        hatebu_count, hatebu_fetched_at, created_at, updated_at
+	item, err := scanItem(r.db.QueryRowContext(ctx,
+		`SELECT `+itemSelectColumns+`
 		 FROM items WHERE feed_id = $1 AND content_hash = $2`,
 		feedID, contentHash,
-	).Scan(
-		&item.ID, &item.FeedID, &guidOrID, &item.Title, &link,
-		&content, &summary, &author,
-		&publishedAt, &item.IsDateEstimated, &item.FetchedAt, &contentHashVal,
-		&item.HatebuCount, &hatebuFetchedAt, &item.CreatedAt, &item.UpdatedAt,
-	)
-
+	))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("content_hash による記事の検索に失敗しました: %w", err)
 	}
-
-	item.GuidOrID = nullStringValue(guidOrID)
-	item.Link = nullStringValue(link)
-	item.Content = nullStringValue(content)
-	item.Summary = nullStringValue(summary)
-	item.Author = nullStringValue(author)
-	item.ContentHash = nullStringValue(contentHashVal)
-	if publishedAt.Valid {
-		item.PublishedAt = &publishedAt.Time
-	}
-	if hatebuFetchedAt.Valid {
-		item.HatebuFetchedAt = &hatebuFetchedAt.Time
-	}
-
 	return item, nil
 }
 
