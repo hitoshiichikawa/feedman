@@ -9,20 +9,33 @@ import (
 	"github.com/hitoshi/feedman/internal/repository"
 )
 
+// SubscriptionChecker は記事アクセスの認可に必要な購読確認の最小インターフェース。
+// repository.SubscriptionRepository がこれを満たす（インターフェース分離のため
+// 全 SubscriptionRepository ではなく必要メソッドのみに依存する）。
+type SubscriptionChecker interface {
+	// FindByUserAndFeed はユーザーとフィードの購読を返す。未購読なら nil を返す。
+	FindByUserAndFeed(ctx context.Context, userID, feedID string) (*model.Subscription, error)
+}
+
 // ItemService は記事取得・フィルタリングのサービス。
 type ItemService struct {
 	itemRepo      repository.ItemRepository
 	itemStateRepo repository.ItemStateRepository
+	subChecker    SubscriptionChecker
 }
 
 // NewItemService はItemServiceの新しいインスタンスを生成する。
+// subChecker は記事詳細取得時に呼び出しユーザーが当該フィードを購読しているかを
+// 確認するために使用する（購読外フィードの記事本文への越境アクセスを防ぐ）。
 func NewItemService(
 	itemRepo repository.ItemRepository,
 	itemStateRepo repository.ItemStateRepository,
+	subChecker SubscriptionChecker,
 ) *ItemService {
 	return &ItemService{
 		itemRepo:      itemRepo,
 		itemStateRepo: itemStateRepo,
+		subChecker:    subChecker,
 	}
 }
 
@@ -233,6 +246,17 @@ func (s *ItemService) GetItem(
 		return nil, err
 	}
 	if item == nil {
+		return nil, model.NewItemNotFoundError(itemID)
+	}
+
+	// 認可: 呼び出しユーザーが当該記事のフィードを購読していることを確認する。
+	// 一覧系は subscriptions JOIN で user_id を強制しているため、詳細取得でも同じ
+	// 購読境界を守る。未購読なら存在を秘匿するため ITEM_NOT_FOUND を返す。
+	sub, err := s.subChecker.FindByUserAndFeed(ctx, userID, item.FeedID)
+	if err != nil {
+		return nil, err
+	}
+	if sub == nil {
 		return nil, model.NewItemNotFoundError(itemID)
 	}
 
