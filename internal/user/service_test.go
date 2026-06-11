@@ -161,15 +161,50 @@ func (d *txUserDeleter) DeleteByIDTx(ctx context.Context, tx Tx, id string) erro
 	return d.deleteErr
 }
 
+// txAuthCodeDeleter は TxAuthCodeDeleter を満たす fake（Issue #170）。
+type txAuthCodeDeleter struct {
+	rec *txRecorder
+	err error
+}
+
+func (d *txAuthCodeDeleter) DeleteByUserIDTx(ctx context.Context, tx Tx, userID string) error {
+	d.rec.order = append(d.rec.order, "auth_codes")
+	return d.err
+}
+
+// txRefreshTokenDeleter は TxRefreshTokenDeleter を満たす fake（Issue #170）。
+type txRefreshTokenDeleter struct {
+	rec *txRecorder
+	err error
+}
+
+func (d *txRefreshTokenDeleter) DeleteByUserIDTx(ctx context.Context, tx Tx, userID string) error {
+	d.rec.order = append(d.rec.order, "refresh_token_families")
+	return d.err
+}
+
 // newTxService はトランザクション対応の Service を組み立てるテストヘルパ。
+// Issue #170: native auth deleter（auth code / refresh token）を末尾に追加。
+// nil を渡すと当該段はスキップされる（既存テストとの後方互換）。
 func newTxService(
 	beginner *fakeTxBeginner,
 	user *txUserDeleter,
 	session *txSessionDeleter,
 	sub *txSubDeleter,
 	state *txItemStateDeleter,
+	authCode *txAuthCodeDeleter,
+	refreshToken *txRefreshTokenDeleter,
 ) *Service {
-	return NewServiceWithTx(beginner, user, session, sub, state)
+	// nil 互換のため、対応するフィールドが nil なら interface も nil を渡す。
+	var authCodeDeleter TxAuthCodeDeleter
+	if authCode != nil {
+		authCodeDeleter = authCode
+	}
+	var refreshTokenDeleter TxRefreshTokenDeleter
+	if refreshToken != nil {
+		refreshTokenDeleter = refreshToken
+	}
+	return NewServiceWithTx(beginner, user, session, sub, state, authCodeDeleter, refreshTokenDeleter)
 }
 
 // --- レガシー（非トランザクション）パスのテスト ---
@@ -248,7 +283,10 @@ func TestService_Withdraw_UserNotFound(t *testing.T) {
 // --- トランザクション対応パスのテスト ---
 
 // TestService_Withdraw_Tx_CommitsOnSuccess は全削除成功時にコミットされ、
-// 子→親の順序で削除されることを検証する（AC 1.1 / 1.4 / NFR 2.1）。
+// item_states → subscriptions → sessions → auth_codes → refresh_token_families →
+// user の順で削除されることを検証する（AC 1.1 / 1.4 / Issue #170 Req 1.1, 1.2, 2.1
+// / NFR 2.1）。Issue #170 で sessions の直後・user の前に native auth 2 段
+// （auth_codes / refresh_token_families）が挿入された。
 func TestService_Withdraw_Tx_CommitsOnSuccess(t *testing.T) {
 	// Arrange
 	rec := &txRecorder{}
@@ -264,6 +302,8 @@ func TestService_Withdraw_Tx_CommitsOnSuccess(t *testing.T) {
 		&txSessionDeleter{rec: rec},
 		&txSubDeleter{rec: rec},
 		&txItemStateDeleter{rec: rec},
+		&txAuthCodeDeleter{rec: rec},
+		&txRefreshTokenDeleter{rec: rec},
 	)
 
 	// Act
@@ -279,7 +319,7 @@ func TestService_Withdraw_Tx_CommitsOnSuccess(t *testing.T) {
 	if beginner.rolledBack {
 		t.Error("expected no rollback on success")
 	}
-	want := []string{"item_states", "subscriptions", "sessions", "user"}
+	want := []string{"item_states", "subscriptions", "sessions", "auth_codes", "refresh_token_families", "user"}
 	if len(rec.order) != len(want) {
 		t.Fatalf("delete order = %v, want %v", rec.order, want)
 	}
@@ -308,6 +348,8 @@ func TestService_Withdraw_Tx_RollsBackOnDeleteError(t *testing.T) {
 		&txSessionDeleter{rec: rec},
 		&txSubDeleter{rec: rec, err: deleteErr},
 		&txItemStateDeleter{rec: rec},
+		nil, // Issue #170: 本テストは subscriptions 失敗のみを検証するため auth/refresh は注入しない
+		nil,
 	)
 
 	// Act
@@ -349,6 +391,8 @@ func TestService_Withdraw_Tx_UserNotFound(t *testing.T) {
 		&txSessionDeleter{rec: rec},
 		&txSubDeleter{rec: rec},
 		&txItemStateDeleter{rec: rec},
+		nil, // Issue #170: 存在しないユーザーは tx 開始すらしないため deleter は不要
+		nil,
 	)
 
 	// Act
@@ -387,6 +431,8 @@ func TestService_Withdraw_Tx_NoRelatedData(t *testing.T) {
 		&txSessionDeleter{rec: rec},
 		&txSubDeleter{rec: rec},
 		&txItemStateDeleter{rec: rec},
+		nil, // Issue #170: nil ガード経路の検証は別テスト (TestService_Withdraw_Tx_NilNativeAuthDeletersSkip) が担う
+		nil,
 	)
 
 	// Act
@@ -422,6 +468,8 @@ func TestService_Withdraw_Tx_CommitError(t *testing.T) {
 		&txSessionDeleter{rec: rec},
 		&txSubDeleter{rec: rec},
 		&txItemStateDeleter{rec: rec},
+		nil, // Issue #170: コミットエラーの検証なので native auth deleter は不要
+		nil,
 	)
 
 	// Act
@@ -457,6 +505,8 @@ func TestService_Withdraw_Tx_BeginError(t *testing.T) {
 		&txSessionDeleter{rec: rec},
 		&txSubDeleter{rec: rec},
 		&txItemStateDeleter{rec: rec},
+		nil, // Issue #170: tx 開始失敗のため deleter は呼ばれない
+		nil,
 	)
 
 	// Act
@@ -471,5 +521,150 @@ func TestService_Withdraw_Tx_BeginError(t *testing.T) {
 	}
 	if len(rec.order) != 0 {
 		t.Errorf("expected no deletes when begin fails, got %v", rec.order)
+	}
+}
+
+// --- Issue #170: 退会時の native auth 認証状態削除のテスト ---
+
+// TestService_Withdraw_Tx_RollsBackOnAuthCodeDeleteError は auth_codes 削除が
+// 失敗したとき、退会全体が Rollback され user / refresh_token_families 削除に
+// 到達しないことを検証する（Issue #170 Req 2.2）。
+func TestService_Withdraw_Tx_RollsBackOnAuthCodeDeleteError(t *testing.T) {
+	// Arrange
+	rec := &txRecorder{}
+	beginner := &fakeTxBeginner{}
+	deleteErr := errors.New("auth_code delete failed")
+	user := &txUserDeleter{
+		rec: rec,
+		findByIDFn: func(ctx context.Context, id string) (*model.User, error) {
+			return &model.User{ID: id}, nil
+		},
+	}
+	refreshTokenDel := &txRefreshTokenDeleter{rec: rec}
+	svc := newTxService(beginner,
+		user,
+		&txSessionDeleter{rec: rec},
+		&txSubDeleter{rec: rec},
+		&txItemStateDeleter{rec: rec},
+		&txAuthCodeDeleter{rec: rec, err: deleteErr},
+		refreshTokenDel,
+	)
+
+	// Act
+	err := svc.Withdraw(context.Background(), "user-1")
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected error from failing auth_code delete, got nil")
+	}
+	if !errors.Is(err, deleteErr) {
+		t.Errorf("expected error to wrap %v, got %v", deleteErr, err)
+	}
+	if beginner.committed {
+		t.Error("expected no commit when auth_code delete fails")
+	}
+	if !beginner.rolledBack {
+		t.Error("expected rollback when auth_code delete fails")
+	}
+	// auth_codes 失敗後の refresh_token_families / user は呼ばれない（fail-fast）
+	for _, step := range rec.order {
+		if step == "refresh_token_families" {
+			t.Error("expected refresh_token_families delete NOT to be called after auth_codes failure")
+		}
+		if step == "user" {
+			t.Error("expected user delete NOT to be called after auth_codes failure")
+		}
+	}
+	if user.deleteCalled {
+		t.Error("expected user delete NOT to be called after auth_codes failure")
+	}
+}
+
+// TestService_Withdraw_Tx_RollsBackOnRefreshTokenDeleteError は
+// refresh_token_families 削除が失敗したとき、退会全体が Rollback され user 削除に
+// 到達しないことを検証する（Issue #170 Req 2.2 / 2.3）。
+func TestService_Withdraw_Tx_RollsBackOnRefreshTokenDeleteError(t *testing.T) {
+	// Arrange
+	rec := &txRecorder{}
+	beginner := &fakeTxBeginner{}
+	deleteErr := errors.New("refresh_token delete failed")
+	user := &txUserDeleter{
+		rec: rec,
+		findByIDFn: func(ctx context.Context, id string) (*model.User, error) {
+			return &model.User{ID: id}, nil
+		},
+	}
+	svc := newTxService(beginner,
+		user,
+		&txSessionDeleter{rec: rec},
+		&txSubDeleter{rec: rec},
+		&txItemStateDeleter{rec: rec},
+		&txAuthCodeDeleter{rec: rec},
+		&txRefreshTokenDeleter{rec: rec, err: deleteErr},
+	)
+
+	// Act
+	err := svc.Withdraw(context.Background(), "user-1")
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected error from failing refresh_token delete, got nil")
+	}
+	if !errors.Is(err, deleteErr) {
+		t.Errorf("expected error to wrap %v, got %v", deleteErr, err)
+	}
+	if beginner.committed {
+		t.Error("expected no commit when refresh_token delete fails")
+	}
+	if !beginner.rolledBack {
+		t.Error("expected rollback when refresh_token delete fails")
+	}
+	if user.deleteCalled {
+		t.Error("expected user delete NOT to be called after refresh_token failure")
+	}
+}
+
+// TestService_Withdraw_Tx_NilNativeAuthDeletersSkip は native auth deleter が
+// 両方 nil のとき、退会が従来どおり成功し（NFR 1.1 後方互換）、
+// auth_codes / refresh_token_families の段がスキップされることを検証する
+// （Issue #170 nil ガード）。
+func TestService_Withdraw_Tx_NilNativeAuthDeletersSkip(t *testing.T) {
+	// Arrange: native auth deleter を nil で構築
+	rec := &txRecorder{}
+	beginner := &fakeTxBeginner{}
+	user := &txUserDeleter{
+		rec: rec,
+		findByIDFn: func(ctx context.Context, id string) (*model.User, error) {
+			return &model.User{ID: id}, nil
+		},
+	}
+	svc := newTxService(beginner,
+		user,
+		&txSessionDeleter{rec: rec},
+		&txSubDeleter{rec: rec},
+		&txItemStateDeleter{rec: rec},
+		nil, // authCode deleter を注入しない（nil ガード経路を踏む）
+		nil, // refreshToken deleter を注入しない
+	)
+
+	// Act
+	err := svc.Withdraw(context.Background(), "user-1")
+
+	// Assert
+	if err != nil {
+		t.Fatalf("Withdraw returned error: %v", err)
+	}
+	if !beginner.committed {
+		t.Error("expected commit when native auth deleters are nil")
+	}
+	// nil ガードにより auth_codes / refresh_token_families は order に現れない
+	want := []string{"item_states", "subscriptions", "sessions", "user"}
+	if len(rec.order) != len(want) {
+		t.Fatalf("delete order = %v, want %v (native auth steps skipped)", rec.order, want)
+	}
+	for i := range want {
+		if rec.order[i] != want[i] {
+			t.Errorf("delete order[%d] = %q, want %q", i, rec.order[i], want[i])
+		}
 	}
 }

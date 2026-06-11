@@ -95,6 +95,10 @@ func (a *txUserDeleterAdapter) DeleteByIDTx(ctx context.Context, tx user.Tx, id 
 }
 
 // newTxUserService はトランザクション対応の退会サービスを組み立てる。
+//
+// Issue #170: native auth deleter (auth_code / refresh_token) は Task 3 で
+// 正式なアダプタを注入するため、本 commit 時点では nil を渡してビルド整合のみ
+// 維持する（withdraw 時の native auth 明示削除は Task 3 完了後に有効化される）。
 func newTxUserService(
 	beginner *repository.SQLTxBeginner,
 	userRepo *repository.PostgresUserRepo,
@@ -108,6 +112,8 @@ func newTxUserService(
 		&txSessionDeleterAdapter{repo: sessionRepo},
 		&txSubscriptionDeleterAdapter{repo: subRepo},
 		&txItemStateDeleterAdapter{repo: itemStateRepo},
+		nil, // TODO(Issue #170 Task 3): txAuthCodeDeleterAdapter を注入
+		nil, // TODO(Issue #170 Task 3): txRefreshTokenDeleterAdapter を注入
 	)
 }
 
