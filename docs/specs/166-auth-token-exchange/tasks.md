@@ -36,7 +36,7 @@
   - _Requirements: 1.2, 1.3, 2.1, 2.2, 2.3, 2.6, 2.7, NFR 1.1, NFR 1.2, NFR 1.3, NFR 3.1_
   - _Depends: 2, 3_
 
-- [ ] 5. handler: NativeAuthHandler と router 登録
+- [x] 5. handler: NativeAuthHandler と router 登録
   - `internal/handler/native_auth_handler.go` を新規作成: `TokenExchangeService` 最小 IF /
     `NewNativeAuthHandler` / `Token`（JSON decode → 必須フィールド検査 → service 呼び出し →
     200 / 400 INVALID_REQUEST / 400 INVALID_GRANT / 500 を `middleware.WriteErrorResponse` で応答。
