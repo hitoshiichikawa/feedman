@@ -15,7 +15,7 @@
     ケース（一致 / 不一致 / 42・129 文字 / 不正文字）を追加
   - _Requirements: 2.1, 2.4, NFR 1.4_
 
-- [ ] 3. auth: JWTIssuer を追加
+- [x] 3. auth: JWTIssuer を追加
   - `go.mod` に `github.com/golang-jwt/jwt/v5` を追加
   - `internal/auth/jwt_issuer.go` を新規作成: `AccessTokenTTL = 15 * time.Minute` /
     `NewJWTIssuer(secret []byte, kid string)` / `IssueAccessToken(userID string) (string, error)`
