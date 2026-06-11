@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. PKCE S256 検証ユーティリティを追加
+- [x] 1. PKCE S256 検証ユーティリティを追加
   - `internal/auth/pkce.go` を新規作成し、`ValidatePKCES256(challenge, method string) error`
     を実装（method は "S256" 厳密一致、challenge は `^[A-Za-z0-9_-]{43}$` の事前 compile
     regex。純粋関数・I/O なし）
