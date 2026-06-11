@@ -13,7 +13,7 @@
     （#167 既存ケースの検証内容は変えない。モックの interface 追従は可）
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.1, 2.2, NFR 1.1, NFR 1.3, NFR 3.1_
 
-- [ ] 2. handler: Revoke エンドポイントと router 登録
+- [x] 2. handler: Revoke エンドポイントと router 登録
   - `internal/handler/native_auth_handler.go`: `TokenExchangeService` interface に
     `RevokeRefreshToken` を追加し、`Revoke` handler を実装（204 ボディなし /
     400 INVALID_REQUEST / 500 INTERNAL_ERROR）
