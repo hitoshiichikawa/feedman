@@ -16,7 +16,7 @@
     サブテストが無変更で green であることを確認
   - _Requirements: 1.1, 1.2, 3.1, NFR 1.2, NFR 1.3_
 
-- [ ] 2. user: 退会トランザクションへの native auth 削除統合
+- [x] 2. user: 退会トランザクションへの native auth 削除統合
   - `internal/user/service.go`: `TxAuthCodeDeleter` / `TxRefreshTokenDeleter` を追加し、
     `NewServiceWithTx` の引数を 2 つ拡張。`withdrawTx` の sessions 削除直後（users 削除前）に
     nil ガード付きの削除 2 段（認可コード → refresh token）を挿入する。既存手順
