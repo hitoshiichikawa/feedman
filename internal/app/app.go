@@ -176,7 +176,11 @@ func runServe(cfg *config.Config) error {
 		subRepo, itemStateRepo, feedRepo,
 		fetcher, manualFetchTxBeginner, serveCollector,
 	)
-	userService := newTxUserService(txBeginner, userRepo, sessionRepo, subRepo, itemStateRepo)
+	// Issue #170: 退会トランザクションへ native auth 認証状態（auth_codes /
+	// refresh_token_families）の明示削除を統合するため、authCodeRepo /
+	// refreshTokenRepo を newTxUserService に渡す。これらの repo は #165 / #166 で
+	// 上記の native auth 配線にも共用される。
+	userService := newTxUserService(txBeginner, userRepo, sessionRepo, subRepo, itemStateRepo, authCodeRepo, refreshTokenRepo)
 
 	// 5. ハンドラーアダプタの構築
 	subServiceAdapter := handler.NewSubscriptionServiceAdapter(subService)
