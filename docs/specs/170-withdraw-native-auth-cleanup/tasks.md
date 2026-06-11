@@ -28,7 +28,7 @@
   - _Requirements: 1.1, 1.2, 2.1, 2.2, 2.3_
   - _Depends: 1_
 
-- [ ] 3. app wiring と統合検証
+- [x] 3. app wiring と統合検証
   - `internal/app/withdraw_wiring.go`: `txAuthCodeDeleterAdapter` /
     `txRefreshTokenDeleterAdapter` を追加（`querierFromTx` → `DeleteByUserIDExec` の既存
     アダプタ同型）し、`newTxUserService` の引数と compile-time interface checks を拡張
