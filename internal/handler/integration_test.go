@@ -9,9 +9,11 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/hitoshi/feedman/internal/auth"
 	"github.com/hitoshi/feedman/internal/middleware"
 	"github.com/hitoshi/feedman/internal/model"
 )
@@ -47,6 +49,85 @@ func newIntegrationState() *integrationState {
 		users:         make(map[string]*model.User),
 		subsByUser:    make(map[string][]string),
 	}
+}
+
+// --- Native Auth 用 stateful mock service（Issue #166） ---
+
+// mockNativeTokenExchangeService は integration_test 内で auth_code → token 交換の
+// 単回利用と「同一 code の再交換 400」を検証するための簡易ステートフルモック。
+// 実際の repository/service 層を介さず、issuedCode との一致 + 単回フラグで判定する。
+type mockNativeTokenExchangeService struct {
+	mu           sync.Mutex
+	issuedCode   string
+	used         bool
+	callCount    int
+	lastCode     string
+	lastVerifier string
+}
+
+// IssueCode は事前に「払い出した auth_code 平文」を mock に登録する。
+// callback フローを通さずに token 交換だけを検証したいテストで使う。
+func (m *mockNativeTokenExchangeService) IssueCode(plainCode string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.issuedCode = plainCode
+	m.used = false
+}
+
+func (m *mockNativeTokenExchangeService) ExchangeAuthCode(ctx context.Context, authCode, codeVerifier string) (*auth.TokenPair, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.callCount++
+	m.lastCode = authCode
+	m.lastVerifier = codeVerifier
+	// 不明 / 既使用 / verifier 空 を一律 ErrInvalidGrant に正規化（Req 2.6）
+	if m.issuedCode == "" || authCode != m.issuedCode {
+		return nil, auth.ErrInvalidGrant
+	}
+	if m.used {
+		return nil, auth.ErrInvalidGrant
+	}
+	if codeVerifier == "" {
+		return nil, auth.ErrInvalidGrant
+	}
+	m.used = true // 単回消費
+	return &auth.TokenPair{
+		AccessToken:  "integration-access-token",
+		RefreshToken: "integration-refresh-token",
+		ExpiresIn:    900,
+	}, nil
+}
+
+// createNativeAuthIntegrationRouter は native auth 系統（login / callback / token 交換）の
+// 通し検証用に、token 交換 service を stateful mock として注入した router を返す。
+// 既存 createIntegrationRouter は固定 mock の listItems などに依存しているため、ここでは
+// 必要最小の依存（auth + native handler のみ）に絞った別ヘルパーを用意する。
+func createNativeAuthIntegrationRouter(state *integrationState, tokenSvc *mockNativeTokenExchangeService) http.Handler {
+	sessionFinder := &mockSessionFinderForRouter{sessions: state.sessions}
+
+	authService := &mockAuthService{
+		getLoginURLFn: func(s string) string {
+			return "https://accounts.google.com/o/oauth2/auth?state=" + s
+		},
+		handleNativeCallbackFn: func(ctx context.Context, code, pkceChallenge string) (string, error) {
+			// callback が払い出す auth_code（平文）。token 交換 mock にも登録して
+			// 単回消費の正しさを検証する。
+			const plain = "integration-native-auth-code"
+			tokenSvc.IssueCode(plain)
+			return plain, nil
+		},
+	}
+
+	nativeHandler := NewNativeAuthHandler(tokenSvc)
+	deps := &RouterDeps{
+		SessionFinder:     sessionFinder,
+		CORSAllowedOrigin: "http://localhost:3000",
+		RateLimiter:       middleware.NewRateLimiter(middleware.DefaultRateLimiterConfig()),
+		AuthService:       authService,
+		AuthConfig:        AuthHandlerConfig{BaseURL: "http://localhost:3000"},
+		NativeAuthHandler: nativeHandler,
+	}
+	return NewRouter(deps)
 }
 
 // --- 統合テスト用ルーター構築ヘルパー ---
@@ -1262,5 +1343,188 @@ func TestIntegration_ListStarredItems_CursorPropagation(t *testing.T) {
 	if state.lastStarredLimit != defaultItemsPerPage {
 		t.Errorf("limit propagated to service = %d, want %d (default)",
 			state.lastStarredLimit, defaultItemsPerPage)
+	}
+}
+
+// --- Native Auth Token 交換の通し統合テスト（Issue #166 / task 6） ---
+
+// TestIntegration_NativeAuthFlow_CallbackThenExchangeSucceeds は flow=native の OAuth
+// callback で発行された auth_code を POST /api/auth/token で交換し、200 で 4 フィールドが
+// 返ることを通しで検証する（Req 1.1, 1.2, 1.5, 1.6）。
+func TestIntegration_NativeAuthFlow_CallbackThenExchangeSucceeds(t *testing.T) {
+	// Arrange
+	state := newIntegrationState()
+	tokenSvc := &mockNativeTokenExchangeService{}
+	router := createNativeAuthIntegrationRouter(state, tokenSvc)
+
+	// 1. native login: state / challenge Cookie を取得
+	loginURL := "/auth/google/login?flow=native&code_challenge=" + nativeTestChallenge + "&code_challenge_method=S256"
+	req := httptest.NewRequest(http.MethodGet, loginURL, nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("step1: login status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	}
+	var oauthStateC, nativeChallengeC *http.Cookie
+	for _, c := range resp.Cookies() {
+		switch c.Name {
+		case "oauth_state":
+			oauthStateC = c
+		case "oauth_native_challenge":
+			nativeChallengeC = c
+		}
+	}
+	if oauthStateC == nil || nativeChallengeC == nil {
+		t.Fatal("step1: expected both oauth_state and oauth_native_challenge cookies")
+	}
+
+	// 2. callback: アプリスキームへ auth_code が返る
+	callbackURL := "/auth/google/callback?code=test-auth-code&state=" + oauthStateC.Value
+	req = httptest.NewRequest(http.MethodGet, callbackURL, nil)
+	req.AddCookie(oauthStateC)
+	req.AddCookie(nativeChallengeC)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	resp = w.Result()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("step2: callback status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
+	}
+	location := resp.Header.Get("Location")
+	const wantAuthCode = "integration-native-auth-code"
+	wantLocation := "feedman://auth/callback?auth_code=" + wantAuthCode
+	if location != wantLocation {
+		t.Fatalf("step2: Location = %q, want %q", location, wantLocation)
+	}
+
+	// 3. token 交換: 当該 auth_code を POST /api/auth/token に送ると 200 で 4 フィールド
+	body := fmt.Sprintf(`{"auth_code":%q,"code_verifier":%q}`, wantAuthCode, "plain-verifier")
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/token", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	resp = w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("step3: token exchange status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("step3: Content-Type = %q, want %q", ct, "application/json")
+	}
+
+	var tokenBody map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&tokenBody); err != nil {
+		t.Fatalf("step3: decode token body: %v", err)
+	}
+	if tokenBody["access_token"] != "integration-access-token" {
+		t.Errorf("step3: access_token = %v, want %q", tokenBody["access_token"], "integration-access-token")
+	}
+	if tokenBody["refresh_token"] != "integration-refresh-token" {
+		t.Errorf("step3: refresh_token = %v, want %q", tokenBody["refresh_token"], "integration-refresh-token")
+	}
+	if tokenBody["token_type"] != "Bearer" {
+		t.Errorf("step3: token_type = %v, want %q (Req 1.1)", tokenBody["token_type"], "Bearer")
+	}
+	if v, _ := tokenBody["expires_in"].(float64); v != 900 {
+		t.Errorf("step3: expires_in = %v, want 900 (Req 1.6)", v)
+	}
+	if tokenSvc.lastVerifier != "plain-verifier" {
+		t.Errorf("step3: service.lastVerifier = %q, want %q", tokenSvc.lastVerifier, "plain-verifier")
+	}
+}
+
+// TestIntegration_NativeAuthFlow_ReuseAuthCodeReturns400 は同一 auth_code の 2 度目の
+// 交換が 400 INVALID_GRANT で拒否されることを検証する（Req 1.2: 単回消費 / Req 2.6: uniform）。
+func TestIntegration_NativeAuthFlow_ReuseAuthCodeReturns400(t *testing.T) {
+	// Arrange: native login → callback で auth_code を払い出した状態にする
+	state := newIntegrationState()
+	tokenSvc := &mockNativeTokenExchangeService{}
+	router := createNativeAuthIntegrationRouter(state, tokenSvc)
+
+	loginURL := "/auth/google/login?flow=native&code_challenge=" + nativeTestChallenge + "&code_challenge_method=S256"
+	req := httptest.NewRequest(http.MethodGet, loginURL, nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	resp := w.Result()
+	var oauthStateC, nativeChallengeC *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == "oauth_state" {
+			oauthStateC = c
+		}
+		if c.Name == "oauth_native_challenge" {
+			nativeChallengeC = c
+		}
+	}
+	callbackURL := "/auth/google/callback?code=test-auth-code&state=" + oauthStateC.Value
+	req = httptest.NewRequest(http.MethodGet, callbackURL, nil)
+	req.AddCookie(oauthStateC)
+	req.AddCookie(nativeChallengeC)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	const wantAuthCode = "integration-native-auth-code"
+
+	// 1 回目の交換: 成功
+	body := fmt.Sprintf(`{"auth_code":%q,"code_verifier":%q}`, wantAuthCode, "plain-verifier")
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/token", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("1 回目の交換が成功しない: status = %d", w.Result().StatusCode)
+	}
+
+	// Act: 同一 auth_code で 2 回目の交換
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/token", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	// Assert: 400 INVALID_GRANT
+	resp = w.Result()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("2 回目の交換 status = %d, want %d (Req 1.2: 単回消費)", resp.StatusCode, http.StatusBadRequest)
+	}
+	var body2 map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&body2)
+	if body2["code"] != "INVALID_GRANT" {
+		t.Errorf("2 回目の code = %v, want %q (Req 2.6 uniform 拒否)", body2["code"], "INVALID_GRANT")
+	}
+	if body2["category"] != "auth" {
+		t.Errorf("2 回目の category = %v, want %q", body2["category"], "auth")
+	}
+	// 詳細な拒否理由を反射しない（Req 2.6）
+	if msg, _ := body2["message"].(string); strings.Contains(msg, "used") || strings.Contains(msg, "expired") {
+		t.Errorf("message %q must not differentiate rejection reasons", msg)
+	}
+}
+
+// TestIntegration_NativeAuthFlow_UnknownAuthCodeReturns400 は callback を経由せず未知の
+// auth_code を直接送ったとき 400 INVALID_GRANT が返ることを検証する（Req 2.2, 2.6）。
+func TestIntegration_NativeAuthFlow_UnknownAuthCodeReturns400(t *testing.T) {
+	// Arrange: callback を経由せず token 交換だけ呼ぶ
+	state := newIntegrationState()
+	tokenSvc := &mockNativeTokenExchangeService{}
+	router := createNativeAuthIntegrationRouter(state, tokenSvc)
+
+	body := `{"auth_code":"unknown-code","code_verifier":"plain-verifier"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/token", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+	var resBody map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&resBody)
+	if resBody["code"] != "INVALID_GRANT" {
+		t.Errorf("code = %v, want %q (Req 2.2 / 2.6)", resBody["code"], "INVALID_GRANT")
 	}
 }
