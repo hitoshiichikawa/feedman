@@ -166,9 +166,11 @@ func TestWithdrawIntegration_NativeAuthCleanup(t *testing.T) {
 
 	// 各 user に session を 1 件追加（sessions の削除も確認するため）
 	for _, uid := range []string{targetUserID, bystanderUserID} {
+		// sessions.id は VARCHAR(255)、data は BYTEA（initial_schema.up.sql）。
+		// PostgresSessionRepo.Create と同じく data には []byte("{}") 相当を入れる。
 		if _, err := db.Exec(
 			`INSERT INTO sessions (id, user_id, data, expires_at, created_at)
-			 VALUES (gen_random_uuid(), $1, '{}'::jsonb, now() + interval '1 hour', now())`,
+			 VALUES (gen_random_uuid()::text, $1, '{}'::bytea, now() + interval '1 hour', now())`,
 			uid,
 		); err != nil {
 			t.Fatalf("session 挿入に失敗 (%s): %v", uid, err)
