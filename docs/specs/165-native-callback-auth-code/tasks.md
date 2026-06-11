@@ -9,7 +9,7 @@
     不正文字）を実装
   - _Requirements: 1.2, 1.3, 1.4, NFR 1.2_
 
-- [ ] 2. auth.Service に HandleNativeCallback を追加
+- [x] 2. auth.Service に HandleNativeCallback を追加
   - `internal/auth/service.go` の `HandleCallback` から OAuth 交換〜ユーザー解決（手順 1〜3）を
     `resolveUserFromOAuth(ctx, code) (string, error)` に抽出（挙動・ログ出力は不変）
   - `internal/auth/native.go` を新規作成: `AuthCodeCreator` 最小 interface /
