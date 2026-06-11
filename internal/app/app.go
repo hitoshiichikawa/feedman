@@ -109,6 +109,8 @@ func runServe(cfg *config.Config) error {
 	sessionRepo := repository.NewPostgresSessionRepo(db)
 	// native auth（#165）: flow=native callback の auth_code 保存に使用する。
 	authCodeRepo := repository.NewPostgresAuthCodeRepo(db)
+	// native auth（#166）: POST /api/auth/token の refresh family / token 永続化に使用する。
+	refreshTokenRepo := repository.NewPostgresRefreshTokenRepo(db)
 	feedRepo := repository.NewPostgresFeedRepo(db)
 	subRepo := repository.NewPostgresSubscriptionRepo(db)
 	itemRepo := repository.NewPostgresItemRepo(db)
@@ -204,6 +206,22 @@ func runServe(cfg *config.Config) error {
 		middleware.DefaultIPRateLimiterConfig(cfg.RateLimitUnauthIP),
 	)
 
+	// Native Auth トークン交換（Issue #166）: NATIVE_AUTH_JWT_SECRET が設定されているときのみ
+	// issuer / service / handler を組み立てて RouterDeps に注入する。未設定なら nil のまま、
+	// router 側で POST /api/auth/token は登録されず 404 になる（fail-closed / Req 3.2）。
+	// 起動時に運用者向け Warn を 1 回記録する（Req 3.3）。
+	var nativeAuthHandler *handler.NativeAuthHandler
+	if cfg.NativeAuthJWTSecret != "" {
+		jwtIssuer := auth.NewJWTIssuer([]byte(cfg.NativeAuthJWTSecret), cfg.NativeAuthJWTKid)
+		nativeTokenService := auth.NewTokenService(authCodeRepo, refreshTokenRepo, jwtIssuer)
+		nativeAuthHandler = handler.NewNativeAuthHandler(nativeTokenService)
+		slog.Info("native token exchange enabled",
+			slog.String("kid", cfg.NativeAuthJWTKid),
+		)
+	} else {
+		slog.Warn("NATIVE_AUTH_JWT_SECRET is not set; POST /api/auth/token is disabled")
+	}
+
 	deps := &handler.RouterDeps{
 		HealthChecker:       db,
 		SessionFinder:       sessionRepo,
@@ -223,6 +241,9 @@ func runServe(cfg *config.Config) error {
 			CookieSecure:  cfg.CookieSecure,
 			SessionMaxAge: cfg.SessionMaxAge,
 		},
+
+		// Native Auth (Issue #166)
+		NativeAuthHandler: nativeAuthHandler,
 
 		FeedService:         feedService,
 		SubscriptionDeleter: subDeleterAdapter,

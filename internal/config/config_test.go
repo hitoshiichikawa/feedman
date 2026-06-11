@@ -314,6 +314,82 @@ func TestLoad_MetricsPort(t *testing.T) {
 	})
 }
 
+// TestLoad_NativeAuthJWT は NATIVE_AUTH_JWT_SECRET / NATIVE_AUTH_JWT_KID の
+// 読み込みと未設定時の挙動を検証する（Issue #166 / Req 3.1, 3.2, 3.5, NFR 2.2）。
+//
+// secret は未設定でも起動成功し、空文字として保持される（後段の wiring で fail-closed 判定）。
+// kid は未設定時に "v1" が採用される。
+func TestLoad_NativeAuthJWT(t *testing.T) {
+	t.Run("NATIVE_AUTH_JWT_SECRETが設定されているとき値を採用する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("NATIVE_AUTH_JWT_SECRET", "test-jwt-secret-32bytes-long-12345")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if cfg.NativeAuthJWTSecret != "test-jwt-secret-32bytes-long-12345" {
+			t.Errorf("NativeAuthJWTSecret = %q, want %q",
+				cfg.NativeAuthJWTSecret, "test-jwt-secret-32bytes-long-12345")
+		}
+	})
+
+	t.Run("NATIVE_AUTH_JWT_SECRETが未設定のとき空文字を保持し起動を継続する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("NATIVE_AUTH_JWT_SECRET", "")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert: secret 未設定でも起動成功（fail-closed は後段の wiring 側で判定）
+		if err != nil {
+			t.Fatalf("expected no error (secret 未設定でも起動継続), got %v", err)
+		}
+		if cfg.NativeAuthJWTSecret != "" {
+			t.Errorf("NativeAuthJWTSecret = %q, want empty", cfg.NativeAuthJWTSecret)
+		}
+	})
+
+	t.Run("NATIVE_AUTH_JWT_KIDが設定されているとき値を採用する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("NATIVE_AUTH_JWT_KID", "v2")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if cfg.NativeAuthJWTKid != "v2" {
+			t.Errorf("NativeAuthJWTKid = %q, want %q", cfg.NativeAuthJWTKid, "v2")
+		}
+	})
+
+	t.Run("NATIVE_AUTH_JWT_KIDが未設定のとき既定値v1を採用する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("NATIVE_AUTH_JWT_KID", "")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if cfg.NativeAuthJWTKid != "v1" {
+			t.Errorf("NativeAuthJWTKid = %q, want %q (default)", cfg.NativeAuthJWTKid, "v1")
+		}
+	})
+}
+
 // TestLoad_HSTSEnabled は HSTS_ENABLED 環境変数の読み込みを検証する。
 // Requirement 3.3（未指定・不正値時は既定値採用で起動継続）と NFR 1.2 に対応。
 func TestLoad_HSTSEnabled(t *testing.T) {

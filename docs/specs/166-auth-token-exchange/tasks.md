@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. config: JWT 署名鍵の環境変数を追加
+- [x] 1. config: JWT 署名鍵の環境変数を追加
   - `internal/config/config.go` に `NativeAuthJWTSecret`（env `NATIVE_AUTH_JWT_SECRET`、任意）と
     `NativeAuthJWTKid`（env `NATIVE_AUTH_JWT_KID`、既定 `"v1"`）を追加。未設定でも起動を
     失敗させない（既存 required 項目の検証ロジックに含めない）
@@ -8,14 +8,14 @@
   - 既存 config テストの慣習に合わせ、設定あり / なし / kid 既定値の unit test を追加
   - _Requirements: 3.1, 3.2, NFR 2.2_
 
-- [ ] 2. auth: PKCE verifier 検証を追加
+- [x] 2. auth: PKCE verifier 検証を追加
   - `internal/auth/pkce.go` に `VerifyPKCES256Verifier(verifier, storedChallenge string) bool` を
     追加（形式 `^[A-Za-z0-9._~-]{43,128}$` → S256 導出 → `subtle.ConstantTimeCompare`）
   - `internal/auth/pkce_test.go` に RFC 7636 Appendix B の test vector を含む table-driven
     ケース（一致 / 不一致 / 42・129 文字 / 不正文字）を追加
   - _Requirements: 2.1, 2.4, NFR 1.4_
 
-- [ ] 3. auth: JWTIssuer を追加
+- [x] 3. auth: JWTIssuer を追加
   - `go.mod` に `github.com/golang-jwt/jwt/v5` を追加
   - `internal/auth/jwt_issuer.go` を新規作成: `AccessTokenTTL = 15 * time.Minute` /
     `NewJWTIssuer(secret []byte, kid string)` / `IssueAccessToken(userID string) (string, error)`
@@ -25,7 +25,7 @@
     claims / kid / 期限を検証、空 userID は error）
   - _Requirements: 1.4, 3.4, 3.5_
 
-- [ ] 4. auth: TokenService.ExchangeAuthCode を追加
+- [x] 4. auth: TokenService.ExchangeAuthCode を追加
   - `internal/auth/token_service.go` を新規作成: `ErrInvalidGrant` sentinel /
     `AuthCodeConsumer`・`RefreshTokenStore` 最小 interface / `RefreshTokenTTL = 30 * 24 * time.Hour` /
     `TokenPair` / `NewTokenService` / `ExchangeAuthCode`（design.md の交換フロー手順 2〜6。
@@ -36,7 +36,7 @@
   - _Requirements: 1.2, 1.3, 2.1, 2.2, 2.3, 2.6, 2.7, NFR 1.1, NFR 1.2, NFR 1.3, NFR 3.1_
   - _Depends: 2, 3_
 
-- [ ] 5. handler: NativeAuthHandler と router 登録
+- [x] 5. handler: NativeAuthHandler と router 登録
   - `internal/handler/native_auth_handler.go` を新規作成: `TokenExchangeService` 最小 IF /
     `NewNativeAuthHandler` / `Token`（JSON decode → 必須フィールド検査 → service 呼び出し →
     200 / 400 INVALID_REQUEST / 400 INVALID_GRANT / 500 を `middleware.WriteErrorResponse` で応答。
@@ -49,7 +49,7 @@
   - _Requirements: 1.1, 1.5, 1.6, 2.5, 2.6, 3.2, NFR 1.5, NFR 2.1_
   - _Depends: 4_
 
-- [ ] 6. wiring と統合テスト
+- [x] 6. wiring と統合テスト
   - `internal/app/app.go`: `repository.NewPostgresRefreshTokenRepo(db)` を wiring し、
     `cfg.NativeAuthJWTSecret != ""` のときのみ issuer / TokenService / NativeAuthHandler を
     生成して deps に注入。未設定時は `slog.Warn` を 1 回出力（design.md app.go 節どおり）
