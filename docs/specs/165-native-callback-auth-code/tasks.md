@@ -51,7 +51,7 @@
   - _Requirements: 2.1, 2.3, 3.1, 3.2, 3.3, 3.4, 4.1, NFR 1.3_
   - _Depends: 2, 3_
 
-- [ ] 5. Wiring と統合テスト
+- [x] 5. Wiring と統合テスト
   - `internal/app/app.go`: `repository.NewPostgresAuthCodeRepo(db)` を生成し
     `auth.NewService` へ注入
   - `internal/handler/integration_test.go` に native flow の通しケース（login(native) →
