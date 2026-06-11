@@ -247,7 +247,9 @@ func buildUpdatedItem(existing *model.Item, p preparedItem, now time.Time) *mode
 	updated := *existing
 	updated.GuidOrID = p.parsed.GuidOrID
 	updated.Title = p.parsed.Title
-	updated.Link = p.parsed.Link
+	// link は href として出力されるため、http/https 以外（javascript: 等）を無害化する。
+	// 同一性判定には生の parsed.Link を使うため dedup には影響しない。
+	updated.Link = security.SafeExternalURL(p.parsed.Link)
 	updated.Content = p.sanitizedContent
 	updated.Summary = p.sanitizedSummary
 	updated.Author = p.parsed.Author
@@ -267,11 +269,12 @@ func buildUpdatedItem(existing *model.Item, p preparedItem, now time.Time) *mode
 // published_at未設定の場合はfetched_atを代用し、推定フラグを付与する。
 func buildNewItem(feedID string, p preparedItem, now time.Time) *model.Item {
 	item := &model.Item{
-		ID:          uuid.New().String(),
-		FeedID:      feedID,
-		GuidOrID:    p.parsed.GuidOrID,
-		Title:       p.parsed.Title,
-		Link:        p.parsed.Link,
+		ID:       uuid.New().String(),
+		FeedID:   feedID,
+		GuidOrID: p.parsed.GuidOrID,
+		Title:    p.parsed.Title,
+		// link は href として出力されるため、http/https 以外（javascript: 等）を無害化する。
+		Link:        security.SafeExternalURL(p.parsed.Link),
 		Content:     p.sanitizedContent,
 		Summary:     p.sanitizedSummary,
 		Author:      p.parsed.Author,

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { RotateCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatRelativeDate } from "@/lib/date";
+import { safeFeedUrl } from "@/lib/url";
 import { useItems, useItemDetail } from "@/hooks/use-items";
 import { useMarkAsRead, useToggleStar } from "@/hooks/use-item-state";
 import { ItemDetail } from "@/components/item-detail";
@@ -369,7 +370,7 @@ export function ItemRow({
       >
         {/* タイトルリンク */}
         <a
-          href={item.link}
+          href={safeFeedUrl(item.link)}
           target="_blank"
           rel="noopener noreferrer"
           onClick={(e) => e.stopPropagation()}
