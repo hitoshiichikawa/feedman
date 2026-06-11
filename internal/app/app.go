@@ -132,7 +132,10 @@ func runServe(cfg *config.Config) error {
 	faviconFetcher := feed.NewFaviconFetcher(ssrfGuard)
 	feedService := feed.NewFeedService(feedRepo, subRepo, feedDetector, faviconFetcher)
 
-	itemService := item.NewItemService(itemRepo, itemStateRepo)
+	// itemService / itemStateService は subRepo を SubscriptionChecker として注入し、
+	// 記事詳細取得・状態更新時に購読外フィードへの越境アクセスを拒否する（#175）。
+	itemService := item.NewItemService(itemRepo, itemStateRepo, subRepo)
+	itemStateService := item.NewItemStateService(itemRepo, itemStateRepo, subRepo)
 
 	// 横断新着一覧サービス（Issue #121）。itemRepo の ListNewAcrossFeeds と
 	// userCrossFeedViewRepo の Get / Upsert を利用する。
@@ -175,7 +178,7 @@ func runServe(cfg *config.Config) error {
 	subServiceAdapter := handler.NewSubscriptionServiceAdapter(subService)
 	userServiceAdapter := handler.NewUserServiceAdapter(userService)
 	itemServiceAdapter := handler.NewItemServiceAdapter(itemService)
-	itemStateServiceAdapter := handler.NewItemStateServiceAdapter(itemStateRepo)
+	itemStateServiceAdapter := handler.NewItemStateServiceAdapter(itemStateService)
 	itemSearchServiceAdapter := handler.NewItemSearchServiceAdapter(itemSearchService)
 	crossFeedServiceAdapter := handler.NewCrossFeedServiceAdapter(crossFeedService)
 

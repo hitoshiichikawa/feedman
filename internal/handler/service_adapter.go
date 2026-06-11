@@ -210,19 +210,20 @@ func (a *ItemServiceAdapterFromDomain) GetItem(ctx context.Context, userID, item
 	}, nil
 }
 
-// ItemStateServiceAdapterFromRepo は repository.ItemStateRepository を ItemStateServiceInterface に適合させるアダプタ。
-type ItemStateServiceAdapterFromRepo struct {
-	repo repository.ItemStateRepository
+// ItemStateServiceAdapterFromDomain は item.ItemStateService を ItemStateServiceInterface に適合させるアダプタ。
+type ItemStateServiceAdapterFromDomain struct {
+	svc *item.ItemStateService
 }
 
-// NewItemStateServiceAdapter は repository.ItemStateRepository から ItemStateServiceInterface を生成する。
-func NewItemStateServiceAdapter(repo repository.ItemStateRepository) ItemStateServiceInterface {
-	return &ItemStateServiceAdapterFromRepo{repo: repo}
+// NewItemStateServiceAdapter は item.ItemStateService から ItemStateServiceInterface を生成する。
+// 状態更新の認可（購読チェック）はサービス層（item.ItemStateService.UpdateState）が担う。
+func NewItemStateServiceAdapter(svc *item.ItemStateService) ItemStateServiceInterface {
+	return &ItemStateServiceAdapterFromDomain{svc: svc}
 }
 
 // UpdateState は記事の既読・スター状態を冪等に更新する。
-func (a *ItemStateServiceAdapterFromRepo) UpdateState(ctx context.Context, userID, itemID string, isRead *bool, isStarred *bool) (*model.ItemState, error) {
-	return a.repo.Upsert(ctx, userID, itemID, isRead, isStarred)
+func (a *ItemStateServiceAdapterFromDomain) UpdateState(ctx context.Context, userID, itemID string, isRead *bool, isStarred *bool) (*model.ItemState, error) {
+	return a.svc.UpdateState(ctx, userID, itemID, isRead, isStarred)
 }
 
 // SubscriptionDeleterAdapter はリポジトリ層を SubscriptionDeleter に適合させるアダプタ。
@@ -385,7 +386,7 @@ func (a *CrossFeedServiceAdapter) TouchLastSeen(ctx context.Context, userID stri
 var _ SubscriptionServiceInterface = (*SubscriptionServiceAdapter)(nil)
 var _ UserServiceInterface = (*UserServiceAdapter)(nil)
 var _ ItemServiceInterface = (*ItemServiceAdapterFromDomain)(nil)
-var _ ItemStateServiceInterface = (*ItemStateServiceAdapterFromRepo)(nil)
+var _ ItemStateServiceInterface = (*ItemStateServiceAdapterFromDomain)(nil)
 var _ ItemSearchServiceInterface = (*ItemSearchServiceAdapter)(nil)
 var _ SubscriptionDeleter = (*SubscriptionDeleterAdapter)(nil)
 var _ CrossFeedServiceInterface = (*CrossFeedServiceAdapter)(nil)
