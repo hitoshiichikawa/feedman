@@ -78,6 +78,10 @@ func createIntegrationRouter(state *integrationState) http.Handler {
 				}
 				return session, nil
 			},
+			handleNativeCallbackFn: func(ctx context.Context, code, pkceChallenge string) (string, error) {
+				// native flow（#165）はセッションを作成せず auth_code のみを返す。
+				return "integration-native-auth-code", nil
+			},
 			logoutFn: func(ctx context.Context, sessionID string) error {
 				delete(state.sessions, sessionID)
 				return nil
@@ -346,6 +350,67 @@ func createIntegrationRouter(state *integrationState) http.Handler {
 }
 
 // --- エンドツーエンド統合テスト ---
+
+// TestIntegration_NativeAuthFlow_LoginCallbackReturnsAuthCode は flow=native の OAuth フローを
+// 実 router で通しで検証する（#165）。
+// login(native) → state / challenge cookie 発行 → callback → アプリスキームへ auth_code 付き
+// 303 リダイレクト + セッション Cookie 不在。
+func TestIntegration_NativeAuthFlow_LoginCallbackReturnsAuthCode(t *testing.T) {
+	state := newIntegrationState()
+	router := createIntegrationRouter(state)
+
+	// 1. native ログイン: OAuth リダイレクトと両 Cookie が発行されること
+	loginURL := "/auth/google/login?flow=native&code_challenge=" + nativeTestChallenge + "&code_challenge_method=S256"
+	req := httptest.NewRequest(http.MethodGet, loginURL, nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("step1: GET %s status = %d, want %d", loginURL, resp.StatusCode, http.StatusTemporaryRedirect)
+	}
+
+	var oauthStateC, nativeChallengeC *http.Cookie
+	for _, c := range resp.Cookies() {
+		switch c.Name {
+		case "oauth_state":
+			oauthStateC = c
+		case "oauth_native_challenge":
+			nativeChallengeC = c
+		}
+	}
+	if oauthStateC == nil {
+		t.Fatal("step1: expected oauth_state cookie")
+	}
+	if nativeChallengeC == nil {
+		t.Fatal("step1: expected oauth_native_challenge cookie")
+	}
+
+	// 2. コールバック: アプリスキームへ auth_code 付きでリダイレクトされること
+	callbackURL := "/auth/google/callback?code=test-auth-code&state=" + oauthStateC.Value
+	req = httptest.NewRequest(http.MethodGet, callbackURL, nil)
+	req.AddCookie(oauthStateC)
+	req.AddCookie(nativeChallengeC)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	resp = w.Result()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("step2: native callback status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
+	}
+	location := resp.Header.Get("Location")
+	want := "feedman://auth/callback?auth_code=integration-native-auth-code"
+	if location != want {
+		t.Fatalf("step2: Location = %q, want %q", location, want)
+	}
+
+	// セッション Cookie が発行されないこと（Req 2.3）
+	for _, c := range resp.Cookies() {
+		if c.Name == "session_id" {
+			t.Fatal("step2: session_id cookie must not be issued for native flow")
+		}
+	}
+}
 
 // TestIntegration_AuthFlow_LoginCallbackMeLogout はOAuth認証フロー全体を検証する。
 // ログイン → コールバック → セッション発行 → /auth/me で認証確認 → ログアウト → セッション破棄
