@@ -42,6 +42,10 @@ web/coverage/
 # Docker volumes
 pgdata/
 
+# DB バックアップ（docs/operations/backup-restore.md の手順で作成される DB ダンプ。
+# ユーザーの個人情報を含むため絶対にコミットしない）
+backups/
+
 # Temporary
 *.tmp
 *.log
