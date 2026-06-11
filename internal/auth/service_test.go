@@ -115,7 +115,7 @@ func TestGetLoginURL_ReturnsOAuthURL(t *testing.T) {
 			return "https://accounts.google.com/o/oauth2/auth?state=" + state
 		},
 	}
-	svc := NewService(provider, nil, nil, nil, ServiceConfig{SessionMaxAge: 86400})
+	svc := NewService(provider, nil, nil, nil, nil, ServiceConfig{SessionMaxAge: 86400})
 
 	url := svc.GetLoginURL("test-state")
 
@@ -168,7 +168,7 @@ func TestHandleCallback_NewUser_CreatesUserAndIdentityAndSession(t *testing.T) {
 		},
 	}
 
-	svc := NewService(provider, userRepo, identityRepo, sessionRepo, ServiceConfig{SessionMaxAge: 86400})
+	svc := NewService(provider, userRepo, identityRepo, sessionRepo, nil, ServiceConfig{SessionMaxAge: 86400})
 
 	session, err := svc.HandleCallback(ctx, "auth-code-123")
 	if err != nil {
@@ -266,7 +266,7 @@ func TestHandleCallback_ExistingUser_LogsInAndCreatesSession(t *testing.T) {
 		},
 	}
 
-	svc := NewService(provider, userRepo, identityRepo, sessionRepo, ServiceConfig{SessionMaxAge: 86400})
+	svc := NewService(provider, userRepo, identityRepo, sessionRepo, nil, ServiceConfig{SessionMaxAge: 86400})
 
 	session, err := svc.HandleCallback(ctx, "auth-code-existing")
 	if err != nil {
@@ -327,7 +327,7 @@ func TestHandleCallback_IssuesDistinctSessionIDPerLogin(t *testing.T) {
 		},
 	}
 
-	svc := NewService(provider, &mockUserRepo{}, identityRepo, sessionRepo, ServiceConfig{SessionMaxAge: 86400})
+	svc := NewService(provider, &mockUserRepo{}, identityRepo, sessionRepo, nil, ServiceConfig{SessionMaxAge: 86400})
 
 	// Act: 2 回ログインする
 	first, err := svc.HandleCallback(ctx, "auth-code-1")
@@ -357,7 +357,7 @@ func TestHandleCallback_OAuthError_ReturnsError(t *testing.T) {
 		},
 	}
 
-	svc := NewService(provider, nil, nil, nil, ServiceConfig{SessionMaxAge: 86400})
+	svc := NewService(provider, nil, nil, nil, nil, ServiceConfig{SessionMaxAge: 86400})
 
 	_, err := svc.HandleCallback(ctx, "bad-code")
 	if err == nil {
@@ -391,7 +391,7 @@ func TestHandleCallback_UserCreationError_ReturnsError(t *testing.T) {
 		},
 	}
 
-	svc := NewService(provider, userRepo, identityRepo, nil, ServiceConfig{SessionMaxAge: 86400})
+	svc := NewService(provider, userRepo, identityRepo, nil, nil, ServiceConfig{SessionMaxAge: 86400})
 
 	_, err := svc.HandleCallback(ctx, "auth-code-err")
 	if err == nil {
@@ -411,7 +411,7 @@ func TestLogout_DeletesSession(t *testing.T) {
 		},
 	}
 
-	svc := NewService(nil, nil, nil, sessionRepo, ServiceConfig{SessionMaxAge: 86400})
+	svc := NewService(nil, nil, nil, sessionRepo, nil, ServiceConfig{SessionMaxAge: 86400})
 
 	err := svc.Logout(ctx, "session-to-delete")
 	if err != nil {
@@ -426,7 +426,7 @@ func TestLogout_DeletesSession(t *testing.T) {
 func TestLogout_EmptySessionID_ReturnsError(t *testing.T) {
 	ctx := context.Background()
 
-	svc := NewService(nil, nil, nil, nil, ServiceConfig{SessionMaxAge: 86400})
+	svc := NewService(nil, nil, nil, nil, nil, ServiceConfig{SessionMaxAge: 86400})
 
 	err := svc.Logout(ctx, "")
 	if err == nil {
@@ -520,7 +520,7 @@ func TestGetCurrentUser_ValidSession_ReturnsUser(t *testing.T) {
 		},
 	}
 
-	svc := NewService(nil, userRepo, nil, sessionRepo, ServiceConfig{SessionMaxAge: 86400})
+	svc := NewService(nil, userRepo, nil, sessionRepo, nil, ServiceConfig{SessionMaxAge: 86400})
 
 	user, err := svc.GetCurrentUser(ctx, "session-valid")
 	if err != nil {
@@ -545,7 +545,7 @@ func TestGetCurrentUser_ExpiredSession_ReturnsError(t *testing.T) {
 		},
 	}
 
-	svc := NewService(nil, nil, nil, sessionRepo, ServiceConfig{SessionMaxAge: 86400})
+	svc := NewService(nil, nil, nil, sessionRepo, nil, ServiceConfig{SessionMaxAge: 86400})
 
 	_, err := svc.GetCurrentUser(ctx, "expired-session")
 	if err == nil {
@@ -556,7 +556,7 @@ func TestGetCurrentUser_ExpiredSession_ReturnsError(t *testing.T) {
 func TestGetCurrentUser_EmptySessionID_ReturnsError(t *testing.T) {
 	ctx := context.Background()
 
-	svc := NewService(nil, nil, nil, nil, ServiceConfig{SessionMaxAge: 86400})
+	svc := NewService(nil, nil, nil, nil, nil, ServiceConfig{SessionMaxAge: 86400})
 
 	_, err := svc.GetCurrentUser(ctx, "")
 	if err == nil {
