@@ -24,7 +24,7 @@
   - _Requirements: 2.2, 2.4, 2.5, 3.4, NFR 1.1, NFR 3.1_
   - _Depends: 1_
 
-- [ ] 3. AuthHandler.Login の flow=native 分岐を追加
+- [x] 3. AuthHandler.Login の flow=native 分岐を追加
   - `internal/handler/auth_handler.go` に `oauthNativeChallengeCookie` /
     `nativeAuthCallbackURL` 定数を追加
   - `Login`: `flow=native` のとき `ValidatePKCES256` で検証し、不合格なら 400
@@ -37,7 +37,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, NFR 1.3, NFR 2.1_
   - _Depends: 1_
 
-- [ ] 4. AuthHandler.Callback の native 分岐を追加
+- [x] 4. AuthHandler.Callback の native 分岐を追加
   - `AuthServiceInterface` に `HandleNativeCallback(ctx, code, pkceChallenge string) (string, error)`
     を追加し、handler テスト用モックを追従
   - `Callback`: state 検証（既存・位置不変）通過後に native cookie を読み、present なら
