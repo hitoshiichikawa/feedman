@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. auth: 再利用検知の昇格と RevokeRefreshToken
+- [x] 1. auth: 再利用検知の昇格と RevokeRefreshToken
   - `internal/auth/token_service.go`: `RefreshTokenStore` interface に `RevokeFamily` を追加
     （compile-time check で `repository.RefreshTokenRepository` 充足を確認）
   - `RotateRefreshToken` の拒否分岐 2 箇所（手順 3 の RotatedAt 検出 / 手順 4 の
