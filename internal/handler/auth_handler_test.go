@@ -14,10 +14,11 @@ import (
 // --- モック定義 ---
 
 type mockAuthService struct {
-	getLoginURLFn    func(state string) string
-	handleCallbackFn func(ctx context.Context, code string) (*model.Session, error)
-	logoutFn         func(ctx context.Context, sessionID string) error
-	getCurrentUserFn func(ctx context.Context, sessionID string) (*model.User, error)
+	getLoginURLFn          func(state string) string
+	handleCallbackFn       func(ctx context.Context, code string) (*model.Session, error)
+	handleNativeCallbackFn func(ctx context.Context, code, pkceChallenge string) (string, error)
+	logoutFn               func(ctx context.Context, sessionID string) error
+	getCurrentUserFn       func(ctx context.Context, sessionID string) (*model.User, error)
 }
 
 func (m *mockAuthService) GetLoginURL(state string) string {
@@ -32,6 +33,13 @@ func (m *mockAuthService) HandleCallback(ctx context.Context, code string) (*mod
 		return m.handleCallbackFn(ctx, code)
 	}
 	return nil, nil
+}
+
+func (m *mockAuthService) HandleNativeCallback(ctx context.Context, code, pkceChallenge string) (string, error) {
+	if m.handleNativeCallbackFn != nil {
+		return m.handleNativeCallbackFn(ctx, code, pkceChallenge)
+	}
+	return "", nil
 }
 
 func (m *mockAuthService) Logout(ctx context.Context, sessionID string) error {
@@ -524,4 +532,301 @@ func containsStr(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// --- flow=native（#165）のテスト ---
+
+// nativeTestChallenge は S256 challenge 形式（base64url no-pad 43 文字）の有効なテスト値。
+const nativeTestChallenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+
+// newNativeTestHandler は native テスト用の AuthHandler を生成する。
+func newNativeTestHandler(svc *mockAuthService) *AuthHandler {
+	return NewAuthHandler(svc, AuthHandlerConfig{
+		BaseURL:       "http://localhost:3000",
+		CookieDomain:  "",
+		CookieSecure:  false,
+		SessionMaxAge: 86400,
+	})
+}
+
+// findCookie は response の Set-Cookie から名前一致の Cookie を返す。
+func findCookie(resp *http.Response, name string) *http.Cookie {
+	for _, c := range resp.Cookies() {
+		if c.Name == name {
+			return c
+		}
+	}
+	return nil
+}
+
+// TestAuthHandler_Login_Native_SetsChallengeCookieAndRedirects は flow=native + 有効な PKCE で
+// state / native challenge 両 Cookie が設定され OAuth リダイレクトすることを検証する（Req 1.1）。
+func TestAuthHandler_Login_Native_SetsChallengeCookieAndRedirects(t *testing.T) {
+	// Arrange
+	svc := &mockAuthService{
+		getLoginURLFn: func(state string) string {
+			return "https://accounts.google.com/o/oauth2/auth?state=" + state
+		},
+	}
+	h := newNativeTestHandler(svc)
+	req := httptest.NewRequest(http.MethodGet,
+		"/auth/google/login?flow=native&code_challenge="+nativeTestChallenge+"&code_challenge_method=S256", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Login(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	}
+	if !containsStr(resp.Header.Get("Location"), "accounts.google.com") {
+		t.Errorf("Location = %q, should contain google oauth URL", resp.Header.Get("Location"))
+	}
+	stateCookie := findCookie(resp, "oauth_state")
+	if stateCookie == nil || stateCookie.Value == "" {
+		t.Error("oauth_state cookie should be set")
+	}
+	nativeCookie := findCookie(resp, "oauth_native_challenge")
+	if nativeCookie == nil {
+		t.Fatal("oauth_native_challenge cookie should be set")
+	}
+	if nativeCookie.Value != nativeTestChallenge {
+		t.Errorf("native cookie value = %q, want %q", nativeCookie.Value, nativeTestChallenge)
+	}
+	if !nativeCookie.HttpOnly {
+		t.Error("native cookie should be HttpOnly")
+	}
+}
+
+// TestAuthHandler_Login_Native_InvalidPKCE_Rejects は PKCE 欠落・不正時に 400 を返し
+// Cookie 設定もリダイレクトも行わないことを検証する（Req 1.2, 1.3, 1.4 / NFR 1.2）。
+func TestAuthHandler_Login_Native_InvalidPKCE_Rejects(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{name: "challenge 欠落のとき 400", query: "flow=native&code_challenge_method=S256"},
+		{name: "method 欠落のとき 400", query: "flow=native&code_challenge=" + nativeTestChallenge},
+		{name: "method=plain のとき 400", query: "flow=native&code_challenge=" + nativeTestChallenge + "&code_challenge_method=plain"},
+		{name: "challenge 形式不正のとき 400", query: "flow=native&code_challenge=short&code_challenge_method=S256"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			h := newNativeTestHandler(&mockAuthService{})
+			req := httptest.NewRequest(http.MethodGet, "/auth/google/login?"+tc.query, nil)
+			w := httptest.NewRecorder()
+
+			// Act
+			h.Login(w, req)
+
+			// Assert
+			resp := w.Result()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+			}
+			if len(resp.Cookies()) != 0 {
+				t.Errorf("no cookies should be set on rejection, got %d", len(resp.Cookies()))
+			}
+			if resp.Header.Get("Location") != "" {
+				t.Error("no redirect should happen on rejection")
+			}
+		})
+	}
+}
+
+// TestAuthHandler_Login_Web_ClearsStaleNativeCookie は flow=native なしの Web ログインで
+// 残存する native flow 文脈が破棄されることを検証する（Req 1.6）。
+func TestAuthHandler_Login_Web_ClearsStaleNativeCookie(t *testing.T) {
+	// Arrange: 過去の native flow 文脈（cookie）が残存している
+	svc := &mockAuthService{
+		getLoginURLFn: func(state string) string { return "https://accounts.google.com/o/oauth2/auth" },
+	}
+	h := newNativeTestHandler(svc)
+	req := httptest.NewRequest(http.MethodGet, "/auth/google/login", nil)
+	req.AddCookie(&http.Cookie{Name: "oauth_native_challenge", Value: nativeTestChallenge})
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Login(w, req)
+
+	// Assert: 削除 Set-Cookie（MaxAge < 0）が発行される
+	resp := w.Result()
+	nativeCookie := findCookie(resp, "oauth_native_challenge")
+	if nativeCookie == nil {
+		t.Fatal("expected deletion Set-Cookie for oauth_native_challenge")
+	}
+	if nativeCookie.MaxAge >= 0 {
+		t.Errorf("native cookie MaxAge = %d, want negative (deletion)", nativeCookie.MaxAge)
+	}
+}
+
+// TestAuthHandler_Login_Web_NoNativeCookie_HeadersUnchanged は残存 native 文脈が無い
+// Web ログインで native cookie の Set-Cookie が発行されない（応答不変）ことを検証する（NFR 2.1）。
+func TestAuthHandler_Login_Web_NoNativeCookie_HeadersUnchanged(t *testing.T) {
+	// Arrange
+	svc := &mockAuthService{
+		getLoginURLFn: func(state string) string { return "https://accounts.google.com/o/oauth2/auth" },
+	}
+	h := newNativeTestHandler(svc)
+	req := httptest.NewRequest(http.MethodGet, "/auth/google/login", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Login(w, req)
+
+	// Assert: oauth_state のみが設定され、native cookie のヘッダは存在しない
+	resp := w.Result()
+	if findCookie(resp, "oauth_native_challenge") != nil {
+		t.Error("oauth_native_challenge Set-Cookie must not be sent for plain web login")
+	}
+	if findCookie(resp, "oauth_state") == nil {
+		t.Error("oauth_state cookie should still be set")
+	}
+}
+
+// TestAuthHandler_Callback_Native_RedirectsToAppSchemeWithoutSession は native callback 成功時に
+// アプリスキームへ auth_code 付きで 303 し、セッション Cookie を発行しないことを検証する
+// （Req 2.1, 2.3, 3.3）。
+func TestAuthHandler_Callback_Native_RedirectsToAppSchemeWithoutSession(t *testing.T) {
+	// Arrange
+	handleCallbackCalled := false
+	svc := &mockAuthService{
+		handleCallbackFn: func(ctx context.Context, code string) (*model.Session, error) {
+			handleCallbackCalled = true
+			return &model.Session{ID: "should-not-be-issued"}, nil
+		},
+		handleNativeCallbackFn: func(ctx context.Context, code, pkceChallenge string) (string, error) {
+			if code != "test-code" {
+				t.Errorf("code = %q, want %q", code, "test-code")
+			}
+			if pkceChallenge != nativeTestChallenge {
+				t.Errorf("pkceChallenge = %q, want %q", pkceChallenge, nativeTestChallenge)
+			}
+			return "plain-auth-code-123", nil
+		},
+	}
+	h := newNativeTestHandler(svc)
+	req := httptest.NewRequest(http.MethodGet, "/auth/google/callback?code=test-code&state=test-state", nil)
+	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "test-state"})
+	req.AddCookie(&http.Cookie{Name: "oauth_native_challenge", Value: nativeTestChallenge})
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Callback(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
+	}
+	location := resp.Header.Get("Location")
+	wantPrefix := "feedman://auth/callback?auth_code="
+	if !containsStr(location, wantPrefix) {
+		t.Errorf("Location = %q, want prefix %q", location, wantPrefix)
+	}
+	if !containsStr(location, "plain-auth-code-123") {
+		t.Errorf("Location = %q, should contain issued auth code", location)
+	}
+	if findCookie(resp, "session_id") != nil {
+		t.Error("session_id cookie must not be set for native flow")
+	}
+	nativeCookie := findCookie(resp, "oauth_native_challenge")
+	if nativeCookie == nil || nativeCookie.MaxAge >= 0 {
+		t.Error("oauth_native_challenge cookie should be deleted after native callback")
+	}
+	if handleCallbackCalled {
+		t.Error("web HandleCallback must not be called for native flow")
+	}
+}
+
+// TestAuthHandler_Callback_Native_ServiceError_Returns500 は native callback の処理失敗時に
+// 500 を返し auth_code リダイレクトを行わないことを検証する（Req 3.4）。
+func TestAuthHandler_Callback_Native_ServiceError_Returns500(t *testing.T) {
+	// Arrange
+	svc := &mockAuthService{
+		handleNativeCallbackFn: func(ctx context.Context, code, pkceChallenge string) (string, error) {
+			return "", context.DeadlineExceeded
+		},
+	}
+	h := newNativeTestHandler(svc)
+	req := httptest.NewRequest(http.MethodGet, "/auth/google/callback?code=test-code&state=test-state", nil)
+	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "test-state"})
+	req.AddCookie(&http.Cookie{Name: "oauth_native_challenge", Value: nativeTestChallenge})
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Callback(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusInternalServerError)
+	}
+	if containsStr(resp.Header.Get("Location"), "feedman://") {
+		t.Error("must not redirect to app scheme on failure")
+	}
+}
+
+// TestAuthHandler_Callback_Native_InvalidState_RejectsWithoutIssuingCode は native 文脈があっても
+// state 検証失敗時は 400 で拒否し auth_code を発行しないことを検証する（Req 3.1）。
+func TestAuthHandler_Callback_Native_InvalidState_RejectsWithoutIssuingCode(t *testing.T) {
+	// Arrange
+	nativeCalled := false
+	svc := &mockAuthService{
+		handleNativeCallbackFn: func(ctx context.Context, code, pkceChallenge string) (string, error) {
+			nativeCalled = true
+			return "should-not-be-issued", nil
+		},
+	}
+	h := newNativeTestHandler(svc)
+	req := httptest.NewRequest(http.MethodGet, "/auth/google/callback?code=test-code&state=evil-state", nil)
+	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "expected-state"})
+	req.AddCookie(&http.Cookie{Name: "oauth_native_challenge", Value: nativeTestChallenge})
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Callback(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+	if nativeCalled {
+		t.Error("HandleNativeCallback must not be called when state validation fails")
+	}
+}
+
+// TestAuthHandler_Callback_Native_TamperedChallenge_Rejects は native cookie の challenge が
+// 改ざんされた（S256 形式でない）場合に 400 で拒否することを検証する（Req 1.4 defensive）。
+func TestAuthHandler_Callback_Native_TamperedChallenge_Rejects(t *testing.T) {
+	// Arrange
+	nativeCalled := false
+	svc := &mockAuthService{
+		handleNativeCallbackFn: func(ctx context.Context, code, pkceChallenge string) (string, error) {
+			nativeCalled = true
+			return "", nil
+		},
+	}
+	h := newNativeTestHandler(svc)
+	req := httptest.NewRequest(http.MethodGet, "/auth/google/callback?code=test-code&state=test-state", nil)
+	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "test-state"})
+	req.AddCookie(&http.Cookie{Name: "oauth_native_challenge", Value: "tampered"})
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Callback(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+	if nativeCalled {
+		t.Error("HandleNativeCallback must not be called with tampered challenge")
+	}
 }

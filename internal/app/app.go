@@ -107,6 +107,8 @@ func runServe(cfg *config.Config) error {
 	userRepo := repository.NewPostgresUserRepo(db)
 	identRepo := repository.NewPostgresIdentityRepo(db)
 	sessionRepo := repository.NewPostgresSessionRepo(db)
+	// native auth（#165）: flow=native callback の auth_code 保存に使用する。
+	authCodeRepo := repository.NewPostgresAuthCodeRepo(db)
 	feedRepo := repository.NewPostgresFeedRepo(db)
 	subRepo := repository.NewPostgresSubscriptionRepo(db)
 	itemRepo := repository.NewPostgresItemRepo(db)
@@ -124,7 +126,7 @@ func runServe(cfg *config.Config) error {
 		RedirectURL:  cfg.GoogleRedirectURL,
 	})
 	authService := auth.NewService(
-		oauthProvider, userRepo, identRepo, sessionRepo,
+		oauthProvider, userRepo, identRepo, sessionRepo, authCodeRepo,
 		auth.ServiceConfig{SessionMaxAge: cfg.SessionMaxAge},
 	)
 

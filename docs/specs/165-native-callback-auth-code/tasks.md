@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. PKCE S256 検証ユーティリティを追加
+- [x] 1. PKCE S256 検証ユーティリティを追加
   - `internal/auth/pkce.go` を新規作成し、`ValidatePKCES256(challenge, method string) error`
     を実装（method は "S256" 厳密一致、challenge は `^[A-Za-z0-9_-]{43}$` の事前 compile
     regex。純粋関数・I/O なし）
@@ -9,7 +9,7 @@
     不正文字）を実装
   - _Requirements: 1.2, 1.3, 1.4, NFR 1.2_
 
-- [ ] 2. auth.Service に HandleNativeCallback を追加
+- [x] 2. auth.Service に HandleNativeCallback を追加
   - `internal/auth/service.go` の `HandleCallback` から OAuth 交換〜ユーザー解決（手順 1〜3）を
     `resolveUserFromOAuth(ctx, code) (string, error)` に抽出（挙動・ログ出力は不変）
   - `internal/auth/native.go` を新規作成: `AuthCodeCreator` 最小 interface /
@@ -24,7 +24,7 @@
   - _Requirements: 2.2, 2.4, 2.5, 3.4, NFR 1.1, NFR 3.1_
   - _Depends: 1_
 
-- [ ] 3. AuthHandler.Login の flow=native 分岐を追加
+- [x] 3. AuthHandler.Login の flow=native 分岐を追加
   - `internal/handler/auth_handler.go` に `oauthNativeChallengeCookie` /
     `nativeAuthCallbackURL` 定数を追加
   - `Login`: `flow=native` のとき `ValidatePKCES256` で検証し、不合格なら 400
@@ -37,7 +37,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, NFR 1.3, NFR 2.1_
   - _Depends: 1_
 
-- [ ] 4. AuthHandler.Callback の native 分岐を追加
+- [x] 4. AuthHandler.Callback の native 分岐を追加
   - `AuthServiceInterface` に `HandleNativeCallback(ctx, code, pkceChallenge string) (string, error)`
     を追加し、handler テスト用モックを追従
   - `Callback`: state 検証（既存・位置不変）通過後に native cookie を読み、present なら
@@ -51,7 +51,7 @@
   - _Requirements: 2.1, 2.3, 3.1, 3.2, 3.3, 3.4, 4.1, NFR 1.3_
   - _Depends: 2, 3_
 
-- [ ] 5. Wiring と統合テスト
+- [x] 5. Wiring と統合テスト
   - `internal/app/app.go`: `repository.NewPostgresAuthCodeRepo(db)` を生成し
     `auth.NewService` へ注入
   - `internal/handler/integration_test.go` に native flow の通しケース（login(native) →

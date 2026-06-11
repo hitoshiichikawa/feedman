@@ -39,27 +39,31 @@ type ServiceConfig struct {
 
 // Service は認証に関するビジネスロジックを提供する。
 type Service struct {
-	oauth       OAuthProvider
-	userRepo    repository.UserRepository
-	identRepo   repository.IdentityRepository
-	sessionRepo repository.SessionRepository
-	config      ServiceConfig
+	oauth        OAuthProvider
+	userRepo     repository.UserRepository
+	identRepo    repository.IdentityRepository
+	sessionRepo  repository.SessionRepository
+	authCodeRepo AuthCodeCreator
+	config       ServiceConfig
 }
 
 // NewService はServiceを生成する。
+// authCodeRepo は native flow（HandleNativeCallback）の auth_code 保存にのみ使用する。
 func NewService(
 	oauth OAuthProvider,
 	userRepo repository.UserRepository,
 	identRepo repository.IdentityRepository,
 	sessionRepo repository.SessionRepository,
+	authCodeRepo AuthCodeCreator,
 	config ServiceConfig,
 ) *Service {
 	return &Service{
-		oauth:       oauth,
-		userRepo:    userRepo,
-		identRepo:   identRepo,
-		sessionRepo: sessionRepo,
-		config:      config,
+		oauth:        oauth,
+		userRepo:     userRepo,
+		identRepo:    identRepo,
+		sessionRepo:  sessionRepo,
+		authCodeRepo: authCodeRepo,
+		config:       config,
 	}
 }
 
@@ -72,61 +76,10 @@ func (s *Service) GetLoginURL(state string) string {
 // 未登録ユーザーの場合はusersレコードとidentitiesレコードを同時に自動作成する。
 // 登録済みユーザーの場合はidentitiesテーブルで既存ユーザーを特定しログインする。
 func (s *Service) HandleCallback(ctx context.Context, code string) (*model.Session, error) {
-	// 1. 認可コードをトークンに交換し、ユーザー情報を取得
-	userInfo, err := s.oauth.ExchangeCode(ctx, code)
+	// 1〜3. 認可コード交換とユーザー解決（native flow と共通）
+	userID, err := s.resolveUserFromOAuth(ctx, code)
 	if err != nil {
-		return nil, fmt.Errorf("failed to exchange oauth code: %w", err)
-	}
-
-	// 2. identitiesテーブルで既存ユーザーを検索
-	identity, err := s.identRepo.FindByProviderAndProviderUserID(ctx, userInfo.Provider, userInfo.ProviderUserID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find identity: %w", err)
-	}
-
-	var userID string
-
-	if identity != nil {
-		// 3a. 既存ユーザー: identityからユーザーIDを取得
-		userID = identity.UserID
-		slog.Info("existing user logged in",
-			slog.String("user_id", userID),
-			slog.String("provider", userInfo.Provider),
-		)
-	} else {
-		// 3b. 新規ユーザー: usersレコードとidentitiesレコードを同時に作成
-		newUserID := uuid.New().String()
-		newIdentityID := uuid.New().String()
-		now := time.Now()
-
-		newUser := &model.User{
-			ID:        newUserID,
-			Email:     userInfo.Email,
-			Name:      userInfo.Name,
-			CreatedAt: now,
-			UpdatedAt: now,
-		}
-
-		newIdentity := &model.Identity{
-			ID:             newIdentityID,
-			UserID:         newUserID,
-			Provider:       userInfo.Provider,
-			ProviderUserID: userInfo.ProviderUserID,
-			CreatedAt:      now,
-		}
-
-		if err := s.userRepo.CreateWithIdentity(ctx, newUser, newIdentity); err != nil {
-			return nil, fmt.Errorf("failed to create user and identity: %w", err)
-		}
-
-		userID = newUserID
-		// PII（メールアドレス平文）をログに残さないため、email はマスク値で出力する。
-		// 後方互換のため user_id / provider のキー名・出力有無は変更しない。
-		slog.Info("new user created",
-			slog.String("user_id", userID),
-			slog.String("email", maskEmail(userInfo.Email)),
-			slog.String("provider", userInfo.Provider),
-		)
+		return nil, err
 	}
 
 	// 4. セッションを発行
@@ -136,6 +89,67 @@ func (s *Service) HandleCallback(ctx context.Context, code string) (*model.Sessi
 	}
 
 	return session, nil
+}
+
+// resolveUserFromOAuth は OAuth 認可コードを交換し、ユーザーIDを解決する。
+// 未登録ユーザーの場合は users / identities レコードを同時に自動作成し、
+// 登録済みユーザーの場合は identities テーブルで既存ユーザーを特定する。
+// Web flow（HandleCallback）と native flow（HandleNativeCallback）で共通利用する。
+func (s *Service) resolveUserFromOAuth(ctx context.Context, code string) (string, error) {
+	// 1. 認可コードをトークンに交換し、ユーザー情報を取得
+	userInfo, err := s.oauth.ExchangeCode(ctx, code)
+	if err != nil {
+		return "", fmt.Errorf("failed to exchange oauth code: %w", err)
+	}
+
+	// 2. identitiesテーブルで既存ユーザーを検索
+	identity, err := s.identRepo.FindByProviderAndProviderUserID(ctx, userInfo.Provider, userInfo.ProviderUserID)
+	if err != nil {
+		return "", fmt.Errorf("failed to find identity: %w", err)
+	}
+
+	if identity != nil {
+		// 3a. 既存ユーザー: identityからユーザーIDを取得
+		slog.Info("existing user logged in",
+			slog.String("user_id", identity.UserID),
+			slog.String("provider", userInfo.Provider),
+		)
+		return identity.UserID, nil
+	}
+
+	// 3b. 新規ユーザー: usersレコードとidentitiesレコードを同時に作成
+	newUserID := uuid.New().String()
+	newIdentityID := uuid.New().String()
+	now := time.Now()
+
+	newUser := &model.User{
+		ID:        newUserID,
+		Email:     userInfo.Email,
+		Name:      userInfo.Name,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	newIdentity := &model.Identity{
+		ID:             newIdentityID,
+		UserID:         newUserID,
+		Provider:       userInfo.Provider,
+		ProviderUserID: userInfo.ProviderUserID,
+		CreatedAt:      now,
+	}
+
+	if err := s.userRepo.CreateWithIdentity(ctx, newUser, newIdentity); err != nil {
+		return "", fmt.Errorf("failed to create user and identity: %w", err)
+	}
+
+	// PII（メールアドレス平文）をログに残さないため、email はマスク値で出力する。
+	// 後方互換のため user_id / provider のキー名・出力有無は変更しない。
+	slog.Info("new user created",
+		slog.String("user_id", newUserID),
+		slog.String("email", maskEmail(userInfo.Email)),
+		slog.String("provider", userInfo.Provider),
+	)
+	return newUserID, nil
 }
 
 // Logout はセッションを破棄する。
