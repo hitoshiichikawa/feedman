@@ -52,13 +52,15 @@ type AuthCodeConsumer interface {
 	MarkUsed(ctx context.Context, id string) error
 }
 
-// RefreshTokenStore は TokenService が refresh token の新規発行 / rotation 操作に
-// 必要とする最小 IF。repository.RefreshTokenRepository が構造的に充足する
-// （interface segregation）。
+// RefreshTokenStore は TokenService が refresh token の新規発行 / rotation /
+// family 失効操作に必要とする最小 IF。repository.RefreshTokenRepository が構造的に
+// 充足する（interface segregation）。
 //
-// FindByHash / MarkRotated は Issue #167 の rotation で追加された。token 交換
-// （ExchangeAuthCode）では CreateFamily / CreateToken のみが使用され、refresh
-// （RotateRefreshToken）では FindByHash / MarkRotated / CreateToken が使用される。
+// FindByHash / MarkRotated は Issue #167 の rotation で、RevokeFamily は Issue #168 の
+// 再利用検知昇格 / revoke で追加された。token 交換（ExchangeAuthCode）では
+// CreateFamily / CreateToken のみが使用され、refresh（RotateRefreshToken）では
+// FindByHash / MarkRotated / CreateToken / RevokeFamily が、revoke
+// （RevokeRefreshToken）では FindByHash / RevokeFamily が使用される。
 type RefreshTokenStore interface {
 	CreateFamily(ctx context.Context, family *model.RefreshTokenFamily) error
 	CreateToken(ctx context.Context, token *model.RefreshToken) error
@@ -68,6 +70,9 @@ type RefreshTokenStore interface {
 	// MarkRotated は当該 ID の refresh_token の rotated_at を set する。
 	// 既に rotated_at が set 済みの場合は repository.ErrRefreshTokenAlreadyRotated を返す。
 	MarkRotated(ctx context.Context, id string, rotatedAt time.Time) error
+	// RevokeFamily は当該 family と配下の全 token の revoked_at を一括 set する。
+	// 既に revoked の family に対しては冪等に成功する（#164 の二重 revoke 安全設計）。
+	RevokeFamily(ctx context.Context, familyID string, revokedAt time.Time) error
 }
 
 // AccessTokenIssuer は TokenService が access token (JWT) の発行に必要とする最小 IF。
@@ -204,9 +209,11 @@ func (s *TokenService) ExchangeAuthCode(ctx context.Context, authCode, codeVerif
 //  2. 状態検証（いずれかに該当なら ErrInvalidRefreshToken）
 //     - RevokedAt != nil（失効済み / Req 2.3）
 //     - ExpiresAt <= now（期限切れ / Req 2.2）
-//     - RotatedAt != nil（rotation 済み = 再利用 / Req 2.4）
+//     - RotatedAt != nil（rotation 済み = 再利用検知。Issue #168 Req 1.1: family 全体を
+//     失効させてから拒否する）
 //  3. MarkRotated(id, now) で rotation 確定（Req 1.2）
-//     - ErrRefreshTokenAlreadyRotated → ErrInvalidRefreshToken（並行 race の敗者 / Req 3.1）
+//     - ErrRefreshTokenAlreadyRotated → 並行 race の敗者 = 同時再利用検知（Req 3.1 /
+//     Issue #168 Req 1.2: family 全体を失効させてから拒否する）
 //     ※ UPDATE ... WHERE rotated_at IS NULL の atomic 判定により高々 1 件のみ成功
 //  4. 新 refresh token（crypto/rand 32 byte）を同一 FamilyID で hash 保存
 //     ExpiresAt = now + RefreshTokenTTL（スライディング 30 日 / Req 1.3, 1.4）
@@ -238,7 +245,9 @@ func (s *TokenService) RotateRefreshToken(ctx context.Context, refreshToken stri
 		return nil, ErrInvalidRefreshToken
 	}
 	if stored.RotatedAt != nil {
-		// 既に rotation 済み = 再利用（Req 2.4。#168 が family 失効へ昇格するまでは単純拒否）
+		// 既に rotation 済み = 再利用検知（#167 Req 2.4 / #168 Req 1.1）。
+		// 漏えいの兆候として family 全体を失効させてから同一の拒否を返す（strict 方針）。
+		s.revokeFamilyOnReuse(ctx, stored.FamilyID, tokenHash, now)
 		return nil, ErrInvalidRefreshToken
 	}
 
@@ -246,8 +255,11 @@ func (s *TokenService) RotateRefreshToken(ctx context.Context, refreshToken stri
 	// WHERE rotated_at IS NULL の判定により並行 rotation でも高々 1 件のみ成功する。
 	if err := s.refreshTokens.MarkRotated(ctx, stored.ID, now); err != nil {
 		if errors.Is(err, repository.ErrRefreshTokenAlreadyRotated) {
-			// race の敗者は ErrInvalidRefreshToken に正規化（Req 2.6 / 3.1）。
+			// race の敗者 = atomic な rotation 確定で先行された提示（#167 Req 3.1 /
+			// #168 Req 1.2）。手順 2 の事前判定をすり抜けた同時再利用なので、
+			// 同様に family 全体を失効させてから拒否する（検知漏れ防止）。
 			// Req 2.7: 新 token は永続化されない（手順 4 に進まない）。
+			s.revokeFamilyOnReuse(ctx, stored.FamilyID, tokenHash, now)
 			return nil, ErrInvalidRefreshToken
 		}
 		return nil, fmt.Errorf("refresh rotation: mark rotated: %w", err)
@@ -289,6 +301,66 @@ func (s *TokenService) RotateRefreshToken(ctx context.Context, refreshToken stri
 		RefreshToken: plainRefresh,
 		ExpiresIn:    int(AccessTokenTTL / time.Second),
 	}, nil
+}
+
+// revokeFamilyOnReuse は rotation 済み refresh token の再利用検知時に family 全体を
+// 失効させる（Issue #168 Req 1.1 / 1.2 / 1.3）。
+//
+// RevokeFamily の失敗時も呼び出し側の拒否（ErrInvalidRefreshToken）は維持される
+// （Req 1.5: 失効の永続化が失敗しても新 token は発行しない。エラーは slog.Error で
+// 記録するのみで、内部詳細をクライアントへ反射しない）。
+// 検知イベントは slog.Warn で記録する（hash は先頭 8 文字のみ / NFR 1.1）。
+func (s *TokenService) revokeFamilyOnReuse(ctx context.Context, familyID, tokenHash string, now time.Time) {
+	slog.Warn("refresh token reuse detected",
+		slog.String("family_id", familyID),
+		slog.String("refresh_token_hash", tokenHash[:8]),
+	)
+	if err := s.refreshTokens.RevokeFamily(ctx, familyID, now); err != nil {
+		// 安全側: 失効に失敗しても拒否は維持される（呼び出し側が
+		// ErrInvalidRefreshToken を返す）。ここでは記録のみ行う。
+		slog.Error("failed to revoke refresh token family on reuse detection",
+			slog.String("family_id", familyID),
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
+// RevokeRefreshToken は提示された refresh token の family 全体を失効する
+// （Issue #168 Req 2.1 / design.md「Revoke フロー」参照）。
+//
+// 手順:
+//  1. HashNativeSecret(refreshToken) → FindByHash
+//     - nil → 何もせず nil を返す（存在オラクルを作らない / Req 2.2）
+//  2. RevokeFamily(token.FamilyID, now)（#164 設計により二重 revoke 冪等）
+//
+// token の状態（期限切れ・rotation 済み・失効済み）に関わらず family を失効する
+// （クライアントが古い世代の token しか保持していなくてもログアウトを成立させる）。
+// infra エラー（FindByHash / RevokeFamily の失敗）のみ error を返す（handler は 500）。
+// 平文 refresh token はログ・エラーメッセージに残さない（NFR 1.1）。
+func (s *TokenService) RevokeRefreshToken(ctx context.Context, refreshToken string) error {
+	// 1. token_hash で対象 token を検索
+	tokenHash := HashNativeSecret(refreshToken)
+	stored, err := s.refreshTokens.FindByHash(ctx, tokenHash)
+	if err != nil {
+		return fmt.Errorf("refresh revoke: lookup refresh token: %w", err)
+	}
+	if stored == nil {
+		// 不明 token は何もせず成功扱い（冪等・存在オラクルなし / Req 2.2 / NFR 1.2）
+		return nil
+	}
+
+	// 2. family 全体を失効（二重 revoke は #164 設計により冪等 / Req 2.1）
+	if err := s.refreshTokens.RevokeFamily(ctx, stored.FamilyID, s.now()); err != nil {
+		return fmt.Errorf("refresh revoke: revoke family: %w", err)
+	}
+
+	// 機密値の追跡用に hash 先頭 8 文字のみログに残す（NFR 1.1）。
+	slog.Info("refresh token family revoked",
+		slog.String("user_id", stored.UserID),
+		slog.String("family_id", stored.FamilyID),
+		slog.String("refresh_token_hash", tokenHash[:8]),
+	)
+	return nil
 }
 
 // generateRefreshToken は crypto/rand から 256bit を取り出し、base64url（no-pad）
