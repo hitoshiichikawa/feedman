@@ -4,7 +4,6 @@ package subscription
 import (
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
@@ -133,11 +132,8 @@ func (s *Service) ListSubscriptions(ctx context.Context, userID string) ([]Subsc
 			CreatedAt:            row.CreatedAt,
 		}
 
-		// faviconデータがある場合はdata URLに変換
-		if len(row.FaviconData) > 0 && row.FaviconMime != "" {
-			dataURL := fmt.Sprintf("data:%s;base64,%s", row.FaviconMime, base64.StdEncoding.EncodeToString(row.FaviconData))
-			info.FaviconURL = &dataURL
-		}
+		// faviconデータがある場合はdata URLに変換（欠落時は nil）
+		info.FaviconURL = model.FaviconDataURL(row.FaviconData, row.FaviconMime)
 
 		// エラーメッセージがある場合
 		if row.ErrorMessage != "" {
@@ -455,10 +451,7 @@ func (s *Service) ManualFetch(ctx context.Context, userID, subscriptionID string
 				UnreadCount:          info.UnreadCount,
 				CreatedAt:            info.CreatedAt,
 			}
-			if len(info.FaviconData) > 0 && info.FaviconMime != "" {
-				dataURL := fmt.Sprintf("data:%s;base64,%s", info.FaviconMime, base64.StdEncoding.EncodeToString(info.FaviconData))
-				result.FaviconURL = &dataURL
-			}
+			result.FaviconURL = model.FaviconDataURL(info.FaviconData, info.FaviconMime)
 			if info.ErrorMessage != "" {
 				msg := info.ErrorMessage
 				result.ErrorMessage = &msg
