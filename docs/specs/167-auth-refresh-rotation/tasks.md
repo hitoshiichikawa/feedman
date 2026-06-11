@@ -25,7 +25,7 @@
   - _Requirements: 1.1, 1.5, 1.6, 2.5, 2.6, NFR 1.3, NFR 2.1, NFR 2.2_
   - _Depends: 1_
 
-- [ ] 3. 統合テスト: token 交換 → refresh → 旧 token 拒否
+- [x] 3. 統合テスト: token 交換 → refresh → 旧 token 拒否
   - `internal/handler/integration_test.go` に「token 交換で pair 取得 → refresh 成功で
     新 pair 取得 → 旧 refresh token による再 refresh が 401」の通しケースを追加
     （issue AC「old token after rotation」に対応）
