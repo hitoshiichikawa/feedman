@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. repository: ユーザー単位削除の追加（AuthCodeRepository 拡張 + DBTX 対応）
+- [x] 1. repository: ユーザー単位削除の追加（AuthCodeRepository 拡張 + DBTX 対応）
   - `internal/repository/interfaces.go`: `AuthCodeRepository` に
     `DeleteByUserID(ctx context.Context, userID string) error` を追加（doc comment は
     `RefreshTokenRepository.DeleteByUserID` と対になる文面。冪等・CASCADE 併存の旨を明記）
@@ -16,7 +16,7 @@
     サブテストが無変更で green であることを確認
   - _Requirements: 1.1, 1.2, 3.1, NFR 1.2, NFR 1.3_
 
-- [ ] 2. user: 退会トランザクションへの native auth 削除統合
+- [x] 2. user: 退会トランザクションへの native auth 削除統合
   - `internal/user/service.go`: `TxAuthCodeDeleter` / `TxRefreshTokenDeleter` を追加し、
     `NewServiceWithTx` の引数を 2 つ拡張。`withdrawTx` の sessions 削除直後（users 削除前）に
     nil ガード付きの削除 2 段（認可コード → refresh token）を挿入する。既存手順
@@ -28,7 +28,7 @@
   - _Requirements: 1.1, 1.2, 2.1, 2.2, 2.3_
   - _Depends: 1_
 
-- [ ] 3. app wiring と統合検証
+- [x] 3. app wiring と統合検証
   - `internal/app/withdraw_wiring.go`: `txAuthCodeDeleterAdapter` /
     `txRefreshTokenDeleterAdapter` を追加（`querierFromTx` → `DeleteByUserIDExec` の既存
     アダプタ同型）し、`newTxUserService` の引数と compile-time interface checks を拡張

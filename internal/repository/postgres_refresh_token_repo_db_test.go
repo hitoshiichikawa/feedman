@@ -397,6 +397,144 @@ func TestPostgresRefreshTokenRepo_DB(t *testing.T) {
 		}
 	})
 
+	// Case 8 (Issue #170 Req 1.2, 2.1): DeleteByUserIDExec が共有 tx に参加し、
+	// 配下 tokens も FK CASCADE で削除される。他 user は影響を受けない
+	t.Run("DeleteByUserIDExec_共有txでCommitすると当該userのfamily+tokensが消えて他userは残る", func(t *testing.T) {
+		userA := insertTestUserForRefreshToken(t, db, "issue170-exec-target@test.com")
+		userB := insertTestUserForRefreshToken(t, db, "issue170-exec-bystander@test.com")
+
+		// user A: family + token を 1 件
+		familyA := newTestRefreshTokenFamily(userA)
+		if err := repo.CreateFamily(ctx, familyA); err != nil {
+			t.Fatalf("CreateFamily A に失敗: %v", err)
+		}
+		tokenA := newTestRefreshToken(familyA.ID, userA, "hash-issue170-exec-a-0123456789abcd", time.Now().Add(24*time.Hour).UTC())
+		if err := repo.CreateToken(ctx, tokenA); err != nil {
+			t.Fatalf("CreateToken A に失敗: %v", err)
+		}
+
+		// user B: family + token を 1 件（削除対象外）
+		familyB := newTestRefreshTokenFamily(userB)
+		if err := repo.CreateFamily(ctx, familyB); err != nil {
+			t.Fatalf("CreateFamily B に失敗: %v", err)
+		}
+		tokenB := newTestRefreshToken(familyB.ID, userB, "hash-issue170-exec-b-0123456789abcd", time.Now().Add(24*time.Hour).UTC())
+		if err := repo.CreateToken(ctx, tokenB); err != nil {
+			t.Fatalf("CreateToken B に失敗: %v", err)
+		}
+
+		// Act: 共有 tx を開いて user A の DeleteByUserIDExec を呼び、Commit する
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("BeginTx に失敗: %v", err)
+		}
+		if err := repo.DeleteByUserIDExec(ctx, tx, userA); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("DeleteByUserIDExec に失敗: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("Commit に失敗: %v", err)
+		}
+
+		// Assert: user A の family / token は 0 件
+		var familyCountA, tokenCountA int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM refresh_token_families WHERE user_id = $1`, userA,
+		).Scan(&familyCountA); err != nil {
+			t.Fatalf("user A family COUNT に失敗: %v", err)
+		}
+		if familyCountA != 0 {
+			t.Errorf("user A の family が削除されていない: got %d, want 0", familyCountA)
+		}
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM refresh_tokens WHERE user_id = $1`, userA,
+		).Scan(&tokenCountA); err != nil {
+			t.Fatalf("user A token COUNT に失敗: %v", err)
+		}
+		if tokenCountA != 0 {
+			t.Errorf("user A の token が FK CASCADE で削除されていない: got %d, want 0", tokenCountA)
+		}
+
+		// Assert: user B の family / token は影響を受けず残っている
+		var familyCountB, tokenCountB int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM refresh_token_families WHERE user_id = $1`, userB,
+		).Scan(&familyCountB); err != nil {
+			t.Fatalf("user B family COUNT に失敗: %v", err)
+		}
+		if familyCountB != 1 {
+			t.Errorf("user B の family が DeleteByUserIDExec(A) で削除された: got %d, want 1", familyCountB)
+		}
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM refresh_tokens WHERE user_id = $1`, userB,
+		).Scan(&tokenCountB); err != nil {
+			t.Fatalf("user B token COUNT に失敗: %v", err)
+		}
+		if tokenCountB != 1 {
+			t.Errorf("user B の token が DeleteByUserIDExec(A) で削除された: got %d, want 1", tokenCountB)
+		}
+	})
+
+	// Case 9 (Issue #170 Req 2.2): DeleteByUserIDExec を共有 tx 上で Rollback すると削除が取り消される
+	t.Run("DeleteByUserIDExec_Rollbackすると削除が取り消される", func(t *testing.T) {
+		userID := insertTestUserForRefreshToken(t, db, "issue170-exec-rollback@test.com")
+		family := newTestRefreshTokenFamily(userID)
+		if err := repo.CreateFamily(ctx, family); err != nil {
+			t.Fatalf("CreateFamily に失敗: %v", err)
+		}
+		token := newTestRefreshToken(family.ID, userID, "hash-issue170-exec-rollback-01234", time.Now().Add(24*time.Hour).UTC())
+		if err := repo.CreateToken(ctx, token); err != nil {
+			t.Fatalf("CreateToken に失敗: %v", err)
+		}
+
+		// Act: 共有 tx 上で DeleteByUserIDExec を呼び Rollback する
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("BeginTx に失敗: %v", err)
+		}
+		if err := repo.DeleteByUserIDExec(ctx, tx, userID); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("DeleteByUserIDExec に失敗: %v", err)
+		}
+		if err := tx.Rollback(); err != nil {
+			t.Fatalf("Rollback に失敗: %v", err)
+		}
+
+		// Assert: Rollback により削除が取り消され、family / token は残っている
+		var familyCount, tokenCount int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM refresh_token_families WHERE user_id = $1`, userID,
+		).Scan(&familyCount); err != nil {
+			t.Fatalf("family COUNT に失敗: %v", err)
+		}
+		if familyCount != 1 {
+			t.Errorf("Rollback 後の family が残存していない: got %d, want 1", familyCount)
+		}
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM refresh_tokens WHERE user_id = $1`, userID,
+		).Scan(&tokenCount); err != nil {
+			t.Fatalf("token COUNT に失敗: %v", err)
+		}
+		if tokenCount != 1 {
+			t.Errorf("Rollback 後の token が残存していない: got %d, want 1", tokenCount)
+		}
+	})
+
+	// Case 10 (Issue #170 Req 1.2 冪等): DeleteByUserIDExec は対象 0 件でも成功する
+	t.Run("DeleteByUserIDExec_対象0件でも成功する", func(t *testing.T) {
+		userID := insertTestUserForRefreshToken(t, db, "issue170-exec-empty@test.com")
+		// family / token を一切作成しない状態
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("BeginTx に失敗: %v", err)
+		}
+		if err := repo.DeleteByUserIDExec(ctx, tx, userID); err != nil {
+			_ = tx.Rollback()
+			t.Errorf("0 件削除でエラーを返した（冪等性違反）: %v", err)
+		}
+		_ = tx.Commit()
+	})
+
 	// Case 7 (NFR 1.1 セキュリティ回帰): 平文 token 文字列で逆引き SELECT しても 0 件
 	// 永続化領域に「平文 token を書いていない」ことを自動検出するための回帰テスト。
 	// Create は token_hash を保存するため、平文の "plain-token-xxx" 文字列を直接

@@ -199,8 +199,22 @@ func (r *PostgresRefreshTokenRepo) RevokeFamily(ctx context.Context, familyID st
 // refresh_token_families を DELETE すると、refresh_tokens.family_id への FK
 // ON DELETE CASCADE により配下の token も自動削除される。本実装は family の DELETE
 // 1 文だけを発行する（refresh_tokens は明示 DELETE しない）。
+//
+// Issue #170: 共有トランザクション上で実行する場合は DeleteByUserIDExec を直接呼ぶ。
+// 本メソッドは r.db を渡して同 Exec 変種に委譲する（SQL・エラーメッセージは挙動等価）。
 func (r *PostgresRefreshTokenRepo) DeleteByUserID(ctx context.Context, userID string) error {
-	if _, err := r.db.ExecContext(ctx,
+	return r.DeleteByUserIDExec(ctx, r.db, userID)
+}
+
+// DeleteByUserIDExec は指定の DBTX（*sql.DB または共有トランザクション）上で
+// 当該ユーザーに属する全ての refresh_token と family を削除する（Issue #170 Req 1.2, 2.1）。
+//
+// refresh_token_families を DELETE すると、refresh_tokens.family_id への FK
+// ON DELETE CASCADE により配下の token も自動削除される（本メソッドは family の
+// DELETE 1 文だけを発行する）。退会トランザクション（user.Service.withdrawTx）への
+// 統合経路として提供する（PostgresSessionRepo / PostgresAuthCodeRepo と同型）。
+func (r *PostgresRefreshTokenRepo) DeleteByUserIDExec(ctx context.Context, q DBTX, userID string) error {
+	if _, err := q.ExecContext(ctx,
 		`DELETE FROM refresh_token_families WHERE user_id = $1`,
 		userID,
 	); err != nil {
