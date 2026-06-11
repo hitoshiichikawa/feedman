@@ -66,14 +66,19 @@ type mockNativeTokenExchangeService struct {
 	lastCode     string
 	lastVerifier string
 
-	// refresh tokens の rotation 用ステート（Issue #167）。
+	// refresh tokens の rotation 用ステート（Issue #167 / #168）。
 	// activeRefresh[plain]=familyID で「現役の refresh token 平文 → family」を保持。
 	// rotation 成功で旧 plain を活性集合から外し（rotated 扱い）新 plain を追加する。
-	// 旧 plain は rotatedRefresh に move し、再提示時の「rotation 済み拒否」を判定する。
+	// 旧 plain は rotatedRefresh に move し（family を保持）、再提示時の再利用検知 →
+	// family 失効昇格（#168 Req 1.1）を simulate する。revokedFamilies は失効済み
+	// family の集合で、配下 token の refresh 拒否（#168 Req 1.3 / 2.3）を判定する。
 	activeRefresh    map[string]string // plain → familyID
-	rotatedRefresh   map[string]struct{}
+	rotatedRefresh   map[string]string // plain → familyID（rotation 済み）
+	revokedFamilies  map[string]struct{}
 	rotateCallCount  int
+	revokeCallCount  int
 	lastRefreshToken string
+	lastRevokeToken  string
 }
 
 // IssueCode は事前に「払い出した auth_code 平文」を mock に登録する。
@@ -107,7 +112,7 @@ func (m *mockNativeTokenExchangeService) ExchangeAuthCode(ctx context.Context, a
 		m.activeRefresh = make(map[string]string)
 	}
 	if m.rotatedRefresh == nil {
-		m.rotatedRefresh = make(map[string]struct{})
+		m.rotatedRefresh = make(map[string]string)
 	}
 	const plain = "integration-refresh-token"
 	const familyID = "family-integration"
@@ -119,11 +124,15 @@ func (m *mockNativeTokenExchangeService) ExchangeAuthCode(ctx context.Context, a
 	}, nil
 }
 
-// RotateRefreshToken は Issue #167 の rotation を simulate する。
+// RotateRefreshToken は Issue #167 の rotation と Issue #168 の再利用検知昇格を
+// simulate する。
+//   - rotated 集合に存在する plain → 再利用検知。当該 family を失効してから
+//     ErrInvalidRefreshToken（#168 Req 1.1, 1.4）
+//   - 活性集合に存在するが family 失効済みの plain → ErrInvalidRefreshToken
+//     （#168 Req 1.3 / 2.3: family 全滅後は全 token 拒否）
 //   - 活性集合に存在する plain → 旧 plain を rotated 集合へ move、新 plain を活性化して
-//     新 TokenPair を返す（同一 family に紐付け / Req 1.3, 1.4）
-//   - rotated 集合に存在する plain → ErrInvalidRefreshToken（Req 2.4: rotation 済み再利用）
-//   - 活性集合にも rotated 集合にも存在しない plain → ErrInvalidRefreshToken（Req 2.1: 不明）
+//     新 TokenPair を返す（同一 family に紐付け / #167 Req 1.3, 1.4）
+//   - 活性集合にも rotated 集合にも存在しない plain → ErrInvalidRefreshToken（#167 Req 2.1: 不明）
 //
 // 連続 rotation の通しテストでは「N 回目の rotation で N 番目の plain が返る」決定論を
 // 担保するために、内部カウンタで新 plain を生成する。
@@ -136,8 +145,9 @@ func (m *mockNativeTokenExchangeService) RotateRefreshToken(ctx context.Context,
 	if m.activeRefresh == nil {
 		return nil, auth.ErrInvalidRefreshToken
 	}
-	if _, isRotated := m.rotatedRefresh[refreshToken]; isRotated {
-		// rotation 済み再利用は単純拒否（#168 が family 失効へ昇格するまでは ErrInvalidRefreshToken）
+	if familyID, isRotated := m.rotatedRefresh[refreshToken]; isRotated {
+		// rotation 済み再利用 = 再利用検知。family 全体を失効してから拒否（#168 Req 1.1）。
+		m.revokeFamilyLocked(familyID)
 		return nil, auth.ErrInvalidRefreshToken
 	}
 	familyID, isActive := m.activeRefresh[refreshToken]
@@ -145,13 +155,17 @@ func (m *mockNativeTokenExchangeService) RotateRefreshToken(ctx context.Context,
 		// 不明
 		return nil, auth.ErrInvalidRefreshToken
 	}
+	if _, revoked := m.revokedFamilies[familyID]; revoked {
+		// family 失効済み（revoke 経由 / 再利用検知経由を問わず拒否 / #168 Req 1.3, 2.3）
+		return nil, auth.ErrInvalidRefreshToken
+	}
 
 	// 旧 plain を rotated に move、新 plain を活性化（同一 family / Req 1.3）。
 	delete(m.activeRefresh, refreshToken)
 	if m.rotatedRefresh == nil {
-		m.rotatedRefresh = make(map[string]struct{})
+		m.rotatedRefresh = make(map[string]string)
 	}
-	m.rotatedRefresh[refreshToken] = struct{}{}
+	m.rotatedRefresh[refreshToken] = familyID
 	newPlain := fmt.Sprintf("integration-refresh-token-rot-%d", m.rotateCallCount)
 	m.activeRefresh[newPlain] = familyID
 
@@ -162,10 +176,34 @@ func (m *mockNativeTokenExchangeService) RotateRefreshToken(ctx context.Context,
 	}, nil
 }
 
-// RevokeRefreshToken は TokenExchangeService の interface 追従（Issue #168 task 2）。
-// revoke の意味論（family 失効）の simulate と通しシナリオは task 3 で実装する。
+// RevokeRefreshToken は Issue #168 の revoke を simulate する。
+//   - 活性 / rotated いずれかの集合に存在する plain → 当該 family を失効して nil
+//     （token の状態に関わらず失効 / Req 2.1）
+//   - 不明な plain → 何もせず nil（冪等・存在オラクルなし / Req 2.2）
 func (m *mockNativeTokenExchangeService) RevokeRefreshToken(ctx context.Context, refreshToken string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.revokeCallCount++
+	m.lastRevokeToken = refreshToken
+
+	familyID, ok := m.activeRefresh[refreshToken]
+	if !ok {
+		familyID, ok = m.rotatedRefresh[refreshToken]
+	}
+	if !ok {
+		// 不明 token は no-op（Req 2.2）
+		return nil
+	}
+	m.revokeFamilyLocked(familyID)
 	return nil
+}
+
+// revokeFamilyLocked は family を失効済み集合へ加える。呼び出し側で mu を保持していること。
+func (m *mockNativeTokenExchangeService) revokeFamilyLocked(familyID string) {
+	if m.revokedFamilies == nil {
+		m.revokedFamilies = make(map[string]struct{})
+	}
+	m.revokedFamilies[familyID] = struct{}{}
 }
 
 // createNativeAuthIntegrationRouter は native auth 系統（login / callback / token 交換）の
@@ -1716,32 +1754,10 @@ func TestIntegration_RefreshFlow_TokenExchangeRefreshSucceedsThenOldTokenRejecte
 		t.Errorf("refresh 1st: new refresh_token equals old (rotation must produce different token)")
 	}
 
-	// Act 2: 同じ旧 refresh token で再 refresh → 401 INVALID_REFRESH_TOKEN（Req 1.2 / 2.4）
-	req = httptest.NewRequest(http.MethodPost, "/api/auth/refresh", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w = httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	resp = w.Result()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("refresh 2nd with old token status = %d, want %d (Req 1.2 / 2.4 / SERVER.md §1.3)",
-			resp.StatusCode, http.StatusUnauthorized)
-	}
-	var rejectBody map[string]any
-	_ = json.NewDecoder(resp.Body).Decode(&rejectBody)
-	if rejectBody["code"] != "INVALID_REFRESH_TOKEN" {
-		t.Errorf("refresh 2nd: code = %v, want %q (Req 2.6 uniform 拒否)",
-			rejectBody["code"], "INVALID_REFRESH_TOKEN")
-	}
-	if rejectBody["category"] != "auth" {
-		t.Errorf("refresh 2nd: category = %v, want %q", rejectBody["category"], "auth")
-	}
-	// 詳細な拒否理由を反射しない（Req 2.6 / NFR 1.3）
-	if msg, _ := rejectBody["message"].(string); strings.Contains(msg, "rotated") || strings.Contains(msg, "expired") || strings.Contains(msg, "revoked") {
-		t.Errorf("refresh 2nd: message %q must not differentiate rejection reasons", msg)
-	}
-
-	// 新 refresh token は依然有効（rotation 後に発行された世代）
+	// Act 2: 新 refresh token は有効（rotation 後に発行された世代で再 refresh 成功）
+	// ※ #168 で旧 token 再利用が family 失効へ昇格したため、新世代の有効性検証は
+	//   旧 token 再提示（Act 3）より前に行う（再利用検知後は family 全滅で B も拒否される。
+	//   その挙動自体は TestIntegration_ReuseDetection_FamilyRevoked が検証する）。
 	body2 := fmt.Sprintf(`{"refresh_token":%q}`, newRefresh)
 	req = httptest.NewRequest(http.MethodPost, "/api/auth/refresh", strings.NewReader(body2))
 	req.Header.Set("Content-Type", "application/json")
@@ -1750,6 +1766,31 @@ func TestIntegration_RefreshFlow_TokenExchangeRefreshSucceedsThenOldTokenRejecte
 	if w.Result().StatusCode != http.StatusOK {
 		t.Errorf("refresh with new token status = %d, want 200 (新 token は有効)",
 			w.Result().StatusCode)
+	}
+
+	// Act 3: 最初の旧 refresh token で再 refresh → 401 INVALID_REFRESH_TOKEN（Req 1.2 / 2.4）
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/refresh", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	resp = w.Result()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("refresh with old token status = %d, want %d (Req 1.2 / 2.4 / SERVER.md §1.3)",
+			resp.StatusCode, http.StatusUnauthorized)
+	}
+	var rejectBody map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&rejectBody)
+	if rejectBody["code"] != "INVALID_REFRESH_TOKEN" {
+		t.Errorf("refresh with old token: code = %v, want %q (Req 2.6 uniform 拒否)",
+			rejectBody["code"], "INVALID_REFRESH_TOKEN")
+	}
+	if rejectBody["category"] != "auth" {
+		t.Errorf("refresh with old token: category = %v, want %q", rejectBody["category"], "auth")
+	}
+	// 詳細な拒否理由を反射しない（Req 2.6 / NFR 1.3）
+	if msg, _ := rejectBody["message"].(string); strings.Contains(msg, "rotated") || strings.Contains(msg, "expired") || strings.Contains(msg, "revoked") {
+		t.Errorf("refresh with old token: message %q must not differentiate rejection reasons", msg)
 	}
 }
 
@@ -1779,5 +1820,135 @@ func TestIntegration_RefreshFlow_UnknownRefreshTokenReturns401(t *testing.T) {
 	_ = json.NewDecoder(resp.Body).Decode(&resBody)
 	if resBody["code"] != "INVALID_REFRESH_TOKEN" {
 		t.Errorf("code = %v, want %q (Req 2.6)", resBody["code"], "INVALID_REFRESH_TOKEN")
+	}
+}
+
+// --- 再利用検知 family 全滅 / revoke の通しテスト（Issue #168 / design.md Testing Strategy 10） ---
+
+// TestIntegration_ReuseDetection_FamilyRevoked は「token 交換 → refresh（旧 A → 新 B）→
+// A を再提示 → 401 → 以後 B でも 401」の family 全滅シナリオを検証する（Req 1.1, 1.3, 1.4）。
+func TestIntegration_ReuseDetection_FamilyRevoked(t *testing.T) {
+	// Arrange: native login → callback → token 交換で初回 refresh token A を取得
+	state := newIntegrationState()
+	tokenSvc := &mockNativeTokenExchangeService{}
+	router := createNativeAuthIntegrationRouter(state, tokenSvc)
+	tokenA := runNativeLoginCallbackAndExchange(t, router)
+
+	// Act 1: A で refresh 成功 → 新 token B を取得
+	bodyA := fmt.Sprintf(`{"refresh_token":%q}`, tokenA)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/refresh", strings.NewReader(bodyA))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("refresh A status = %d, want 200", w.Result().StatusCode)
+	}
+	var pairBody map[string]any
+	if err := json.NewDecoder(w.Result().Body).Decode(&pairBody); err != nil {
+		t.Fatalf("decode refresh A body: %v", err)
+	}
+	tokenB, _ := pairBody["refresh_token"].(string)
+	if tokenB == "" || tokenB == tokenA {
+		t.Fatalf("refresh A must return new token B (got %q)", tokenB)
+	}
+
+	// Act 2: rotation 済みの A を再提示 → 再利用検知で 401（Req 1.1）
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/refresh", strings.NewReader(bodyA))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("replay A status = %d, want %d (Req 1.1: 再利用検知で拒否)",
+			resp.StatusCode, http.StatusUnauthorized)
+	}
+	// 拒否応答は通常の無効 token と区別できない同一応答（Req 1.4）
+	var replayBody map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&replayBody)
+	if replayBody["code"] != "INVALID_REFRESH_TOKEN" {
+		t.Errorf("replay A: code = %v, want %q (Req 1.4)", replayBody["code"], "INVALID_REFRESH_TOKEN")
+	}
+	if msg, _ := replayBody["message"].(string); strings.Contains(msg, "reuse") || strings.Contains(msg, "revoked") || strings.Contains(msg, "family") {
+		t.Errorf("replay A: message %q must not reveal reuse detection (Req 1.4)", msg)
+	}
+
+	// Act 3: family 全滅により、現役だったはずの B でも以後 401（Req 1.3）
+	bodyB := fmt.Sprintf(`{"refresh_token":%q}`, tokenB)
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/refresh", strings.NewReader(bodyB))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Result().StatusCode != http.StatusUnauthorized {
+		t.Errorf("refresh B after family revoke status = %d, want %d (Req 1.3: family 全滅)",
+			w.Result().StatusCode, http.StatusUnauthorized)
+	}
+}
+
+// TestIntegration_RevokeFlow_RefreshRejectedAndIdempotent は「token 交換 → revoke 204 →
+// 同 token で refresh → 401 → 再 revoke → 204」の revoke 後拒否と冪等性を検証する
+// （Req 2.1, 2.2, 2.3）。
+func TestIntegration_RevokeFlow_RefreshRejectedAndIdempotent(t *testing.T) {
+	// Arrange: native login → callback → token 交換で refresh token を取得
+	state := newIntegrationState()
+	tokenSvc := &mockNativeTokenExchangeService{}
+	router := createNativeAuthIntegrationRouter(state, tokenSvc)
+	refreshToken := runNativeLoginCallbackAndExchange(t, router)
+	body := fmt.Sprintf(`{"refresh_token":%q}`, refreshToken)
+
+	// Act 1: revoke → 204 ボディなし（Req 2.1）
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/revoke", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Result().StatusCode != http.StatusNoContent {
+		t.Fatalf("revoke 1st status = %d, want %d (Req 2.1)", w.Result().StatusCode, http.StatusNoContent)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("revoke 1st body = %q, want empty (204 はボディなし)", w.Body.String())
+	}
+
+	// Act 2: revoke 済み token で refresh → 401（Req 2.3: family の全 token を拒否）
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/refresh", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("refresh after revoke status = %d, want %d (Req 2.3)",
+			resp.StatusCode, http.StatusUnauthorized)
+	}
+	var rejectBody map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&rejectBody)
+	if rejectBody["code"] != "INVALID_REFRESH_TOKEN" {
+		t.Errorf("refresh after revoke: code = %v, want %q", rejectBody["code"], "INVALID_REFRESH_TOKEN")
+	}
+
+	// Act 3: 同じ token で再 revoke → 204（Req 2.2: 冪等・失効済みでも同一応答）
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/revoke", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Result().StatusCode != http.StatusNoContent {
+		t.Errorf("revoke 2nd status = %d, want %d (Req 2.2: 冪等)", w.Result().StatusCode, http.StatusNoContent)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("revoke 2nd body = %q, want empty", w.Body.String())
+	}
+
+	// Act 4: 不明 token の revoke も同一の 204（Req 2.2 / NFR 1.2: 存在オラクルなし）
+	unknownBody := `{"refresh_token":"never-issued-token"}`
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/revoke", strings.NewReader(unknownBody))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Result().StatusCode != http.StatusNoContent {
+		t.Errorf("revoke unknown status = %d, want %d (Req 2.2: 不明 token でも区別しない)",
+			w.Result().StatusCode, http.StatusNoContent)
 	}
 }
