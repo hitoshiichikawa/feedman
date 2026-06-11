@@ -1,6 +1,7 @@
 module github.com/hitoshi/feedman
 
 go 1.25.0
+
 toolchain go1.25.11
 
 require (
@@ -13,6 +14,7 @@ require (
 
 require (
 	github.com/doyensec/safeurl v0.2.2
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/microcosm-cc/bluemonday v1.0.27
 	github.com/mmcdole/gofeed v1.3.0
 	github.com/prometheus/client_golang v1.23.2
