@@ -69,6 +69,12 @@ type RouterDeps struct {
 	AuthService AuthServiceInterface
 	AuthConfig  AuthHandlerConfig
 
+	// Native Auth トークン交換（Issue #166）
+	// NativeAuthHandler が非 nil のときのみ認証不要グループに POST /api/auth/token を
+	// 登録する。nil の場合は登録せず 404 で応答する（NATIVE_AUTH_JWT_SECRET 未設定環境の
+	// fail-closed パターン。/metrics と同じ後方互換指針）。
+	NativeAuthHandler *NativeAuthHandler
+
 	// フィード
 	FeedService         FeedServiceInterface
 	SubscriptionDeleter SubscriptionDeleter
@@ -192,6 +198,16 @@ func NewRouter(deps *RouterDeps) http.Handler {
 			} else {
 				logger.Warn("MetricsHandler is set but MetricsMiddleware is nil; /metrics is not registered to avoid unprotected exposure")
 			}
+		}
+
+		// Native Auth トークン交換エンドポイント（Issue #166）。
+		// NATIVE_AUTH_JWT_SECRET 未設定のデプロイは NativeAuthHandler が nil となり、本ルートを
+		// 登録しない（404 / fail-closed）。Session / Bearer middleware は通らない（Req 1.5）。
+		// 巨大ボディ DoS 防止のためボディ上限ミドルウェア（DefaultMaxBodyBytes）を重ねる。
+		// IP レート制限（unauthIPMW）は Issue #171 の領分のため本 spec では適用しない。
+		if deps.NativeAuthHandler != nil {
+			r.With(middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
+				Post("/api/auth/token", deps.NativeAuthHandler.Token)
 		}
 	})
 
