@@ -73,6 +73,11 @@ type AuthCodeRepository interface {
 	// 当該レコードが 1) 既に used = true, 2) expires_at <= now(), 3) 存在しない の
 	// いずれかの場合は ErrAuthCodeNotUsable を返し、永続化状態は変更しない（Req 2.6）。
 	MarkUsed(ctx context.Context, id string) error
+
+	// DeleteByUserID は当該ユーザーに属する全ての auth_code を削除する（Issue #170 Req 1.1）。
+	// 対象 0 件でも成功する（冪等）。FK ON DELETE CASCADE で users 削除時にも到達するが、
+	// 退会フローからの明示的削除経路として提供する（RefreshTokenRepository.DeleteByUserID と対）。
+	DeleteByUserID(ctx context.Context, userID string) error
 }
 
 // RefreshTokenRepository は native auth の refresh token / family 永続化操作を公開する。

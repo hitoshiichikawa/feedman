@@ -123,5 +123,31 @@ func (r *PostgresAuthCodeRepo) MarkUsed(ctx context.Context, id string) error {
 	return nil
 }
 
+// DeleteByUserID は当該ユーザーに属する全ての auth_code を削除する（Issue #170 Req 1.1）。
+//
+// 対象 0 件でも成功する（冪等）。退会フロー（user.Service.withdrawTx）からの
+// 明示的削除経路として提供する。FK ON DELETE CASCADE による防衛線も維持される
+// （RefreshTokenRepository.DeleteByUserID と対）。
+func (r *PostgresAuthCodeRepo) DeleteByUserID(ctx context.Context, userID string) error {
+	return r.DeleteByUserIDExec(ctx, r.db, userID)
+}
+
+// DeleteByUserIDExec は指定の DBTX（*sql.DB または共有トランザクション）上で
+// 当該ユーザーに属する全ての auth_code を削除する（Issue #170 Req 1.1, 2.1）。
+//
+// SQL: DELETE FROM auth_codes WHERE user_id = $1
+// PostgresSessionRepo の 2 段パターン（DeleteByUserID + DeleteByUserIDExec）と同型。
+func (r *PostgresAuthCodeRepo) DeleteByUserIDExec(ctx context.Context, q DBTX, userID string) error {
+	_, err := q.ExecContext(ctx,
+		`DELETE FROM auth_codes WHERE user_id = $1`,
+		userID,
+	)
+	if err != nil {
+		// NFR 1.2: user_id の値はメッセージに含めない。
+		return fmt.Errorf("failed to delete auth_codes by user: %w", err)
+	}
+	return nil
+}
+
 // compile-time interface check
 var _ AuthCodeRepository = (*PostgresAuthCodeRepo)(nil)

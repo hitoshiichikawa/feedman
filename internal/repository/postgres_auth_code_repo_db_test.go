@@ -278,6 +278,120 @@ func TestPostgresAuthCodeRepo_DB(t *testing.T) {
 		}
 	})
 
+	// Case 7 (Issue #170 Req 1.1, 3.1): DeleteByUserID は当該 user のみ削除し、他 user に影響しない
+	t.Run("DeleteByUserID_当該userのみ削除し他userに影響しない", func(t *testing.T) {
+		userA := insertTestUserForAuthCode(t, db, "issue170-delete-target@test.com")
+		userB := insertTestUserForAuthCode(t, db, "issue170-delete-bystander@test.com")
+
+		// user A に 2 件、user B に 1 件の auth_code を作成
+		codeA1 := newTestAuthCode(userA, "hash-issue170-a-1-0123456789abcd00", time.Now().Add(60*time.Second).UTC())
+		codeA2 := newTestAuthCode(userA, "hash-issue170-a-2-0123456789abcd00", time.Now().Add(60*time.Second).UTC())
+		codeB := newTestAuthCode(userB, "hash-issue170-b-0123456789abcd0000", time.Now().Add(60*time.Second).UTC())
+		for _, c := range []*model.AuthCode{codeA1, codeA2, codeB} {
+			if err := repo.Create(ctx, c); err != nil {
+				t.Fatalf("Create に失敗: %v", err)
+			}
+		}
+
+		// Act: user A の auth_code を一括削除
+		if err := repo.DeleteByUserID(ctx, userA); err != nil {
+			t.Fatalf("DeleteByUserID に失敗: %v", err)
+		}
+
+		// Assert: user A の auth_codes は 0 件
+		var countA int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM auth_codes WHERE user_id = $1`, userA).Scan(&countA); err != nil {
+			t.Fatalf("user A COUNT 取得に失敗: %v", err)
+		}
+		if countA != 0 {
+			t.Errorf("user A の auth_codes が残存している: got %d, want 0", countA)
+		}
+
+		// user B の auth_codes は 1 件残っている
+		var countB int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM auth_codes WHERE user_id = $1`, userB).Scan(&countB); err != nil {
+			t.Fatalf("user B COUNT 取得に失敗: %v", err)
+		}
+		if countB != 1 {
+			t.Errorf("user B の auth_codes が DeleteByUserID(A) で削除された: got %d, want 1", countB)
+		}
+	})
+
+	// Case 8 (Issue #170 Req 1.1 冪等): 対象 0 件でも DeleteByUserID は成功する
+	t.Run("DeleteByUserID_対象0件でも成功する", func(t *testing.T) {
+		userID := insertTestUserForAuthCode(t, db, "issue170-empty@test.com")
+		// auth_code を一切作成しない状態で DeleteByUserID
+		if err := repo.DeleteByUserID(ctx, userID); err != nil {
+			t.Errorf("0 件削除でエラーを返した（冪等性違反）: %v", err)
+		}
+	})
+
+	// Case 9 (Issue #170 Req 2.1): DeleteByUserIDExec が共有 tx に参加し、Rollback で取り消される
+	t.Run("DeleteByUserIDExec_共有txに参加しRollbackで取り消される", func(t *testing.T) {
+		userID := insertTestUserForAuthCode(t, db, "issue170-tx-rollback@test.com")
+		code := newTestAuthCode(userID, "hash-issue170-tx-rollback-01234567", time.Now().Add(60*time.Second).UTC())
+		if err := repo.Create(ctx, code); err != nil {
+			t.Fatalf("Create に失敗: %v", err)
+		}
+
+		// Act: 共有 tx を開いて DeleteByUserIDExec を呼び、Rollback する
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("BeginTx に失敗: %v", err)
+		}
+		if err := repo.DeleteByUserIDExec(ctx, tx, userID); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("DeleteByUserIDExec に失敗: %v", err)
+		}
+		if err := tx.Rollback(); err != nil {
+			t.Fatalf("Rollback に失敗: %v", err)
+		}
+
+		// Assert: Rollback により削除が取り消され、auth_code は依然存在する
+		var count int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM auth_codes WHERE user_id = $1`, userID,
+		).Scan(&count); err != nil {
+			t.Fatalf("COUNT 取得に失敗: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("Rollback 後の auth_codes が残存していない: got %d, want 1", count)
+		}
+	})
+
+	// Case 10 (Issue #170 Req 2.1): DeleteByUserIDExec を共有 tx 上で Commit すると削除が確定する
+	t.Run("DeleteByUserIDExec_共有txでCommitすると削除が確定する", func(t *testing.T) {
+		userID := insertTestUserForAuthCode(t, db, "issue170-tx-commit@test.com")
+		code := newTestAuthCode(userID, "hash-issue170-tx-commit-0123456789", time.Now().Add(60*time.Second).UTC())
+		if err := repo.Create(ctx, code); err != nil {
+			t.Fatalf("Create に失敗: %v", err)
+		}
+
+		// Act: 共有 tx を開いて DeleteByUserIDExec を呼び、Commit する
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("BeginTx に失敗: %v", err)
+		}
+		if err := repo.DeleteByUserIDExec(ctx, tx, userID); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("DeleteByUserIDExec に失敗: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("Commit に失敗: %v", err)
+		}
+
+		// Assert: Commit により削除が確定し、auth_code は 0 件
+		var count int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM auth_codes WHERE user_id = $1`, userID,
+		).Scan(&count); err != nil {
+			t.Fatalf("COUNT 取得に失敗: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("Commit 後の auth_codes が削除されていない: got %d, want 0", count)
+		}
+	})
+
 	// Case 5 (Req 1.5 / 3.6 同系統 cascade): users 削除時に auth_codes が cascade 削除される
 	t.Run("users削除時にauth_codesがCASCADE削除される", func(t *testing.T) {
 		userID := insertTestUserForAuthCode(t, db, "cascade@test.com")
