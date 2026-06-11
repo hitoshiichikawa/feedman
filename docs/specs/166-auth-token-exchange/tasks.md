@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. config: JWT 署名鍵の環境変数を追加
+- [x] 1. config: JWT 署名鍵の環境変数を追加
   - `internal/config/config.go` に `NativeAuthJWTSecret`（env `NATIVE_AUTH_JWT_SECRET`、任意）と
     `NativeAuthJWTKid`（env `NATIVE_AUTH_JWT_KID`、既定 `"v1"`）を追加。未設定でも起動を
     失敗させない（既存 required 項目の検証ロジックに含めない）
