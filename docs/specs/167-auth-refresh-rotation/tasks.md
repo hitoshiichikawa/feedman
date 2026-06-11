@@ -13,7 +13,7 @@
     （既存 #166 ケースは変更しない。モックの interface 拡張追従は可）
   - _Requirements: 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4, 2.6, 2.7, 3.1, NFR 1.1, NFR 1.2, NFR 3.1_
 
-- [ ] 2. handler: Refresh エンドポイントと router 登録
+- [x] 2. handler: Refresh エンドポイントと router 登録
   - `internal/handler/native_auth_handler.go`: `TokenExchangeService` interface に
     `RotateRefreshToken` を追加し、`Refresh` handler を実装（200 / 400 INVALID_REQUEST /
     401 INVALID_REFRESH_TOKEN / 500 を `middleware.WriteErrorResponse` で応答。
