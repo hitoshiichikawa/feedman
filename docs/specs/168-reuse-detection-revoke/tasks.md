@@ -24,7 +24,7 @@
   - _Requirements: 2.1, 2.2, 2.4, 2.5, 2.6, NFR 1.2, NFR 2.1, NFR 2.2_
   - _Depends: 1_
 
-- [ ] 3. 統合テスト: 再利用 family 全滅と revoke 後拒否
+- [x] 3. 統合テスト: 再利用 family 全滅と revoke 後拒否
   - `internal/handler/integration_test.go` に design.md Testing Strategy 10 の 2 シナリオ
     （再利用 → family 全滅 / revoke 204 → refresh 401 → 再 revoke 204 の冪等）を追加
   - 既存の統合テスト・既存ルートが無変更で green であることを確認
