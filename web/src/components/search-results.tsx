@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
+import { safeFeedUrl } from "@/lib/url";
 import { useAppState, useAppDispatch } from "@/contexts/app-state";
 import { useItemSearch } from "@/hooks/use-item-search";
 import { useItemDetail } from "@/hooks/use-items";
@@ -310,7 +311,7 @@ function SearchResultRow({
         className="flex items-start gap-2"
       >
         <a
-          href={hit.link}
+          href={safeFeedUrl(hit.link)}
           target="_blank"
           rel="noopener noreferrer"
           onClick={(e) => e.stopPropagation()}
