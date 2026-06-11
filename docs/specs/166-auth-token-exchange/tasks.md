@@ -25,7 +25,7 @@
     claims / kid / 期限を検証、空 userID は error）
   - _Requirements: 1.4, 3.4, 3.5_
 
-- [ ] 4. auth: TokenService.ExchangeAuthCode を追加
+- [x] 4. auth: TokenService.ExchangeAuthCode を追加
   - `internal/auth/token_service.go` を新規作成: `ErrInvalidGrant` sentinel /
     `AuthCodeConsumer`・`RefreshTokenStore` 最小 interface / `RefreshTokenTTL = 30 * 24 * time.Hour` /
     `TokenPair` / `NewTokenService` / `ExchangeAuthCode`（design.md の交換フロー手順 2〜6。
