@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { RotateCw } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { formatRelativeDate } from "@/lib/date";
 import { safeFeedUrl } from "@/lib/url";
 import { useItems, useItemDetail } from "@/hooks/use-items";
 import { useMarkAsRead, useToggleStar } from "@/hooks/use-item-state";
@@ -255,6 +256,8 @@ interface ItemDetailAreaProps {
   onMarkAsRead: (itemId: string) => void;
   /** スター切替コールバック */
   onToggleStar: (itemId: string, isStarred: boolean) => void;
+  /** data-testid の接頭辞（既定 "item-detail"。検索結果など別系統で testid を分けるため） */
+  testIdPrefix?: string;
 }
 
 /**
@@ -274,12 +277,13 @@ export function ItemDetailArea({
   detailItemId,
   onMarkAsRead,
   onToggleStar,
+  testIdPrefix = "item-detail",
 }: ItemDetailAreaProps) {
   // 取得失敗時はエラー表示を提示する（AC 2.3）
   if (isError) {
     return (
       <div
-        data-testid="item-detail-error"
+        data-testid={`${testIdPrefix}-error`}
         className="border-t bg-background px-4 py-4 text-sm text-destructive"
       >
         記事の詳細を読み込めませんでした
@@ -292,7 +296,7 @@ export function ItemDetailArea({
   if (isLoading || detail === null || detail.id !== detailItemId) {
     return (
       <div
-        data-testid="item-detail-loading"
+        data-testid={`${testIdPrefix}-loading`}
         className="border-t bg-background px-4 py-4 text-sm text-muted-foreground"
       >
         読み込み中...
@@ -344,7 +348,7 @@ export function ItemRow({
   onToggleStar,
 }: ItemRowProps) {
   const date = new Date(item.published_at);
-  const formattedDate = formatDate(date);
+  const formattedDate = formatRelativeDate(date);
   const hasSummary = item.summary.trim().length > 0;
 
   return (
@@ -415,22 +419,4 @@ export function ItemRow({
       )}
     </button>
   );
-}
-
-/** 日付をフォーマットする */
-function formatDate(date: Date): string {
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
-  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-
-  if (diffHours < 1) return "1時間以内";
-  if (diffHours < 24) return `${diffHours}時間前`;
-  if (diffDays < 7) return `${diffDays}日前`;
-
-  return date.toLocaleDateString("ja-JP", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
 }

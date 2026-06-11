@@ -2,17 +2,15 @@
 
 import { useCallback, useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
+import { formatRelativeDate } from "@/lib/date";
 import { safeFeedUrl } from "@/lib/url";
 import { useAppState, useAppDispatch } from "@/contexts/app-state";
 import { useItemSearch } from "@/hooks/use-item-search";
 import { useItemDetail } from "@/hooks/use-items";
 import { useMarkAsRead, useToggleStar } from "@/hooks/use-item-state";
-import { ItemDetail } from "@/components/item-detail";
+import { ItemDetailArea } from "@/components/item-list";
 import { ItemMetaActions } from "@/components/item-meta-actions";
-import type {
-  ItemDetail as ItemDetailType,
-  ItemSearchHit,
-} from "@/types/item";
+import type { ItemSearchHit } from "@/types/item";
 
 /**
  * 検索結果リスト（右ペイン）。
@@ -155,13 +153,14 @@ export function SearchResults() {
                   onToggleStar={handleToggleStar}
                 />
                 {isExpanded && (
-                  <SearchResultDetailArea
+                  <ItemDetailArea
                     isLoading={isDetailLoading}
                     isError={isDetailError}
                     detail={detail ?? null}
                     detailItemId={state.expandedItemId}
                     onMarkAsRead={handleMarkAsRead}
                     onToggleStar={handleToggleStar}
+                    testIdPrefix="search-result-detail"
                   />
                 )}
               </div>
@@ -183,60 +182,6 @@ export function SearchResults() {
         )}
       </div>
     </div>
-  );
-}
-
-/** SearchResultDetailArea のプロパティ */
-interface SearchResultDetailAreaProps {
-  isLoading: boolean;
-  isError: boolean;
-  detail: ItemDetailType | null;
-  detailItemId: string | null;
-  onMarkAsRead: (itemId: string) => void;
-  onToggleStar: (itemId: string, isStarred: boolean) => void;
-}
-
-/**
- * 検索結果の展開エリア（ItemList の ItemDetailArea と同等パターン）。
- *
- * 取得状態に応じてローディング表示 / エラー表示 / 本文（ItemDetail）を出し分ける。
- */
-function SearchResultDetailArea({
-  isLoading,
-  isError,
-  detail,
-  detailItemId,
-  onMarkAsRead,
-  onToggleStar,
-}: SearchResultDetailAreaProps) {
-  if (isError) {
-    return (
-      <div
-        data-testid="search-result-detail-error"
-        className="border-t bg-background px-4 py-4 text-sm text-destructive"
-      >
-        記事の詳細を読み込めませんでした
-      </div>
-    );
-  }
-
-  if (isLoading || detail === null || detail.id !== detailItemId) {
-    return (
-      <div
-        data-testid="search-result-detail-loading"
-        className="border-t bg-background px-4 py-4 text-sm text-muted-foreground"
-      >
-        読み込み中...
-      </div>
-    );
-  }
-
-  return (
-    <ItemDetail
-      item={detail}
-      onMarkAsRead={onMarkAsRead}
-      onToggleStar={onToggleStar}
-    />
   );
 }
 
@@ -276,7 +221,7 @@ function SearchResultRow({
   onToggleStar,
 }: SearchResultRowProps) {
   const date = hit.published_at !== null ? new Date(hit.published_at) : null;
-  const formattedDate = date !== null ? formatDate(date) : "日付不明";
+  const formattedDate = date !== null ? formatRelativeDate(date) : "日付不明";
   const hasSummary = hit.summary.trim().length > 0;
 
   return (
@@ -400,20 +345,3 @@ function SearchResultFavicon({
   );
 }
 
-/** 日付を相対表記でフォーマットする（item-list.tsx と同等ロジック） */
-function formatDate(date: Date): string {
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
-  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-
-  if (diffHours < 1) return "1時間以内";
-  if (diffHours < 24) return `${diffHours}時間前`;
-  if (diffDays < 7) return `${diffDays}日前`;
-
-  return date.toLocaleDateString("ja-JP", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
-}

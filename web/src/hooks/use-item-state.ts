@@ -49,14 +49,6 @@ interface ToggleStarContext {
     key: QueryKey;
     data: InfiniteData<ItemSearchResponse> | undefined;
   }>;
-  /**
-   * 後方互換のため `previousItems` のエイリアスを残す（旧 context shape）。
-   * 将来 cleanup で除去予定。
-   */
-  previousData: Array<{
-    key: QueryKey;
-    data: InfiniteData<ItemListResponse> | undefined;
-  }>;
 }
 
 /**
@@ -119,7 +111,7 @@ export function useToggleStar() {
         });
       });
 
-      return { previousItems, previousSearch, previousData: previousItems };
+      return { previousItems, previousSearch };
     },
     onError: (_err, _vars, context) => {
       // エラー時にロールバック
