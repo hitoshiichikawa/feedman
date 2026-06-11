@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. repository: ユーザー単位削除の追加（AuthCodeRepository 拡張 + DBTX 対応）
+- [x] 1. repository: ユーザー単位削除の追加（AuthCodeRepository 拡張 + DBTX 対応）
   - `internal/repository/interfaces.go`: `AuthCodeRepository` に
     `DeleteByUserID(ctx context.Context, userID string) error` を追加（doc comment は
     `RefreshTokenRepository.DeleteByUserID` と対になる文面。冪等・CASCADE 併存の旨を明記）
