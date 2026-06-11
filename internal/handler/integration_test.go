@@ -1592,3 +1592,186 @@ func TestIntegration_NativeAuthFlow_UnknownAuthCodeReturns400(t *testing.T) {
 		t.Errorf("code = %v, want %q (Req 2.2 / 2.6)", resBody["code"], "INVALID_GRANT")
 	}
 }
+
+// --- Refresh ローテーションの通し統合テスト（Issue #167 / task 3） ---
+
+// runNativeLoginCallbackAndExchange は native login → callback → token 交換の通しを
+// 実行し、初回 refresh token 平文を返す。本ヘルパーは Refresh 通しテストで
+// 「正常な refresh token を払い出した状態」を作るために使う。
+func runNativeLoginCallbackAndExchange(t *testing.T, router http.Handler) (refreshToken string) {
+	t.Helper()
+
+	// 1. native login: state / challenge Cookie を取得
+	loginURL := "/auth/google/login?flow=native&code_challenge=" + nativeTestChallenge + "&code_challenge_method=S256"
+	req := httptest.NewRequest(http.MethodGet, loginURL, nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	resp := w.Result()
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("login status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	}
+	var oauthStateC, nativeChallengeC *http.Cookie
+	for _, c := range resp.Cookies() {
+		switch c.Name {
+		case "oauth_state":
+			oauthStateC = c
+		case "oauth_native_challenge":
+			nativeChallengeC = c
+		}
+	}
+	if oauthStateC == nil || nativeChallengeC == nil {
+		t.Fatal("login: expected both oauth_state and oauth_native_challenge cookies")
+	}
+
+	// 2. callback: アプリスキームへ auth_code が返る
+	callbackURL := "/auth/google/callback?code=test-auth-code&state=" + oauthStateC.Value
+	req = httptest.NewRequest(http.MethodGet, callbackURL, nil)
+	req.AddCookie(oauthStateC)
+	req.AddCookie(nativeChallengeC)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	resp = w.Result()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("callback status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
+	}
+	const wantAuthCode = "integration-native-auth-code"
+	wantLocation := "feedman://auth/callback?auth_code=" + wantAuthCode
+	if location := resp.Header.Get("Location"); location != wantLocation {
+		t.Fatalf("callback Location = %q, want %q", location, wantLocation)
+	}
+
+	// 3. token 交換: 200 で 4 フィールドを取得
+	body := fmt.Sprintf(`{"auth_code":%q,"code_verifier":%q}`, wantAuthCode, "plain-verifier")
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/token", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	resp = w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("token exchange status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	var tokenBody map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&tokenBody); err != nil {
+		t.Fatalf("token exchange decode body: %v", err)
+	}
+	rt, ok := tokenBody["refresh_token"].(string)
+	if !ok || rt == "" {
+		t.Fatalf("token exchange: refresh_token = %v, want non-empty string", tokenBody["refresh_token"])
+	}
+	return rt
+}
+
+// TestIntegration_RefreshFlow_TokenExchangeRefreshSucceedsThenOldTokenRejected は
+// 「token 交換で pair 取得 → 旧 refresh token で refresh 成功（新 pair 取得）→
+// 旧 refresh token で再 refresh が 401 INVALID_REFRESH_TOKEN」の通しケースを検証する。
+// Issue #167 の AC（Req 1.1, 1.2: 新 pair / 旧 token 拒否）に対応する。
+func TestIntegration_RefreshFlow_TokenExchangeRefreshSucceedsThenOldTokenRejected(t *testing.T) {
+	// Arrange: native login → callback → token 交換で初回 refresh token を取得
+	state := newIntegrationState()
+	tokenSvc := &mockNativeTokenExchangeService{}
+	router := createNativeAuthIntegrationRouter(state, tokenSvc)
+	oldRefreshToken := runNativeLoginCallbackAndExchange(t, router)
+
+	// Act 1: 旧 refresh token で refresh 成功（新 pair 取得 / Req 1.1）
+	body := fmt.Sprintf(`{"refresh_token":%q}`, oldRefreshToken)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/refresh", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("refresh 1st status = %d, want %d (Req 1.1)", resp.StatusCode, http.StatusOK)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("refresh 1st Content-Type = %q, want %q", ct, "application/json")
+	}
+	var newTokenBody map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&newTokenBody); err != nil {
+		t.Fatalf("refresh 1st decode body: %v", err)
+	}
+	// 4 フィールドが揃う（Req 1.1, 1.6: token 交換と同形）
+	newAccess, _ := newTokenBody["access_token"].(string)
+	newRefresh, _ := newTokenBody["refresh_token"].(string)
+	if newAccess == "" {
+		t.Error("refresh 1st: access_token is empty")
+	}
+	if newRefresh == "" {
+		t.Error("refresh 1st: refresh_token is empty")
+	}
+	if newTokenBody["token_type"] != "Bearer" {
+		t.Errorf("refresh 1st: token_type = %v, want %q", newTokenBody["token_type"], "Bearer")
+	}
+	if v, _ := newTokenBody["expires_in"].(float64); v != 900 {
+		t.Errorf("refresh 1st: expires_in = %v, want 900", v)
+	}
+	// 新 refresh token は旧と異なる（rotation の本質 / Req 1.2）
+	if newRefresh == oldRefreshToken {
+		t.Errorf("refresh 1st: new refresh_token equals old (rotation must produce different token)")
+	}
+
+	// Act 2: 同じ旧 refresh token で再 refresh → 401 INVALID_REFRESH_TOKEN（Req 1.2 / 2.4）
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/refresh", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	resp = w.Result()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("refresh 2nd with old token status = %d, want %d (Req 1.2 / 2.4 / SERVER.md §1.3)",
+			resp.StatusCode, http.StatusUnauthorized)
+	}
+	var rejectBody map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&rejectBody)
+	if rejectBody["code"] != "INVALID_REFRESH_TOKEN" {
+		t.Errorf("refresh 2nd: code = %v, want %q (Req 2.6 uniform 拒否)",
+			rejectBody["code"], "INVALID_REFRESH_TOKEN")
+	}
+	if rejectBody["category"] != "auth" {
+		t.Errorf("refresh 2nd: category = %v, want %q", rejectBody["category"], "auth")
+	}
+	// 詳細な拒否理由を反射しない（Req 2.6 / NFR 1.3）
+	if msg, _ := rejectBody["message"].(string); strings.Contains(msg, "rotated") || strings.Contains(msg, "expired") || strings.Contains(msg, "revoked") {
+		t.Errorf("refresh 2nd: message %q must not differentiate rejection reasons", msg)
+	}
+
+	// 新 refresh token は依然有効（rotation 後に発行された世代）
+	body2 := fmt.Sprintf(`{"refresh_token":%q}`, newRefresh)
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/refresh", strings.NewReader(body2))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Result().StatusCode != http.StatusOK {
+		t.Errorf("refresh with new token status = %d, want 200 (新 token は有効)",
+			w.Result().StatusCode)
+	}
+}
+
+// TestIntegration_RefreshFlow_UnknownRefreshTokenReturns401 は callback / token 交換を
+// 経由せず未知の refresh token を送ったとき 401 INVALID_REFRESH_TOKEN が返ることを
+// 検証する（Req 2.1, 2.6）。
+func TestIntegration_RefreshFlow_UnknownRefreshTokenReturns401(t *testing.T) {
+	// Arrange: 何も払い出していない状態で refresh だけ呼ぶ
+	state := newIntegrationState()
+	tokenSvc := &mockNativeTokenExchangeService{}
+	router := createNativeAuthIntegrationRouter(state, tokenSvc)
+
+	body := `{"refresh_token":"unknown-refresh-token"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/refresh", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d (Req 2.1)", resp.StatusCode, http.StatusUnauthorized)
+	}
+	var resBody map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&resBody)
+	if resBody["code"] != "INVALID_REFRESH_TOKEN" {
+		t.Errorf("code = %v, want %q (Req 2.6)", resBody["code"], "INVALID_REFRESH_TOKEN")
+	}
+}
