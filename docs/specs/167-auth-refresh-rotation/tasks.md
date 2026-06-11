@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. auth: TokenService.RotateRefreshToken を追加
+- [x] 1. auth: TokenService.RotateRefreshToken を追加
   - `internal/auth/token_service.go` に `ErrInvalidRefreshToken` sentinel を追加し、
     `RefreshTokenStore` interface を `FindByHash` / `MarkRotated` まで拡張
     （`repository.RefreshTokenRepository` が引き続き構造的に充足することを compile-time
@@ -13,7 +13,7 @@
     （既存 #166 ケースは変更しない。モックの interface 拡張追従は可）
   - _Requirements: 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4, 2.6, 2.7, 3.1, NFR 1.1, NFR 1.2, NFR 3.1_
 
-- [ ] 2. handler: Refresh エンドポイントと router 登録
+- [x] 2. handler: Refresh エンドポイントと router 登録
   - `internal/handler/native_auth_handler.go`: `TokenExchangeService` interface に
     `RotateRefreshToken` を追加し、`Refresh` handler を実装（200 / 400 INVALID_REQUEST /
     401 INVALID_REFRESH_TOKEN / 500 を `middleware.WriteErrorResponse` で応答。
@@ -25,7 +25,7 @@
   - _Requirements: 1.1, 1.5, 1.6, 2.5, 2.6, NFR 1.3, NFR 2.1, NFR 2.2_
   - _Depends: 1_
 
-- [ ] 3. 統合テスト: token 交換 → refresh → 旧 token 拒否
+- [x] 3. 統合テスト: token 交換 → refresh → 旧 token 拒否
   - `internal/handler/integration_test.go` に「token 交換で pair 取得 → refresh 成功で
     新 pair 取得 → 旧 refresh token による再 refresh が 401」の通しケースを追加
     （issue AC「old token after rotation」に対応）

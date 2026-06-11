@@ -45,15 +45,22 @@ func (m *mockAuthCodes) MarkUsed(ctx context.Context, id string) error {
 
 // mockRefreshTokens は RefreshTokenStore 最小 IF の record-and-return モック。
 // 永続化された family / token を捕捉して、テストで TokenHash / FamilyID / ExpiresAt
-// の整合を検証する。
+// の整合を検証する。FindByHash / MarkRotated は Issue #167 の rotation で追加された。
 type mockRefreshTokens struct {
 	createFamilyFn func(ctx context.Context, f *model.RefreshTokenFamily) error
 	createTokenFn  func(ctx context.Context, t *model.RefreshToken) error
+	findByHashFn   func(ctx context.Context, tokenHash string) (*model.RefreshToken, error)
+	markRotatedFn  func(ctx context.Context, id string, rotatedAt time.Time) error
 
 	createFamilyCalls int
 	createTokenCalls  int
+	findByHashCalls   int
+	markRotatedCalls  int
 	storedFamily      *model.RefreshTokenFamily
 	storedToken       *model.RefreshToken
+	lastFindHash      string
+	lastMarkID        string
+	lastMarkAt        time.Time
 }
 
 func (m *mockRefreshTokens) CreateFamily(ctx context.Context, f *model.RefreshTokenFamily) error {
@@ -70,6 +77,25 @@ func (m *mockRefreshTokens) CreateToken(ctx context.Context, t *model.RefreshTok
 	m.storedToken = t
 	if m.createTokenFn != nil {
 		return m.createTokenFn(ctx, t)
+	}
+	return nil
+}
+
+func (m *mockRefreshTokens) FindByHash(ctx context.Context, tokenHash string) (*model.RefreshToken, error) {
+	m.findByHashCalls++
+	m.lastFindHash = tokenHash
+	if m.findByHashFn != nil {
+		return m.findByHashFn(ctx, tokenHash)
+	}
+	return nil, nil
+}
+
+func (m *mockRefreshTokens) MarkRotated(ctx context.Context, id string, rotatedAt time.Time) error {
+	m.markRotatedCalls++
+	m.lastMarkID = id
+	m.lastMarkAt = rotatedAt
+	if m.markRotatedFn != nil {
+		return m.markRotatedFn(ctx, id, rotatedAt)
 	}
 	return nil
 }
@@ -464,6 +490,442 @@ func TestExchangeAuthCode_LookupErrorPropagates(t *testing.T) {
 		t.Errorf("pair = %+v, want nil", pair)
 	}
 	if authCodes.markUsedCalls != 0 || refreshTokens.createFamilyCalls != 0 || issuer.issueCalls != 0 {
+		t.Errorf("any downstream call must not occur on lookup error")
+	}
+}
+
+// --- RotateRefreshToken のテスト（Issue #167 / design.md Testing Strategy 1〜7） ---
+
+// newStoredRefreshToken は FindByHash の戻り値として使う有効な RefreshToken の fixture を返す。
+// ExpiresAt は fixedTokenServiceIssuedAt + 7 日（30 日 TTL の中盤）で「有効」を意味する。
+// RotatedAt / RevokedAt は nil。
+func newStoredRefreshToken(userID string) *model.RefreshToken {
+	return &model.RefreshToken{
+		ID:        "refresh-token-id-1",
+		FamilyID:  "family-id-1",
+		UserID:    userID,
+		TokenHash: HashNativeSecret("plain-refresh-token"),
+		ExpiresAt: fixedTokenServiceIssuedAt.Add(7 * 24 * time.Hour),
+	}
+}
+
+// TestRotateRefreshToken_Success は rotation 成功時に以下を検証する（Testing Strategy 1 /
+// Req 1.2, 1.3, 1.4）。
+//   - TokenPair の 3 値（AccessToken / RefreshToken / ExpiresIn=900）
+//   - FindByHash が plain refresh token の hash で 1 回呼ばれる
+//   - MarkRotated が旧 token の ID と now で 1 回呼ばれる
+//   - CreateToken の FamilyID / UserID が旧 token と同一
+//   - 新 token の ExpiresAt = now + 30d（スライディング延長）
+//   - 新 token の TokenHash が新平文の hash と一致する
+func TestRotateRefreshToken_Success(t *testing.T) {
+	// Arrange
+	const userID = "user-test-1"
+	svc, _, refreshTokens, issuer := newServiceWithMocks(t)
+	stored := newStoredRefreshToken(userID)
+	refreshTokens.findByHashFn = func(ctx context.Context, hash string) (*model.RefreshToken, error) {
+		return stored, nil
+	}
+
+	// Act
+	pair, err := svc.RotateRefreshToken(context.Background(), "plain-refresh-token")
+
+	// Assert: 成功で 3 値が揃う（Req 1.1 / 1.6 は handler 層のテストで担保）
+	if err != nil {
+		t.Fatalf("RotateRefreshToken returned error: %v", err)
+	}
+	if pair == nil {
+		t.Fatal("returned TokenPair is nil")
+	}
+	if pair.AccessToken == "" {
+		t.Error("AccessToken is empty")
+	}
+	if pair.RefreshToken == "" {
+		t.Error("RefreshToken is empty")
+	}
+	if pair.ExpiresIn != 900 {
+		t.Errorf("ExpiresIn = %d, want 900 (Req 1.4 / AccessTokenTTL=15min)", pair.ExpiresIn)
+	}
+
+	// Assert: FindByHash が plain の hash で 1 回呼ばれる
+	wantTokenHash := HashNativeSecret("plain-refresh-token")
+	if refreshTokens.findByHashCalls != 1 {
+		t.Errorf("FindByHash calls = %d, want 1", refreshTokens.findByHashCalls)
+	}
+	if refreshTokens.lastFindHash != wantTokenHash {
+		t.Errorf("FindByHash called with hash=%q, want %q (hash 一致照合)",
+			refreshTokens.lastFindHash, wantTokenHash)
+	}
+
+	// Assert: MarkRotated が旧 token の ID と固定 now で 1 回呼ばれる（Req 1.2）
+	if refreshTokens.markRotatedCalls != 1 {
+		t.Errorf("MarkRotated calls = %d, want 1", refreshTokens.markRotatedCalls)
+	}
+	if refreshTokens.lastMarkID != stored.ID {
+		t.Errorf("MarkRotated called with id=%q, want %q", refreshTokens.lastMarkID, stored.ID)
+	}
+	if !refreshTokens.lastMarkAt.Equal(fixedTokenServiceIssuedAt) {
+		t.Errorf("MarkRotated rotatedAt = %v, want %v", refreshTokens.lastMarkAt, fixedTokenServiceIssuedAt)
+	}
+
+	// Assert: CreateFamily は呼ばれない（同一 family に new token を発行する / Req 1.3）
+	if refreshTokens.createFamilyCalls != 0 {
+		t.Errorf("CreateFamily calls = %d, want 0 (rotation は同一 family / Req 1.3)",
+			refreshTokens.createFamilyCalls)
+	}
+
+	// Assert: CreateToken が 1 回呼ばれ、FamilyID / UserID が旧 token と同一（Req 1.3）
+	if refreshTokens.createTokenCalls != 1 {
+		t.Errorf("CreateToken calls = %d, want 1", refreshTokens.createTokenCalls)
+	}
+	if refreshTokens.storedToken.FamilyID != stored.FamilyID {
+		t.Errorf("new token.FamilyID = %q, want %q (= old token.FamilyID / Req 1.3)",
+			refreshTokens.storedToken.FamilyID, stored.FamilyID)
+	}
+	if refreshTokens.storedToken.UserID != userID {
+		t.Errorf("new token.UserID = %q, want %q", refreshTokens.storedToken.UserID, userID)
+	}
+
+	// Assert: 新 token の TokenHash が新平文の hash と一致する（NFR 1.2）
+	if got := HashNativeSecret(pair.RefreshToken); got != refreshTokens.storedToken.TokenHash {
+		t.Errorf("new token.TokenHash mismatch with HashNativeSecret(plain RefreshToken)")
+	}
+	// Assert: 平文がそのまま保存されていないこと（NFR 1.2）
+	if refreshTokens.storedToken.TokenHash == pair.RefreshToken {
+		t.Error("new token.TokenHash equals plain RefreshToken (must store only hash)")
+	}
+	// Assert: 旧 token とは異なる token が生成されている（rotation の本質）
+	if pair.RefreshToken == "plain-refresh-token" {
+		t.Error("new RefreshToken equals old plain (rotation must produce a new token)")
+	}
+	if refreshTokens.storedToken.TokenHash == stored.TokenHash {
+		t.Error("new token.TokenHash equals old token.TokenHash (rotation must change hash)")
+	}
+
+	// Assert: 新 token の ExpiresAt = now + 30d（スライディング延長 / Req 1.4）
+	wantExpiresAt := fixedTokenServiceIssuedAt.Add(RefreshTokenTTL)
+	if !refreshTokens.storedToken.ExpiresAt.Equal(wantExpiresAt) {
+		t.Errorf("new token.ExpiresAt = %v, want %v (= now + 30d / Req 1.4)",
+			refreshTokens.storedToken.ExpiresAt, wantExpiresAt)
+	}
+
+	// Assert: 新 token の RotatedAt / RevokedAt は nil（新世代として有効）
+	if refreshTokens.storedToken.RotatedAt != nil {
+		t.Errorf("new token.RotatedAt = %v, want nil (新世代は未 rotate)", refreshTokens.storedToken.RotatedAt)
+	}
+	if refreshTokens.storedToken.RevokedAt != nil {
+		t.Errorf("new token.RevokedAt = %v, want nil (新世代は未 revoke)", refreshTokens.storedToken.RevokedAt)
+	}
+
+	// Assert: issuer が当該 userID で呼ばれる
+	if issuer.issueCalls != 1 {
+		t.Errorf("IssueAccessToken calls = %d, want 1", issuer.issueCalls)
+	}
+	if issuer.lastUserID != userID {
+		t.Errorf("IssueAccessToken called with userID=%q, want %q", issuer.lastUserID, userID)
+	}
+}
+
+// TestRotateRefreshToken_NotFound は FindByHash が nil を返したとき
+// ErrInvalidRefreshToken を返し、MarkRotated / CreateToken に進まないことを検証する
+// （Testing Strategy 2 / Req 2.1, 2.6, 2.7）。
+func TestRotateRefreshToken_NotFound(t *testing.T) {
+	// Arrange
+	svc, _, refreshTokens, issuer := newServiceWithMocks(t)
+	refreshTokens.findByHashFn = func(ctx context.Context, hash string) (*model.RefreshToken, error) {
+		return nil, nil
+	}
+
+	// Act
+	pair, err := svc.RotateRefreshToken(context.Background(), "unknown-token")
+
+	// Assert
+	if !errors.Is(err, ErrInvalidRefreshToken) {
+		t.Errorf("err = %v, want ErrInvalidRefreshToken (Req 2.1 / 2.6)", err)
+	}
+	if pair != nil {
+		t.Errorf("pair = %+v, want nil", pair)
+	}
+	if refreshTokens.markRotatedCalls != 0 {
+		t.Errorf("MarkRotated calls = %d, want 0 (token 不明は MarkRotated 未到達)",
+			refreshTokens.markRotatedCalls)
+	}
+	// Req 2.7: 拒否時に新 token を永続化しない
+	if refreshTokens.createTokenCalls != 0 {
+		t.Errorf("CreateToken calls = %d, want 0 (Req 2.7)", refreshTokens.createTokenCalls)
+	}
+	if issuer.issueCalls != 0 {
+		t.Errorf("IssueAccessToken calls = %d, want 0", issuer.issueCalls)
+	}
+}
+
+// TestRotateRefreshToken_Expired は token の ExpiresAt が now 以下のとき
+// ErrInvalidRefreshToken を返し、MarkRotated に進まないことを検証する
+// （Testing Strategy 3 / Req 2.2, 2.6, 2.7）。
+func TestRotateRefreshToken_Expired(t *testing.T) {
+	cases := []struct {
+		name      string
+		expiresAt time.Time
+	}{
+		{
+			name:      "ExpiresAt < now のとき拒否",
+			expiresAt: fixedTokenServiceIssuedAt.Add(-1 * time.Hour),
+		},
+		{
+			name:      "ExpiresAt == now のとき拒否（境界値: After(now) でなければ無効）",
+			expiresAt: fixedTokenServiceIssuedAt,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			svc, _, refreshTokens, issuer := newServiceWithMocks(t)
+			stored := newStoredRefreshToken("user-test-1")
+			stored.ExpiresAt = tc.expiresAt
+			refreshTokens.findByHashFn = func(ctx context.Context, hash string) (*model.RefreshToken, error) {
+				return stored, nil
+			}
+
+			// Act
+			pair, err := svc.RotateRefreshToken(context.Background(), "plain-refresh-token")
+
+			// Assert
+			if !errors.Is(err, ErrInvalidRefreshToken) {
+				t.Errorf("err = %v, want ErrInvalidRefreshToken (Req 2.2 / 2.6)", err)
+			}
+			if pair != nil {
+				t.Errorf("pair = %+v, want nil", pair)
+			}
+			if refreshTokens.markRotatedCalls != 0 {
+				t.Errorf("MarkRotated calls = %d, want 0 (期限切れは MarkRotated 未到達)",
+					refreshTokens.markRotatedCalls)
+			}
+			if refreshTokens.createTokenCalls != 0 {
+				t.Errorf("CreateToken calls = %d, want 0 (Req 2.7)", refreshTokens.createTokenCalls)
+			}
+			if issuer.issueCalls != 0 {
+				t.Errorf("IssueAccessToken calls = %d, want 0", issuer.issueCalls)
+			}
+		})
+	}
+}
+
+// TestRotateRefreshToken_Revoked は RevokedAt が set 済みの token に対して
+// ErrInvalidRefreshToken を返すことを検証する（Testing Strategy 4 / Req 2.3, 2.6, 2.7）。
+func TestRotateRefreshToken_Revoked(t *testing.T) {
+	// Arrange
+	svc, _, refreshTokens, issuer := newServiceWithMocks(t)
+	stored := newStoredRefreshToken("user-test-1")
+	revokedAt := fixedTokenServiceIssuedAt.Add(-30 * time.Minute)
+	stored.RevokedAt = &revokedAt
+	refreshTokens.findByHashFn = func(ctx context.Context, hash string) (*model.RefreshToken, error) {
+		return stored, nil
+	}
+
+	// Act
+	pair, err := svc.RotateRefreshToken(context.Background(), "plain-refresh-token")
+
+	// Assert
+	if !errors.Is(err, ErrInvalidRefreshToken) {
+		t.Errorf("err = %v, want ErrInvalidRefreshToken (Req 2.3 / 2.6)", err)
+	}
+	if pair != nil {
+		t.Errorf("pair = %+v, want nil", pair)
+	}
+	if refreshTokens.markRotatedCalls != 0 {
+		t.Errorf("MarkRotated calls = %d, want 0 (失効済みは MarkRotated 未到達)",
+			refreshTokens.markRotatedCalls)
+	}
+	if refreshTokens.createTokenCalls != 0 {
+		t.Errorf("CreateToken calls = %d, want 0 (Req 2.7)", refreshTokens.createTokenCalls)
+	}
+	if issuer.issueCalls != 0 {
+		t.Errorf("IssueAccessToken calls = %d, want 0", issuer.issueCalls)
+	}
+}
+
+// TestRotateRefreshToken_AlreadyRotated は RotatedAt が set 済みの token（再利用）に対して
+// ErrInvalidRefreshToken を返し、MarkRotated / CreateToken に進まないことを検証する
+// （Testing Strategy 5 / Req 2.4, 2.6, 2.7）。
+// #168 が family 失効へ昇格するまでは単純拒否のみ。
+func TestRotateRefreshToken_AlreadyRotated(t *testing.T) {
+	// Arrange
+	svc, _, refreshTokens, issuer := newServiceWithMocks(t)
+	stored := newStoredRefreshToken("user-test-1")
+	rotatedAt := fixedTokenServiceIssuedAt.Add(-1 * time.Hour)
+	stored.RotatedAt = &rotatedAt
+	refreshTokens.findByHashFn = func(ctx context.Context, hash string) (*model.RefreshToken, error) {
+		return stored, nil
+	}
+
+	// Act
+	pair, err := svc.RotateRefreshToken(context.Background(), "plain-refresh-token")
+
+	// Assert
+	if !errors.Is(err, ErrInvalidRefreshToken) {
+		t.Errorf("err = %v, want ErrInvalidRefreshToken (Req 2.4 / 2.6)", err)
+	}
+	if pair != nil {
+		t.Errorf("pair = %+v, want nil", pair)
+	}
+	// MarkRotated は呼ばれない（事前判定で拒否）
+	if refreshTokens.markRotatedCalls != 0 {
+		t.Errorf("MarkRotated calls = %d, want 0 (再利用は事前判定で拒否)",
+			refreshTokens.markRotatedCalls)
+	}
+	// Req 2.7: 新 token は永続化されない
+	if refreshTokens.createTokenCalls != 0 {
+		t.Errorf("CreateToken calls = %d, want 0 (再利用時は新 token 未作成 / Req 2.7)",
+			refreshTokens.createTokenCalls)
+	}
+	if issuer.issueCalls != 0 {
+		t.Errorf("IssueAccessToken calls = %d, want 0", issuer.issueCalls)
+	}
+}
+
+// TestRotateRefreshToken_MarkRotatedRaceLoser は並行 rotation race の敗者
+// （MarkRotated が ErrRefreshTokenAlreadyRotated を返す）に対して
+// ErrInvalidRefreshToken を返し、新 token を作成しないことを検証する
+// （Testing Strategy 6 / Req 3.1: 高々 1 件のみ成功）。
+//
+// 事前判定（RotatedAt nil）を通過した後で、atomic な MarkRotated が race の敗者を
+// 検出する正本ゲートの挙動を検証する。
+func TestRotateRefreshToken_MarkRotatedRaceLoser(t *testing.T) {
+	// Arrange
+	svc, _, refreshTokens, issuer := newServiceWithMocks(t)
+	stored := newStoredRefreshToken("user-test-1")
+	refreshTokens.findByHashFn = func(ctx context.Context, hash string) (*model.RefreshToken, error) {
+		return stored, nil
+	}
+	refreshTokens.markRotatedFn = func(ctx context.Context, id string, rotatedAt time.Time) error {
+		// 並行 rotation の敗者として ErrRefreshTokenAlreadyRotated を返す
+		return repository.ErrRefreshTokenAlreadyRotated
+	}
+
+	// Act
+	pair, err := svc.RotateRefreshToken(context.Background(), "plain-refresh-token")
+
+	// Assert
+	if !errors.Is(err, ErrInvalidRefreshToken) {
+		t.Errorf("err = %v, want ErrInvalidRefreshToken (Req 3.1 race 敗者 / Req 2.6)", err)
+	}
+	if pair != nil {
+		t.Errorf("pair = %+v, want nil", pair)
+	}
+	// MarkRotated は呼ばれる（race の敗者を検出する正本ゲート）
+	if refreshTokens.markRotatedCalls != 1 {
+		t.Errorf("MarkRotated calls = %d, want 1 (race ゲートに到達する)",
+			refreshTokens.markRotatedCalls)
+	}
+	// Req 3.1 + Req 2.7: 敗者は新 token を作成しない（= 高々 1 件のみ成功）
+	if refreshTokens.createTokenCalls != 0 {
+		t.Errorf("CreateToken calls = %d, want 0 (race 敗者は新 token 未作成 / Req 3.1)",
+			refreshTokens.createTokenCalls)
+	}
+	if issuer.issueCalls != 0 {
+		t.Errorf("IssueAccessToken calls = %d, want 0", issuer.issueCalls)
+	}
+}
+
+// TestRotateRefreshToken_CreateTokenFailure は新 token 永続化が失敗したとき、
+// ErrInvalidRefreshToken に正規化されず（インフラ起因の 500 として上層に渡す）に
+// 上層に伝播することを検証する（Testing Strategy 7）。
+// 旧 token は MarkRotated 済み（Open Questions: 安全側に倒して燃やす）。
+func TestRotateRefreshToken_CreateTokenFailure(t *testing.T) {
+	// Arrange
+	svc, _, refreshTokens, issuer := newServiceWithMocks(t)
+	stored := newStoredRefreshToken("user-test-1")
+	refreshTokens.findByHashFn = func(ctx context.Context, hash string) (*model.RefreshToken, error) {
+		return stored, nil
+	}
+	wantErr := errors.New("db unavailable")
+	refreshTokens.createTokenFn = func(ctx context.Context, t *model.RefreshToken) error {
+		return wantErr
+	}
+
+	// Act
+	pair, err := svc.RotateRefreshToken(context.Background(), "plain-refresh-token")
+
+	// Assert
+	if err == nil {
+		t.Fatal("err = nil, want non-nil")
+	}
+	if errors.Is(err, ErrInvalidRefreshToken) {
+		t.Errorf("err = %v, must not be ErrInvalidRefreshToken (インフラ起因の 500 として上層に渡す)", err)
+	}
+	if !errors.Is(err, wantErr) {
+		t.Errorf("err = %v, want wrap of %v", err, wantErr)
+	}
+	if pair != nil {
+		t.Errorf("pair = %+v, want nil", pair)
+	}
+	// MarkRotated 済み（旧 token は消費済み / Open Questions）
+	if refreshTokens.markRotatedCalls != 1 {
+		t.Errorf("MarkRotated calls = %d, want 1 (旧 token は MarkRotated 済み)",
+			refreshTokens.markRotatedCalls)
+	}
+	// CreateToken は呼ばれたが失敗した
+	if refreshTokens.createTokenCalls != 1 {
+		t.Errorf("CreateToken calls = %d, want 1", refreshTokens.createTokenCalls)
+	}
+	// access token は発行されない（CreateToken 失敗で打ち切り）
+	if issuer.issueCalls != 0 {
+		t.Errorf("IssueAccessToken calls = %d, want 0 (CreateToken 失敗で打ち切り)",
+			issuer.issueCalls)
+	}
+}
+
+// TestRotateRefreshToken_DoesNotLeakPlainSecretsInError は ErrInvalidRefreshToken の
+// メッセージに平文 refresh token が含まれないことを保証する（NFR 1.2 / 1.3）。
+func TestRotateRefreshToken_DoesNotLeakPlainSecretsInError(t *testing.T) {
+	// Arrange
+	svc, _, refreshTokens, _ := newServiceWithMocks(t)
+	refreshTokens.findByHashFn = func(ctx context.Context, hash string) (*model.RefreshToken, error) {
+		return nil, nil
+	}
+
+	const secretToken = "very-secret-refresh-token-plain-value-12345"
+
+	// Act
+	_, err := svc.RotateRefreshToken(context.Background(), secretToken)
+
+	// Assert: ErrInvalidRefreshToken のメッセージに平文が含まれないこと
+	if !errors.Is(err, ErrInvalidRefreshToken) {
+		t.Fatalf("err = %v, want ErrInvalidRefreshToken", err)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, secretToken) {
+		t.Errorf("error message %q contains plain refresh token (NFR 1.2 / 1.3)", msg)
+	}
+}
+
+// TestRotateRefreshToken_LookupErrorPropagates は FindByHash が DB エラーを返したとき、
+// ErrInvalidRefreshToken に正規化されず（インフラ起因として 500 に渡す）に上層に伝播する
+// ことを検証する。
+func TestRotateRefreshToken_LookupErrorPropagates(t *testing.T) {
+	// Arrange
+	svc, _, refreshTokens, issuer := newServiceWithMocks(t)
+	wantErr := fmt.Errorf("connection refused")
+	refreshTokens.findByHashFn = func(ctx context.Context, hash string) (*model.RefreshToken, error) {
+		return nil, wantErr
+	}
+
+	// Act
+	pair, err := svc.RotateRefreshToken(context.Background(), "plain-refresh-token")
+
+	// Assert
+	if err == nil {
+		t.Fatal("err = nil, want non-nil")
+	}
+	if errors.Is(err, ErrInvalidRefreshToken) {
+		t.Errorf("err = %v, must not be ErrInvalidRefreshToken (DB 障害は上層 500)", err)
+	}
+	if !errors.Is(err, wantErr) {
+		t.Errorf("err = %v, want wrap of %v", err, wantErr)
+	}
+	if pair != nil {
+		t.Errorf("pair = %+v, want nil", pair)
+	}
+	if refreshTokens.markRotatedCalls != 0 || refreshTokens.createTokenCalls != 0 || issuer.issueCalls != 0 {
 		t.Errorf("any downstream call must not occur on lookup error")
 	}
 }
