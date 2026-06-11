@@ -71,6 +71,18 @@ type Config struct {
 	// MetricsPort は worker プロセスがメトリクスを公開する listener のポート。
 	// METRICS_PORT から読み込む。既定値は "9090"。
 	MetricsPort string
+
+	// Native Auth (Issue #166)
+	// NativeAuthJWTSecret は POST /api/auth/token が発行する access token (JWT) の
+	// 署名鍵（HS256 対称鍵）。NATIVE_AUTH_JWT_SECRET から読み込む。
+	// 未設定（空文字）の場合は POST /api/auth/token をルーティングに登録せず、
+	// 既存デプロイの起動・挙動を変更しない（fail-closed、Req 3.2 / NFR 2.2）。
+	// 平文をログに残さないこと（NFR 1.2）。
+	NativeAuthJWTSecret string
+	// NativeAuthJWTKid は access token (JWT) ヘッダに含める鍵識別子（kid）。
+	// NATIVE_AUTH_JWT_KID から読み込み、未設定時は "v1" を採用する（Req 3.5）。
+	// 将来の鍵ローテーションに備えて識別子を含めるためだけのもので、ローテーション実装は別 Issue。
+	NativeAuthJWTKid string
 }
 
 // Load は環境変数からConfigを読み込む。
@@ -136,6 +148,10 @@ func Load() (*Config, error) {
 	cfg.HSTSEnabled = getEnvBool("HSTS_ENABLED", false)
 	cfg.TrustedCIDRs = parseCommaSeparated(os.Getenv("METRICS_TRUSTED_CIDRS"))
 	cfg.MetricsPort = getEnvString("METRICS_PORT", "9090")
+
+	// Native Auth (Issue #166): いずれも任意。未設定なら token 交換が無効になるだけで起動継続。
+	cfg.NativeAuthJWTSecret = os.Getenv("NATIVE_AUTH_JWT_SECRET")
+	cfg.NativeAuthJWTKid = getEnvString("NATIVE_AUTH_JWT_KID", "v1")
 
 	return cfg, nil
 }
