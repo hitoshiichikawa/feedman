@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. auth: TokenService.RotateRefreshToken を追加
+- [x] 1. auth: TokenService.RotateRefreshToken を追加
   - `internal/auth/token_service.go` に `ErrInvalidRefreshToken` sentinel を追加し、
     `RefreshTokenStore` interface を `FindByHash` / `MarkRotated` まで拡張
     （`repository.RefreshTokenRepository` が引き続き構造的に充足することを compile-time
