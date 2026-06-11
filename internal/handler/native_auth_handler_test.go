@@ -14,15 +14,19 @@ import (
 )
 
 // mockTokenExchangeService は TokenExchangeService 最小 IF の record-and-return モック。
-// rotateFn / lastRefreshToken / rotateCalls は Issue #167 で追加された。
+// rotateFn / lastRefreshToken / rotateCalls は Issue #167 で、revokeFn / revokeCalls /
+// lastRevokeToken は Issue #168 で追加された。
 type mockTokenExchangeService struct {
 	exchangeFn       func(ctx context.Context, authCode, codeVerifier string) (*auth.TokenPair, error)
 	rotateFn         func(ctx context.Context, refreshToken string) (*auth.TokenPair, error)
+	revokeFn         func(ctx context.Context, refreshToken string) error
 	callCount        int
 	rotateCalls      int
+	revokeCalls      int
 	lastAuthCode     string
 	lastVerifier     string
 	lastRefreshToken string
+	lastRevokeToken  string
 }
 
 func (m *mockTokenExchangeService) ExchangeAuthCode(ctx context.Context, authCode, codeVerifier string) (*auth.TokenPair, error) {
@@ -42,6 +46,15 @@ func (m *mockTokenExchangeService) RotateRefreshToken(ctx context.Context, refre
 		return m.rotateFn(ctx, refreshToken)
 	}
 	return nil, fmt.Errorf("not configured")
+}
+
+func (m *mockTokenExchangeService) RevokeRefreshToken(ctx context.Context, refreshToken string) error {
+	m.revokeCalls++
+	m.lastRevokeToken = refreshToken
+	if m.revokeFn != nil {
+		return m.revokeFn(ctx, refreshToken)
+	}
+	return nil
 }
 
 // newRequest は handler 単体テスト用の JSON POST リクエストを生成する。
@@ -537,5 +550,179 @@ func TestNativeAuthHandler_Refresh_UnknownFieldRejected(t *testing.T) {
 	}
 	if svc.rotateCalls != 0 {
 		t.Errorf("service called %d times, want 0 (未知フィールドは service 到達前に拒否)", svc.rotateCalls)
+	}
+}
+
+// --- Revoke のテスト（Issue #168 / design.md Testing Strategy 8） ---
+
+// newRevokeRequest は Revoke handler 単体テスト用の JSON POST リクエストを生成する。
+func newRevokeRequest(body string) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/revoke", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
+// TestNativeAuthHandler_Revoke_Success は service が成功した場合に 204 + ボディなしを
+// 返すことを検証する（Req 2.1）。
+func TestNativeAuthHandler_Revoke_Success(t *testing.T) {
+	// Arrange
+	svc := &mockTokenExchangeService{}
+	h := NewNativeAuthHandler(svc)
+	req := newRevokeRequest(`{"refresh_token":"plain-refresh-token"}`)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Revoke(w, req)
+
+	// Assert: 204 / ボディなし
+	resp := w.Result()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d (Req 2.1)", resp.StatusCode, http.StatusNoContent)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("body = %q, want empty (204 はボディなし)", w.Body.String())
+	}
+
+	// Assert: service が plain な値で呼ばれた（hash 化は service 内部で行う）
+	if svc.revokeCalls != 1 {
+		t.Errorf("service.RevokeRefreshToken called %d times, want 1", svc.revokeCalls)
+	}
+	if svc.lastRevokeToken != "plain-refresh-token" {
+		t.Errorf("service.lastRevokeToken = %q, want %q",
+			svc.lastRevokeToken, "plain-refresh-token")
+	}
+}
+
+// TestNativeAuthHandler_Revoke_UnknownTokenAlso204 は不明 token（service が no-op nil を
+// 返す）でも既知 token と区別できない同一の 204 を返すことを検証する
+// （Req 2.2 / NFR 1.2: 冪等・列挙オラクルなし）。
+func TestNativeAuthHandler_Revoke_UnknownTokenAlso204(t *testing.T) {
+	// Arrange: service は不明 token に対して nil（no-op 成功）を返す
+	svc := &mockTokenExchangeService{
+		revokeFn: func(ctx context.Context, refreshToken string) error {
+			return nil
+		},
+	}
+	h := NewNativeAuthHandler(svc)
+	req := newRevokeRequest(`{"refresh_token":"unknown-token"}`)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Revoke(w, req)
+
+	// Assert: 既知 token の場合と同一の 204 + ボディなし（区別できない）
+	resp := w.Result()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d (Req 2.2: 不明 token でも同一応答)", resp.StatusCode, http.StatusNoContent)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("body = %q, want empty (NFR 1.2: 存在有無を推測させない)", w.Body.String())
+	}
+}
+
+// TestNativeAuthHandler_Revoke_InvalidJSON は不正 JSON ボディに対して
+// 400 INVALID_REQUEST を返し、service に到達しないことを検証する（Req 2.5）。
+func TestNativeAuthHandler_Revoke_InvalidJSON(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "壊れた JSON", body: `{"refresh_token":`},
+		{name: "JSON ではない文字列", body: `not-json`},
+		{name: "空ボディ", body: ``},
+		{name: "未知フィールド", body: `{"refresh_token":"x","extra":"y"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			svc := &mockTokenExchangeService{}
+			h := NewNativeAuthHandler(svc)
+			req := newRevokeRequest(tc.body)
+			w := httptest.NewRecorder()
+
+			// Act
+			h.Revoke(w, req)
+
+			// Assert
+			resp := w.Result()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d (Req 2.5)", resp.StatusCode, http.StatusBadRequest)
+			}
+			var body map[string]any
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			if body["code"] != "INVALID_REQUEST" {
+				t.Errorf("code = %v, want %q", body["code"], "INVALID_REQUEST")
+			}
+			if svc.revokeCalls != 0 {
+				t.Errorf("service called %d times, want 0 (入力不正は service 到達前に拒否)", svc.revokeCalls)
+			}
+		})
+	}
+}
+
+// TestNativeAuthHandler_Revoke_MissingField は refresh_token 欠落（または空文字）に対して
+// 400 INVALID_REQUEST を返すことを検証する（Req 2.5 / 境界値: 空入力）。
+func TestNativeAuthHandler_Revoke_MissingField(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "refresh_token フィールドなし", body: `{}`},
+		{name: "refresh_token が空文字", body: `{"refresh_token":""}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			svc := &mockTokenExchangeService{}
+			h := NewNativeAuthHandler(svc)
+			req := newRevokeRequest(tc.body)
+			w := httptest.NewRecorder()
+
+			// Act
+			h.Revoke(w, req)
+
+			// Assert
+			resp := w.Result()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d (Req 2.5)", resp.StatusCode, http.StatusBadRequest)
+			}
+			if svc.revokeCalls != 0 {
+				t.Errorf("service called %d times, want 0", svc.revokeCalls)
+			}
+		})
+	}
+}
+
+// TestNativeAuthHandler_Revoke_InternalError は service が infra エラーを返した場合に
+// 500 INTERNAL_ERROR を返し、内部詳細を反射しないことを検証する（NFR 1.3）。
+func TestNativeAuthHandler_Revoke_InternalError(t *testing.T) {
+	// Arrange
+	svc := &mockTokenExchangeService{
+		revokeFn: func(ctx context.Context, refreshToken string) error {
+			return errors.New("db connection refused")
+		},
+	}
+	h := NewNativeAuthHandler(svc)
+	req := newRevokeRequest(`{"refresh_token":"x"}`)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Revoke(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusInternalServerError)
+	}
+	var body map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if body["code"] != "INTERNAL_ERROR" {
+		t.Errorf("code = %v, want %q", body["code"], "INTERNAL_ERROR")
+	}
+	// 内部詳細を反射しない（NFR 1.3）
+	if msg, _ := body["message"].(string); strings.Contains(msg, "db connection refused") {
+		t.Errorf("message %q leaks internal error detail (NFR 1.3)", msg)
 	}
 }

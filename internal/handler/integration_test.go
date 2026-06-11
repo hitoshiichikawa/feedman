@@ -162,6 +162,12 @@ func (m *mockNativeTokenExchangeService) RotateRefreshToken(ctx context.Context,
 	}, nil
 }
 
+// RevokeRefreshToken は TokenExchangeService の interface 追従（Issue #168 task 2）。
+// revoke の意味論（family 失効）の simulate と通しシナリオは task 3 で実装する。
+func (m *mockNativeTokenExchangeService) RevokeRefreshToken(ctx context.Context, refreshToken string) error {
+	return nil
+}
+
 // createNativeAuthIntegrationRouter は native auth 系統（login / callback / token 交換）の
 // 通し検証用に、token 交換 service を stateful mock として注入した router を返す。
 // 既存 createIntegrationRouter は固定 mock の listItems などに依存しているため、ここでは

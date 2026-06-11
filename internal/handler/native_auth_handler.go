@@ -15,11 +15,13 @@ import (
 // TokenExchangeService は NativeAuthHandler が必要とする最小サービス IF。
 // auth.TokenService が構造的に充足する（interface segregation）。
 //
-// RotateRefreshToken は Issue #167 で追加された。Token / Refresh handler のいずれも
-// auth.TokenService の各メソッドを呼ぶだけで、handler 層はビジネスロジックを持たない。
+// RotateRefreshToken は Issue #167 で、RevokeRefreshToken は Issue #168 で追加された。
+// Token / Refresh / Revoke handler のいずれも auth.TokenService の各メソッドを呼ぶだけで、
+// handler 層はビジネスロジックを持たない。
 type TokenExchangeService interface {
 	ExchangeAuthCode(ctx context.Context, authCode, codeVerifier string) (*auth.TokenPair, error)
 	RotateRefreshToken(ctx context.Context, refreshToken string) (*auth.TokenPair, error)
+	RevokeRefreshToken(ctx context.Context, refreshToken string) error
 }
 
 // NativeAuthHandler は POST /api/auth/token を処理する HTTP ハンドラ（Issue #166）。
@@ -199,4 +201,45 @@ func invalidRefreshTokenError() *model.APIError {
 		Category: "auth",
 		Action:   "ログインからやり直してください。",
 	}
+}
+
+// Revoke は POST /api/auth/revoke を処理する（Issue #168）。
+//
+//   - 204: 失効成功または対象不明（ボディなし）。token の存在有無・状態を区別しない
+//     （Req 2.1, 2.2 / NFR 1.2: 冪等・列挙オラクルなし）。
+//   - 400 INVALID_REQUEST: JSON 不正・必須フィールド欠落（Req 2.5）
+//   - 500 INTERNAL_ERROR:  infra エラー（DB 障害など、NFR 1.3）
+//
+// 認証不要グループに登録されるため、セッション / Bearer なしで呼び出される
+// （Req 2.4: refresh token の所持自体を失効権限とみなす。requirements.md Open
+// Questions / RFC 7009 §2.1 の public client 慣行）。
+// リクエストボディは refresh と同一形式（refreshRequest を共用）。
+func (h *NativeAuthHandler) Revoke(w http.ResponseWriter, r *http.Request) {
+	// JSON 不正・必須フィールド欠落は 400 INVALID_REQUEST に合流する。
+	// ボディ上限超過（MaxBytesReader）も json.Decode のエラーとしてここで合流する。
+	var req refreshRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		// クライアント入力値・パーサ詳細はクライアントへ反射しない（NFR 1.3）。
+		slog.Info("revoke rejected: invalid request body")
+		middleware.WriteErrorResponse(w, http.StatusBadRequest, invalidRefreshRequestError())
+		return
+	}
+	if req.RefreshToken == "" {
+		slog.Info("revoke rejected: missing refresh_token")
+		middleware.WriteErrorResponse(w, http.StatusBadRequest, invalidRefreshRequestError())
+		return
+	}
+
+	if err := h.svc.RevokeRefreshToken(r.Context(), req.RefreshToken); err != nil {
+		// infra 起因（DB 障害）のみここに到達する（不明 token は service が nil を返す）。
+		// 詳細は slog のみ、応答は固定メッセージ（NFR 1.3）。
+		slog.Error("revoke failed", slog.String("error", err.Error()))
+		middleware.WriteInternalServerError(w)
+		return
+	}
+
+	// 失効成功・対象不明のいずれも同一の 204（ボディなし / Req 2.2 / NFR 1.2）。
+	w.WriteHeader(http.StatusNoContent)
 }
