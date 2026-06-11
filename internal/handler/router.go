@@ -61,7 +61,8 @@ type RouterDeps struct {
 	// nil の場合は登録せず、既存ルーティングを完全に不変に保つ（後方互換）。
 	MetricsHandler http.Handler
 	// MetricsMiddleware は /metrics の前段に重ねるミドルウェア（信頼 CIDR 制限など）。
-	// nil の場合は素通し（制限なし）として扱う。MetricsHandler が nil のときは参照しない。
+	// MetricsHandler が非 nil でも MetricsMiddleware が nil の場合は、無防備な公開を
+	// 避けるため /metrics を登録しない（fail-closed）。MetricsHandler が nil のときは参照しない。
 	MetricsMiddleware func(http.Handler) http.Handler
 
 	// 認証
@@ -181,15 +182,16 @@ func NewRouter(deps *RouterDeps) http.Handler {
 		})
 
 		// メトリクス公開エンドポイント（任意）。
-		// MetricsHandler が非 nil のときのみ登録し、前段に MetricsMiddleware（信頼 CIDR 制限）を
-		// 重ねる。MetricsHandler が nil の場合は登録せず既存ルーティングを完全に不変に保つ（後方互換）。
+		// MetricsHandler が非 nil かつ MetricsMiddleware も非 nil のときのみ登録し、前段に
+		// MetricsMiddleware（信頼 CIDR 制限）を重ねる。MetricsMiddleware が nil の場合は
+		// 無防備な公開を避けるため登録しない（fail-closed）。MetricsHandler が nil の場合も
+		// 登録せず既存ルーティングを完全に不変に保つ（後方互換）。
 		if deps.MetricsHandler != nil {
-			mw := deps.MetricsMiddleware
-			if mw == nil {
-				// ミドルウェア未指定時は素通しとして扱い、chi の With(nil) panic を避ける。
-				mw = func(next http.Handler) http.Handler { return next }
+			if deps.MetricsMiddleware != nil {
+				r.With(deps.MetricsMiddleware).Handle("/metrics", deps.MetricsHandler)
+			} else {
+				logger.Warn("MetricsHandler is set but MetricsMiddleware is nil; /metrics is not registered to avoid unprotected exposure")
 			}
-			r.With(mw).Handle("/metrics", deps.MetricsHandler)
 		}
 	})
 
@@ -199,6 +201,9 @@ func NewRouter(deps *RouterDeps) http.Handler {
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.NewSessionMiddleware(deps.SessionFinder))
 		r.Use(deps.RateLimiter.GeneralMiddleware())
+		// リクエストボディ上限を適用し、巨大ボディによるメモリ枯渇 DoS を防ぐ。
+		// 上限超過時は各ハンドラの json.Decode がエラーを返し 400 応答となる。
+		r.Use(middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes))
 		r.Use(logging)
 
 		// フィード管理

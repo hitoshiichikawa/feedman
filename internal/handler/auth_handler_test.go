@@ -108,9 +108,9 @@ func TestAuthHandler_Callback_Success_SetsCookieAndRedirects(t *testing.T) {
 
 	resp := w.Result()
 
-	// リダイレクトされること
-	if resp.StatusCode != http.StatusTemporaryRedirect {
-		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	// リダイレクトされること（POST/GET アクション後の 303 See Other）
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
 	}
 
 	// BaseURLにリダイレクトされること
@@ -247,8 +247,8 @@ func TestAuthHandler_Callback_NoOldSessionCookie_DoesNotRevokeAndCompletes(t *te
 		t.Error("Logout should not be called when no old session_id cookie exists")
 	}
 	resp := w.Result()
-	if resp.StatusCode != http.StatusTemporaryRedirect {
-		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
 	}
 	var sessionCookie *http.Cookie
 	for _, c := range resp.Cookies() {
@@ -286,8 +286,8 @@ func TestAuthHandler_Callback_RevokeFails_StillCompletesLogin(t *testing.T) {
 
 	// Assert: AC R3.3 旧セッション無効化失敗でもログインはエラーにならず完了すること
 	resp := w.Result()
-	if resp.StatusCode != http.StatusTemporaryRedirect {
-		t.Errorf("status = %d, want %d (login must not fail on revoke error)", resp.StatusCode, http.StatusTemporaryRedirect)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("status = %d, want %d (login must not fail on revoke error)", resp.StatusCode, http.StatusSeeOther)
 	}
 	var sessionCookie *http.Cookie
 	for _, c := range resp.Cookies() {
@@ -430,9 +430,9 @@ func TestAuthHandler_Logout_Success_ClearsCookieAndRedirects(t *testing.T) {
 
 	resp := w.Result()
 
-	// リダイレクトされること
-	if resp.StatusCode != http.StatusTemporaryRedirect {
-		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	// リダイレクトされること（POST ログアウト後の 303 See Other）
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
 	}
 
 	// セッションCookieがクリアされること
@@ -464,8 +464,8 @@ func TestAuthHandler_Logout_NoSession_StillRedirects(t *testing.T) {
 	h.Logout(w, req)
 
 	resp := w.Result()
-	if resp.StatusCode != http.StatusTemporaryRedirect {
-		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
 	}
 }
 

@@ -388,8 +388,8 @@ func TestIntegration_AuthFlow_LoginCallbackMeLogout(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	resp = w.Result()
-	if resp.StatusCode != http.StatusTemporaryRedirect {
-		t.Fatalf("step2: callback status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("step2: callback status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
 	}
 
 	// セッションクッキーを取得
@@ -431,8 +431,8 @@ func TestIntegration_AuthFlow_LoginCallbackMeLogout(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	resp = w.Result()
-	if resp.StatusCode != http.StatusTemporaryRedirect {
-		t.Fatalf("step4: POST /auth/logout status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("step4: POST /auth/logout status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
 	}
 
 	// 5. ログアウト後に /auth/me にアクセスすると401が返ること
