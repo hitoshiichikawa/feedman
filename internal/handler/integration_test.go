@@ -54,8 +54,10 @@ func newIntegrationState() *integrationState {
 // --- Native Auth 用 stateful mock service（Issue #166） ---
 
 // mockNativeTokenExchangeService は integration_test 内で auth_code → token 交換の
-// 単回利用と「同一 code の再交換 400」を検証するための簡易ステートフルモック。
-// 実際の repository/service 層を介さず、issuedCode との一致 + 単回フラグで判定する。
+// 単回利用と「同一 code の再交換 400」、および refresh token rotation の通しを
+// 検証するためのステートフルモック。実際の repository/service 層を介さず、
+// issuedCode との一致 + 単回フラグで判定し、refresh は払い出した平文と family ID を
+// 内部 map で追跡する（Issue #167）。
 type mockNativeTokenExchangeService struct {
 	mu           sync.Mutex
 	issuedCode   string
@@ -63,6 +65,15 @@ type mockNativeTokenExchangeService struct {
 	callCount    int
 	lastCode     string
 	lastVerifier string
+
+	// refresh tokens の rotation 用ステート（Issue #167）。
+	// activeRefresh[plain]=familyID で「現役の refresh token 平文 → family」を保持。
+	// rotation 成功で旧 plain を活性集合から外し（rotated 扱い）新 plain を追加する。
+	// 旧 plain は rotatedRefresh に move し、再提示時の「rotation 済み拒否」を判定する。
+	activeRefresh    map[string]string // plain → familyID
+	rotatedRefresh   map[string]struct{}
+	rotateCallCount  int
+	lastRefreshToken string
 }
 
 // IssueCode は事前に「払い出した auth_code 平文」を mock に登録する。
@@ -91,9 +102,62 @@ func (m *mockNativeTokenExchangeService) ExchangeAuthCode(ctx context.Context, a
 		return nil, auth.ErrInvalidGrant
 	}
 	m.used = true // 単回消費
+	// rotation 通しテスト用に、払い出した refresh token を family 付きで活性化する。
+	if m.activeRefresh == nil {
+		m.activeRefresh = make(map[string]string)
+	}
+	if m.rotatedRefresh == nil {
+		m.rotatedRefresh = make(map[string]struct{})
+	}
+	const plain = "integration-refresh-token"
+	const familyID = "family-integration"
+	m.activeRefresh[plain] = familyID
 	return &auth.TokenPair{
 		AccessToken:  "integration-access-token",
-		RefreshToken: "integration-refresh-token",
+		RefreshToken: plain,
+		ExpiresIn:    900,
+	}, nil
+}
+
+// RotateRefreshToken は Issue #167 の rotation を simulate する。
+//   - 活性集合に存在する plain → 旧 plain を rotated 集合へ move、新 plain を活性化して
+//     新 TokenPair を返す（同一 family に紐付け / Req 1.3, 1.4）
+//   - rotated 集合に存在する plain → ErrInvalidRefreshToken（Req 2.4: rotation 済み再利用）
+//   - 活性集合にも rotated 集合にも存在しない plain → ErrInvalidRefreshToken（Req 2.1: 不明）
+//
+// 連続 rotation の通しテストでは「N 回目の rotation で N 番目の plain が返る」決定論を
+// 担保するために、内部カウンタで新 plain を生成する。
+func (m *mockNativeTokenExchangeService) RotateRefreshToken(ctx context.Context, refreshToken string) (*auth.TokenPair, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rotateCallCount++
+	m.lastRefreshToken = refreshToken
+
+	if m.activeRefresh == nil {
+		return nil, auth.ErrInvalidRefreshToken
+	}
+	if _, isRotated := m.rotatedRefresh[refreshToken]; isRotated {
+		// rotation 済み再利用は単純拒否（#168 が family 失効へ昇格するまでは ErrInvalidRefreshToken）
+		return nil, auth.ErrInvalidRefreshToken
+	}
+	familyID, isActive := m.activeRefresh[refreshToken]
+	if !isActive {
+		// 不明
+		return nil, auth.ErrInvalidRefreshToken
+	}
+
+	// 旧 plain を rotated に move、新 plain を活性化（同一 family / Req 1.3）。
+	delete(m.activeRefresh, refreshToken)
+	if m.rotatedRefresh == nil {
+		m.rotatedRefresh = make(map[string]struct{})
+	}
+	m.rotatedRefresh[refreshToken] = struct{}{}
+	newPlain := fmt.Sprintf("integration-refresh-token-rot-%d", m.rotateCallCount)
+	m.activeRefresh[newPlain] = familyID
+
+	return &auth.TokenPair{
+		AccessToken:  fmt.Sprintf("integration-access-token-rot-%d", m.rotateCallCount),
+		RefreshToken: newPlain,
 		ExpiresIn:    900,
 	}, nil
 }

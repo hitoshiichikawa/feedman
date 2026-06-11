@@ -132,8 +132,10 @@ func TestSetupAuthRoutes_UnknownRoute_Returns404Or405(t *testing.T) {
 
 // alwaysSucceedExchangeService は service 層に到達したかを判定するための固定成功モック。
 // 200 応答が返れば handler に到達したことが確認できる。
+// RotateRefreshToken は Issue #167 で interface に追加されたため本モックでも実装する。
 type alwaysSucceedExchangeService struct {
-	callCount int
+	callCount   int
+	rotateCalls int
 }
 
 func (s *alwaysSucceedExchangeService) ExchangeAuthCode(ctx context.Context, authCode, codeVerifier string) (*auth.TokenPair, error) {
@@ -141,6 +143,15 @@ func (s *alwaysSucceedExchangeService) ExchangeAuthCode(ctx context.Context, aut
 	return &auth.TokenPair{
 		AccessToken:  "ok-access",
 		RefreshToken: "ok-refresh",
+		ExpiresIn:    900,
+	}, nil
+}
+
+func (s *alwaysSucceedExchangeService) RotateRefreshToken(ctx context.Context, refreshToken string) (*auth.TokenPair, error) {
+	s.rotateCalls++
+	return &auth.TokenPair{
+		AccessToken:  "ok-rotated-access",
+		RefreshToken: "ok-rotated-refresh",
 		ExpiresIn:    900,
 	}, nil
 }
@@ -257,5 +268,84 @@ func TestNewRouter_NativeAuthToken_WrongMethod_Returns405(t *testing.T) {
 	}
 	if svc.callCount != 0 {
 		t.Errorf("service called %d times, want 0 (GET は handler に到達しない)", svc.callCount)
+	}
+}
+
+// --- Refresh ルーティング（Issue #167 / Req 1.5, NFR 2.2） ---
+
+// TestNewRouter_NativeAuthRefresh_RegisteredWhenHandlerInjected は NativeAuthHandler を
+// 注入したとき POST /api/auth/refresh がセッション無しで到達し、200 が返ることを検証する
+// （Req 1.5: Cookie / Bearer なしで呼び出し可能）。
+func TestNewRouter_NativeAuthRefresh_RegisteredWhenHandlerInjected(t *testing.T) {
+	// Arrange
+	svc := &alwaysSucceedExchangeService{}
+	nh := NewNativeAuthHandler(svc)
+	router := NewRouter(newMinimalDepsForNativeAuth(nh))
+
+	body := `{"refresh_token":"plain-refresh-token"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/refresh", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d (handler 到達 / Req 1.5)", resp.StatusCode, http.StatusOK)
+	}
+	if svc.rotateCalls != 1 {
+		t.Errorf("service.RotateRefreshToken called %d times, want 1 (handler に到達していない可能性)",
+			svc.rotateCalls)
+	}
+}
+
+// TestNewRouter_NativeAuthRefresh_NotRegisteredWhenHandlerNil は NativeAuthHandler が
+// nil のとき POST /api/auth/refresh がルートとして登録されず 404 が返ることを検証する
+// （NFR 2.2: 署名鍵未設定環境の fail-closed）。
+func TestNewRouter_NativeAuthRefresh_NotRegisteredWhenHandlerNil(t *testing.T) {
+	// Arrange: NativeAuthHandler nil
+	router := NewRouter(newMinimalDepsForNativeAuth(nil))
+
+	body := `{"refresh_token":"x"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/refresh", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: fail-closed として 404
+	if w.Result().StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want %d (NativeAuthHandler nil で fail-closed / NFR 2.2)",
+			w.Result().StatusCode, http.StatusNotFound)
+	}
+}
+
+// TestNewRouter_NativeAuthRefresh_DoesNotRequireSession は注入時に Cookie 無しでも
+// 401 を返さず handler まで到達することを検証する（Req 1.5: Session middleware 通らない）。
+func TestNewRouter_NativeAuthRefresh_DoesNotRequireSession(t *testing.T) {
+	// Arrange
+	svc := &alwaysSucceedExchangeService{}
+	nh := NewNativeAuthHandler(svc)
+	router := NewRouter(newMinimalDepsForNativeAuth(nh))
+
+	body := `{"refresh_token":"x"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/refresh", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	// セッション Cookie 無し
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: 401 ではなく 200（Session middleware を経由していない）
+	resp := w.Result()
+	if resp.StatusCode == http.StatusUnauthorized {
+		t.Errorf("status = 401, want non-401 (Req 1.5: Cookie 無しで呼び出し可能)")
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 }
