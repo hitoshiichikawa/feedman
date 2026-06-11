@@ -54,8 +54,8 @@ func TestSetupAuthRoutes_CallbackEndpoint(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	resp := w.Result()
-	if resp.StatusCode != http.StatusTemporaryRedirect {
-		t.Errorf("GET /auth/google/callback status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("GET /auth/google/callback status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
 	}
 }
 
@@ -77,8 +77,8 @@ func TestSetupAuthRoutes_LogoutEndpoint(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	resp := w.Result()
-	if resp.StatusCode != http.StatusTemporaryRedirect {
-		t.Errorf("POST /auth/logout status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("POST /auth/logout status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
 	}
 }
 

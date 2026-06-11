@@ -4,6 +4,7 @@ package handler
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
@@ -78,7 +79,8 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	// 1. stateの検証（CSRF対策）
 	state := r.URL.Query().Get("state")
 	stateCookie, err := r.Cookie(oauthStateCookie)
-	if err != nil || stateCookie.Value != state {
+	// state の比較はタイミング攻撃を避けるため定数時間比較を用いる（CWE-208）。
+	if err != nil || subtle.ConstantTimeCompare([]byte(stateCookie.Value), []byte(state)) != 1 {
 		slog.Warn("oauth state mismatch",
 			slog.String("query_state", state),
 		)
@@ -139,8 +141,8 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 
-	// 6. フロントエンドにリダイレクト
-	http.Redirect(w, r, h.config.BaseURL, http.StatusTemporaryRedirect)
+	// 6. フロントエンドにリダイレクト（GET 化のため 303 See Other）
+	http.Redirect(w, r, h.config.BaseURL, http.StatusSeeOther)
 }
 
 // Logout はセッションを破棄する。
@@ -168,7 +170,9 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 
-	http.Redirect(w, r, h.config.BaseURL, http.StatusTemporaryRedirect)
+	// POST ログアウト後はリダイレクトを GET 化するため 303 See Other を用いる
+	// （307 だと method を保持し BaseURL へ再 POST してしまう）。
+	http.Redirect(w, r, h.config.BaseURL, http.StatusSeeOther)
 }
 
 // Me は現在のログインユーザー情報を返す。

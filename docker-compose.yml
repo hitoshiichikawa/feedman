@@ -46,8 +46,12 @@ services:
       context: .
       dockerfile: Dockerfile
     command: ["serve"]
+    # api はブラウザに公開せず内部ネットワークに留める設計（README「ネットワークセキュリティ」）。
+    # ホストへの publish は既定で 127.0.0.1（ローカル開発のデバッグ用）に限定し、LAN/公開 IF への
+    # 露出を防ぐ。リバースプロキシ前段の本番では web だけを公開し、ここを公開する必要はない。
+    # 別ホストから直接到達させたい場合のみ API_PUBLISH_HOST=0.0.0.0 を明示する。
     ports:
-      - "${SERVER_PORT:-8080}:8080"
+      - "${API_PUBLISH_HOST:-127.0.0.1}:${SERVER_PORT:-8080}:8080"
     environment:
       # 未指定時はコンテナ内 DB（`db` ホスト、TLS 無効構成）向けデフォルトを適用する。
       # 外部 PostgreSQL へ接続する場合は `.env` 等で DATABASE_URL を上書きし、sslmode に

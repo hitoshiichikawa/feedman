@@ -5,6 +5,7 @@ import { ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { sanitizeContentHtml } from "@/lib/sanitize";
+import { safeFeedUrl } from "@/lib/url";
 import type { ItemDetail as ItemDetailType } from "@/types/item";
 
 /**
@@ -90,7 +91,7 @@ export function ItemDetail({
           {/* タイトルリンク（長文時は折り返し）。 */}
           <h3 className="text-lg font-semibold leading-tight">
             <a
-              href={item.link}
+              href={safeFeedUrl(item.link)}
               target="_blank"
               rel="noopener noreferrer"
               className="hover:underline"
@@ -112,7 +113,7 @@ export function ItemDetail({
             </>
           )}
           <a
-            href={item.link}
+            href={safeFeedUrl(item.link)}
             target="_blank"
             rel="noopener noreferrer"
             data-testid="original-link"

@@ -20,6 +20,10 @@ const (
 	// クライアントレベルのタイムアウト。上流の無応答によるリクエストの無期限ハングと
 	// それに伴うリソース滞留を防ぐ。
 	defaultOAuthHTTPTimeout = 10 * time.Second
+
+	// maxOAuthResponseBytes はOAuthレスポンスボディの読み取り上限（1 MiB）。
+	// 上流（または DNS 汚染された偽装上流）からの巨大ボディによるメモリ枯渇を防ぐ。
+	maxOAuthResponseBytes = 1 << 20
 )
 
 // GoogleOAuthConfig はGoogle OAuthプロバイダーの設定。
@@ -134,13 +138,15 @@ func (p *GoogleOAuthProvider) exchangeToken(ctx context.Context, code string) (*
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxOAuthResponseBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read token response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token exchange failed with status %d: %s", resp.StatusCode, string(body))
+		// 上流レスポンスボディ（error_description 等の機微情報を含みうる）はログ衛生のため
+		// エラーに含めず、ステータスコードのみを返す。
+		return nil, fmt.Errorf("token exchange failed with status %d", resp.StatusCode)
 	}
 
 	var tokenResp googleTokenResponse
@@ -169,13 +175,15 @@ func (p *GoogleOAuthProvider) fetchUserInfo(ctx context.Context, accessToken str
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxOAuthResponseBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read user info response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("user info fetch failed with status %d: %s", resp.StatusCode, string(body))
+		// 上流レスポンスボディ（アクセストークンや機微情報を含みうる）はログ衛生のため
+		// エラーに含めず、ステータスコードのみを返す。
+		return nil, fmt.Errorf("user info fetch failed with status %d", resp.StatusCode)
 	}
 
 	var userInfo googleUserInfo

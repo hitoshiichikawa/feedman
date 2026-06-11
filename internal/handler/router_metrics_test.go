@@ -121,6 +121,29 @@ func TestNewRouter_Metrics_NilHandler_NotRegistered(t *testing.T) {
 	}
 }
 
+// TestNewRouter_Metrics_NonNilHandler_NilMiddleware_NotRegistered は MetricsHandler が
+// 非 nil でも MetricsMiddleware が nil のとき、無防備な公開を避けて /metrics を登録せず
+// 404 になることを検証する（fail-closed / #177）。
+func TestNewRouter_Metrics_NonNilHandler_NilMiddleware_NotRegistered(t *testing.T) {
+	// Arrange: ハンドラのみ設定し、ミドルウェアは nil（誤配線を想定）
+	router := NewRouter(newMetricsTestDeps(newMetricsTestHandler(), nil))
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.RemoteAddr = "127.0.0.1:50000"
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: 素通し公開ではなく未登録（404）であること
+	if w.Result().StatusCode != http.StatusNotFound {
+		t.Errorf("MetricsMiddleware nil のとき GET /metrics status = %d, want 404 (fail-closed)", w.Result().StatusCode)
+	}
+	if got := w.Body.String(); strings.Contains(got, metricsTestBody) {
+		t.Errorf("未登録のはずがメトリクス本文が露出している: %q", got)
+	}
+}
+
 // TestNewRouter_Metrics_NilHandler_ExistingRoutesUnchanged は MetricsHandler nil のとき
 // 既存ルート（/health・/auth/*・/api/*）のルーティング挙動が不変であることを検証する（Requirement 5.1）。
 func TestNewRouter_Metrics_NilHandler_ExistingRoutesUnchanged(t *testing.T) {

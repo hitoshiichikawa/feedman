@@ -24,6 +24,21 @@ func waitGoroutineCount(target int, timeout time.Duration) int {
 	}
 }
 
+// waitGoroutineCountAbove は goroutine 数が target を上回るのを最大 timeout 待つ。
+// go 文で起動した goroutine のスケジューリングは非同期のため、起動直後の即時比較では
+// 未スケジュールのまま比較に達して偽陰性になりうる（CI 環境で観測）。ポーリングで増加を待つ。
+func waitGoroutineCountAbove(target int, timeout time.Duration) int {
+	deadline := time.Now().Add(timeout)
+	for {
+		runtime.Gosched()
+		n := runtime.NumGoroutine()
+		if n > target || time.Now().After(deadline) {
+			return n
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func newTestRateLimiter() *middleware.RateLimiter {
 	return middleware.NewRateLimiter(middleware.RateLimiterConfig{
 		GeneralRate:     2,
@@ -42,8 +57,8 @@ func TestShutdownCoordinator_StopsRateLimiterCleanupGoroutine(t *testing.T) {
 
 	rl := newTestRateLimiter()
 
-	// goroutine が起動したことを確認
-	afterStart := runtime.NumGoroutine()
+	// goroutine が起動したことを確認（スケジュール完了をポーリングで待つ）
+	afterStart := waitGoroutineCountAbove(before, 2*time.Second)
 	if afterStart <= before {
 		t.Fatalf("expected goroutine count to increase after NewRateLimiter, before=%d after=%d", before, afterStart)
 	}
@@ -70,7 +85,8 @@ func TestShutdownCoordinator_StopsIPRateLimiterCleanupGoroutine(t *testing.T) {
 
 	ipRL := middleware.NewIPRateLimiter(middleware.DefaultIPRateLimiterConfig(30))
 
-	afterStart := runtime.NumGoroutine()
+	// goroutine が起動したことを確認（スケジュール完了をポーリングで待つ）
+	afterStart := waitGoroutineCountAbove(before, 2*time.Second)
 	if afterStart <= before {
 		t.Fatalf("expected goroutine count to increase after NewIPRateLimiter, before=%d after=%d", before, afterStart)
 	}
