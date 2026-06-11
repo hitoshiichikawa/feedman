@@ -8,7 +8,7 @@
   - 既存 config テストの慣習に合わせ、設定あり / なし / kid 既定値の unit test を追加
   - _Requirements: 3.1, 3.2, NFR 2.2_
 
-- [ ] 2. auth: PKCE verifier 検証を追加
+- [x] 2. auth: PKCE verifier 検証を追加
   - `internal/auth/pkce.go` に `VerifyPKCES256Verifier(verifier, storedChallenge string) bool` を
     追加（形式 `^[A-Za-z0-9._~-]{43,128}$` → S256 導出 → `subtle.ConstantTimeCompare`）
   - `internal/auth/pkce_test.go` に RFC 7636 Appendix B の test vector を含む table-driven
