@@ -49,7 +49,7 @@
   - _Requirements: 1.1, 1.5, 1.6, 2.5, 2.6, 3.2, NFR 1.5, NFR 2.1_
   - _Depends: 4_
 
-- [ ] 6. wiring と統合テスト
+- [x] 6. wiring と統合テスト
   - `internal/app/app.go`: `repository.NewPostgresRefreshTokenRepo(db)` を wiring し、
     `cfg.NativeAuthJWTSecret != ""` のときのみ issuer / TokenService / NativeAuthHandler を
     生成して deps に注入。未設定時は `slog.Warn` を 1 回出力（design.md app.go 節どおり）
