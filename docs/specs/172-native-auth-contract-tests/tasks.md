@@ -45,7 +45,7 @@
     固定する（既存 round-trip は 200 status 到達のみ）
   - `_Requirements: 1.5_`
 
-- [ ] 4. Bearer 拒否 4 区分の uniform 契約テストを追加する
+- [x] 4. Bearer 拒否 4 区分の uniform 契約テストを追加する
   - `internal/handler/integration_test.go` の末尾に
     `TestContract_BearerToken_RejectionUniformity_AllRejectionShapes` を追加する
   - 同一 secret の `JWTVerifier` を `RouterDeps.JWTVerifier` に注入した router を構築し、
