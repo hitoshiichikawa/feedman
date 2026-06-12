@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -2064,5 +2065,79 @@ func TestContract_RevokeResponse_204AndEmptyBody(t *testing.T) {
 	}
 	if w.Body.Len() != 0 {
 		t.Errorf("body = %q (len %d), want empty body", w.Body.String(), w.Body.Len())
+	}
+}
+
+// TestContract_NativeCallbackLocation_AppSchemeAndAuthCode は flow=native の callback 応答の
+// Location ヘッダが `feedman://auth/callback?auth_code=<one-time-code>` の契約形式
+// （scheme / host / path / クエリ名）であることを固定する（Req 2.6 / SERVER.md §1.2）。
+// Location の固定値全体一致は既存通しテストで検証済みのため、本テストは URL 構造の
+// 契約形式に専念する。
+func TestContract_NativeCallbackLocation_AppSchemeAndAuthCode(t *testing.T) {
+	// Arrange: native login で state / challenge Cookie を取得
+	state := newIntegrationState()
+	tokenSvc := &mockNativeTokenExchangeService{}
+	router := createNativeAuthIntegrationRouter(state, tokenSvc)
+
+	loginURL := "/auth/google/login?flow=native&code_challenge=" + nativeTestChallenge + "&code_challenge_method=S256"
+	req := httptest.NewRequest(http.MethodGet, loginURL, nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	resp := w.Result()
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("login status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	}
+	var oauthStateC, nativeChallengeC *http.Cookie
+	for _, c := range resp.Cookies() {
+		switch c.Name {
+		case "oauth_state":
+			oauthStateC = c
+		case "oauth_native_challenge":
+			nativeChallengeC = c
+		}
+	}
+	if oauthStateC == nil || nativeChallengeC == nil {
+		t.Fatal("login: expected both oauth_state and oauth_native_challenge cookies")
+	}
+
+	// Act: callback
+	callbackURL := "/auth/google/callback?code=test-auth-code&state=" + oauthStateC.Value
+	req = httptest.NewRequest(http.MethodGet, callbackURL, nil)
+	req.AddCookie(oauthStateC)
+	req.AddCookie(nativeChallengeC)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	resp = w.Result()
+
+	// Assert: 303 + Location の URL 構造契約
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("callback status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
+	}
+	location := resp.Header.Get("Location")
+	u, err := url.Parse(location)
+	if err != nil {
+		t.Fatalf("Location %q is not a valid URL: %v", location, err)
+	}
+	if u.Scheme != "feedman" {
+		t.Errorf("Location scheme = %q, want %q (SERVER.md §1.2 アプリスキーム)", u.Scheme, "feedman")
+	}
+	if u.Host != "auth" {
+		t.Errorf("Location host = %q, want %q", u.Host, "auth")
+	}
+	if u.Path != "/callback" {
+		t.Errorf("Location path = %q, want %q", u.Path, "/callback")
+	}
+	authCode := u.Query().Get("auth_code")
+	if authCode == "" {
+		t.Errorf("Location query auth_code is empty (Req 2.6: one-time-code を含む)")
+	}
+	if len(u.Query()) != 1 {
+		t.Errorf("Location query has %d params %v, want only auth_code", len(u.Query()), u.Query())
+	}
+	// Cookie セッションは発行されない（native flow は Cookie ではなく auth_code を返す）
+	for _, c := range resp.Cookies() {
+		if c.Name == "session_id" && c.Value != "" && c.MaxAge >= 0 {
+			t.Errorf("native callback must not issue session_id cookie (got %q)", c.Value)
+		}
 	}
 }
