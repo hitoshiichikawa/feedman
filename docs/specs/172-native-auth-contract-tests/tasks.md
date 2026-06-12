@@ -60,7 +60,7 @@
     fallback しないことを 1 ケースだけ追加検証する
   - `_Requirements: 3.5, 3.6_`
 
-- [ ] 5. E2E DB-backed full-flow テストを追加する
+- [x] 5. E2E DB-backed full-flow テストを追加する
   - 新規ファイル `internal/handler/native_auth_e2e_db_test.go` を作成し、以下を実装する
   - `TEST_DATABASE_URL` 接続セットアップ（既存 `setupRefreshTokenTestDB` / `setupWithdrawTestDB`
     と同型）を関数 `setupNativeAuthE2EDB(t *testing.T) *sql.DB` として配置。DB 未到達時は
