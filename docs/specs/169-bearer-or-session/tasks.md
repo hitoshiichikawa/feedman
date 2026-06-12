@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. auth: JWTVerifier を追加
+- [x] 1. auth: JWTVerifier を追加
   - `internal/auth/jwt_verifier.go` を新規作成: `NewJWTVerifier(secret []byte)` /
     `VerifyAccessToken(tokenString string) (string, error)`（design.md 検証規則表どおり:
     `jwt.WithValidMethods` で HS256 限定・`jwt.WithExpirationRequired` で exp 必須・
