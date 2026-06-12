@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. router: native auth 3 ルートへ unauthIPMW を適用しレート制限テストを追加
+- [x] 1. router: native auth 3 ルートへ unauthIPMW を適用しレート制限テストを追加
   - `internal/handler/router.go`: `NativeAuthHandler != nil` ガード内の
     `POST /api/auth/token` / `POST /api/auth/refresh` / `POST /api/auth/revoke` の
     route 単位チェーン最外（MaxBodyBytes より外側）に既存 `unauthIPMW` を追加する
