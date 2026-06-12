@@ -2141,3 +2141,72 @@ func TestContract_NativeCallbackLocation_AppSchemeAndAuthCode(t *testing.T) {
 		}
 	}
 }
+
+// TestContract_BearerAccessToken_ReachesProtectedAPI_SameUserAsCookie は、同一 userID の
+// Bearer（real JWTIssuer 発行 / real JWTVerifier 検証）と Cookie セッションで
+// /api/subscriptions を呼び出したとき、**応答内容まで等価**であることを契約として固定する
+// （Req 1.5 / NFR 2.1 / SERVER.md §1.8「Bearer 付き既存 API が Cookie と同じ結果を返す」）。
+// 既存 router_test.go の round-trip テストは 200 到達のみのため、本テストは応答 body の
+// 同一性まで踏み込む。
+func TestContract_BearerAccessToken_ReachesProtectedAPI_SameUserAsCookie(t *testing.T) {
+	// Arrange: 同一 secret の real issuer / verifier と、userID 連動の subscription fixture
+	const userID = "contract-user-1"
+	secret := []byte("contract-bearer-secret-32bytes-xx")
+	issuer := auth.NewJWTIssuer(secret, "v1-contract")
+	accessToken, err := issuer.IssueAccessToken(userID)
+	if err != nil {
+		t.Fatalf("IssueAccessToken returned error: %v", err)
+	}
+
+	sessions := map[string]*model.Session{
+		"contract-session": {
+			ID:        "contract-session",
+			UserID:    userID,
+			ExpiresAt: time.Now().Add(1 * time.Hour),
+		},
+	}
+	deps := &RouterDeps{
+		SessionFinder:     &mockSessionFinderForRouter{sessions: sessions},
+		CORSAllowedOrigin: "http://localhost:3000",
+		RateLimiter:       middleware.NewRateLimiter(middleware.DefaultRateLimiterConfig()),
+		AuthService:       &mockAuthService{},
+		AuthConfig:        AuthHandlerConfig{BaseURL: "http://localhost:3000"},
+		JWTVerifier:       auth.NewJWTVerifier(secret),
+		SubscriptionService: &mockSubscriptionService{
+			// userID 連動の fixture: 認証経路によらず「誰として認証されたか」が応答に現れる
+			listSubscriptionsFn: func(ctx context.Context, uid string) ([]subscriptionResponse, error) {
+				return []subscriptionResponse{{ID: "sub-of-" + uid, FeedID: "feed-1"}}, nil
+			},
+		},
+	}
+	router := NewRouter(deps)
+
+	// Act 1: Bearer 経由（Cookie 無し）
+	reqBearer := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+	reqBearer.Header.Set("Authorization", "Bearer "+accessToken)
+	wBearer := httptest.NewRecorder()
+	router.ServeHTTP(wBearer, reqBearer)
+
+	// Act 2: Cookie 経由（Bearer 無し）
+	reqCookie := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+	reqCookie.AddCookie(&http.Cookie{Name: "session_id", Value: "contract-session"})
+	wCookie := httptest.NewRecorder()
+	router.ServeHTTP(wCookie, reqCookie)
+
+	// Assert: 両経路とも 200 で、応答 body が完全一致（同一ユーザーとして処理 / Req 1.5）
+	if wBearer.Result().StatusCode != http.StatusOK {
+		t.Fatalf("Bearer status = %d, want %d", wBearer.Result().StatusCode, http.StatusOK)
+	}
+	if wCookie.Result().StatusCode != http.StatusOK {
+		t.Fatalf("Cookie status = %d, want %d", wCookie.Result().StatusCode, http.StatusOK)
+	}
+	if wBearer.Body.String() != wCookie.Body.String() {
+		t.Errorf("Bearer body = %q, Cookie body = %q, want identical (Req 1.5: 同一ユーザー識別)",
+			wBearer.Body.String(), wCookie.Body.String())
+	}
+	// 応答に userID 連動 fixture が含まれる（JWT sub から解決されたことの直接確認）
+	if !strings.Contains(wBearer.Body.String(), "sub-of-"+userID) {
+		t.Errorf("Bearer body %q does not contain %q (JWT sub からの userID 解決)",
+			wBearer.Body.String(), "sub-of-"+userID)
+	}
+}
