@@ -5,13 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/hitoshi/feedman/internal/auth"
 	"github.com/hitoshi/feedman/internal/middleware"
@@ -1950,5 +1954,372 @@ func TestIntegration_RevokeFlow_RefreshRejectedAndIdempotent(t *testing.T) {
 	if w.Result().StatusCode != http.StatusNoContent {
 		t.Errorf("revoke unknown status = %d, want %d (Req 2.2: 不明 token でも区別しない)",
 			w.Result().StatusCode, http.StatusNoContent)
+	}
+}
+
+// --- 契約テスト（Issue #172 / design.md Contract Test Suite） ---
+
+// TestContract_TokenResponse_ExactJSONShape は POST /api/auth/token の 200 応答 JSON が
+// {access_token, refresh_token, token_type:"Bearer", expires_in:900} の 4 フィールド
+// **厳密集合**であること（余剰キー混入なし）を契約として固定する
+// （Req 2.1, 2.3, 2.4 / SERVER.md §1.3）。
+func TestContract_TokenResponse_ExactJSONShape(t *testing.T) {
+	// Arrange: native login → callback で auth_code を払い出した状態を作る
+	state := newIntegrationState()
+	tokenSvc := &mockNativeTokenExchangeService{}
+	router := createNativeAuthIntegrationRouter(state, tokenSvc)
+	tokenSvc.IssueCode("contract-auth-code")
+
+	// Act: token 交換
+	body := `{"auth_code":"contract-auth-code","code_verifier":"plain-verifier"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/token", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	// Assert: 200 + 4 フィールド厳密集合
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	assertTokenPairExactShape(t, resp.Body)
+}
+
+// TestContract_RefreshResponse_ExactJSONShape は POST /api/auth/refresh の 200 応答 JSON が
+// token 交換と同一の 4 フィールド厳密集合であることを契約として固定する
+// （Req 2.2, 2.3, 2.4 / SERVER.md §1.3）。
+func TestContract_RefreshResponse_ExactJSONShape(t *testing.T) {
+	// Arrange: 交換済みの refresh token を払い出した状態を作る
+	state := newIntegrationState()
+	tokenSvc := &mockNativeTokenExchangeService{}
+	router := createNativeAuthIntegrationRouter(state, tokenSvc)
+	refreshToken := runNativeLoginCallbackAndExchange(t, router)
+
+	// Act: refresh
+	body := fmt.Sprintf(`{"refresh_token":%q}`, refreshToken)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/refresh", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	// Assert: 200 + 4 フィールド厳密集合
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	assertTokenPairExactShape(t, resp.Body)
+}
+
+// assertTokenPairExactShape は token / refresh 共通の応答契約
+// （SERVER.md §1.3: 4 フィールドのみ / token_type:"Bearer" / expires_in:900）を検証する。
+func assertTokenPairExactShape(t *testing.T, body io.Reader) {
+	t.Helper()
+	var got map[string]any
+	if err := json.NewDecoder(body).Decode(&got); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	// 余剰キー混入なし（総キー数 4 / Req 2.1, 2.2）
+	if len(got) != 4 {
+		t.Errorf("response has %d keys %v, want exactly 4 keys (余剰キー混入なし)", len(got), keysOf(got))
+	}
+	if v, ok := got["access_token"].(string); !ok || v == "" {
+		t.Errorf("access_token = %v, want non-empty string", got["access_token"])
+	}
+	if v, ok := got["refresh_token"].(string); !ok || v == "" {
+		t.Errorf("refresh_token = %v, want non-empty string", got["refresh_token"])
+	}
+	if got["token_type"] != "Bearer" {
+		t.Errorf("token_type = %v, want %q (Req 2.3)", got["token_type"], "Bearer")
+	}
+	if v, _ := got["expires_in"].(float64); v != 900 {
+		t.Errorf("expires_in = %v, want 900 (Req 2.4)", got["expires_in"])
+	}
+}
+
+// keysOf は map のキー一覧を返す（assert メッセージ用）。
+func keysOf(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// TestContract_RevokeResponse_204AndEmptyBody は POST /api/auth/revoke の成功応答が
+// 204 No Content + ボディなしであることを契約として固定する（Req 2.5 / SERVER.md §1.3）。
+func TestContract_RevokeResponse_204AndEmptyBody(t *testing.T) {
+	// Arrange: 交換済みの refresh token を払い出した状態を作る
+	state := newIntegrationState()
+	tokenSvc := &mockNativeTokenExchangeService{}
+	router := createNativeAuthIntegrationRouter(state, tokenSvc)
+	refreshToken := runNativeLoginCallbackAndExchange(t, router)
+
+	// Act: revoke
+	body := fmt.Sprintf(`{"refresh_token":%q}`, refreshToken)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/revoke", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	// Assert: 204 + ボディ長 0
+	if w.Result().StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d (Req 2.5)", w.Result().StatusCode, http.StatusNoContent)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("body = %q (len %d), want empty body", w.Body.String(), w.Body.Len())
+	}
+}
+
+// TestContract_NativeCallbackLocation_AppSchemeAndAuthCode は flow=native の callback 応答の
+// Location ヘッダが `feedman://auth/callback?auth_code=<one-time-code>` の契約形式
+// （scheme / host / path / クエリ名）であることを固定する（Req 2.6 / SERVER.md §1.2）。
+// Location の固定値全体一致は既存通しテストで検証済みのため、本テストは URL 構造の
+// 契約形式に専念する。
+func TestContract_NativeCallbackLocation_AppSchemeAndAuthCode(t *testing.T) {
+	// Arrange: native login で state / challenge Cookie を取得
+	state := newIntegrationState()
+	tokenSvc := &mockNativeTokenExchangeService{}
+	router := createNativeAuthIntegrationRouter(state, tokenSvc)
+
+	loginURL := "/auth/google/login?flow=native&code_challenge=" + nativeTestChallenge + "&code_challenge_method=S256"
+	req := httptest.NewRequest(http.MethodGet, loginURL, nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	resp := w.Result()
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("login status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	}
+	var oauthStateC, nativeChallengeC *http.Cookie
+	for _, c := range resp.Cookies() {
+		switch c.Name {
+		case "oauth_state":
+			oauthStateC = c
+		case "oauth_native_challenge":
+			nativeChallengeC = c
+		}
+	}
+	if oauthStateC == nil || nativeChallengeC == nil {
+		t.Fatal("login: expected both oauth_state and oauth_native_challenge cookies")
+	}
+
+	// Act: callback
+	callbackURL := "/auth/google/callback?code=test-auth-code&state=" + oauthStateC.Value
+	req = httptest.NewRequest(http.MethodGet, callbackURL, nil)
+	req.AddCookie(oauthStateC)
+	req.AddCookie(nativeChallengeC)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	resp = w.Result()
+
+	// Assert: 303 + Location の URL 構造契約
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("callback status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
+	}
+	location := resp.Header.Get("Location")
+	u, err := url.Parse(location)
+	if err != nil {
+		t.Fatalf("Location %q is not a valid URL: %v", location, err)
+	}
+	if u.Scheme != "feedman" {
+		t.Errorf("Location scheme = %q, want %q (SERVER.md §1.2 アプリスキーム)", u.Scheme, "feedman")
+	}
+	if u.Host != "auth" {
+		t.Errorf("Location host = %q, want %q", u.Host, "auth")
+	}
+	if u.Path != "/callback" {
+		t.Errorf("Location path = %q, want %q", u.Path, "/callback")
+	}
+	authCode := u.Query().Get("auth_code")
+	if authCode == "" {
+		t.Errorf("Location query auth_code is empty (Req 2.6: one-time-code を含む)")
+	}
+	if len(u.Query()) != 1 {
+		t.Errorf("Location query has %d params %v, want only auth_code", len(u.Query()), u.Query())
+	}
+	// Cookie セッションは発行されない（native flow は Cookie ではなく auth_code を返す）
+	for _, c := range resp.Cookies() {
+		if c.Name == "session_id" && c.Value != "" && c.MaxAge >= 0 {
+			t.Errorf("native callback must not issue session_id cookie (got %q)", c.Value)
+		}
+	}
+}
+
+// TestContract_BearerAccessToken_ReachesProtectedAPI_SameUserAsCookie は、同一 userID の
+// Bearer（real JWTIssuer 発行 / real JWTVerifier 検証）と Cookie セッションで
+// /api/subscriptions を呼び出したとき、**応答内容まで等価**であることを契約として固定する
+// （Req 1.5 / NFR 2.1 / SERVER.md §1.8「Bearer 付き既存 API が Cookie と同じ結果を返す」）。
+// 既存 router_test.go の round-trip テストは 200 到達のみのため、本テストは応答 body の
+// 同一性まで踏み込む。
+func TestContract_BearerAccessToken_ReachesProtectedAPI_SameUserAsCookie(t *testing.T) {
+	// Arrange: 同一 secret の real issuer / verifier と、userID 連動の subscription fixture
+	const userID = "contract-user-1"
+	secret := []byte("contract-bearer-secret-32bytes-xx")
+	issuer := auth.NewJWTIssuer(secret, "v1-contract")
+	accessToken, err := issuer.IssueAccessToken(userID)
+	if err != nil {
+		t.Fatalf("IssueAccessToken returned error: %v", err)
+	}
+
+	sessions := map[string]*model.Session{
+		"contract-session": {
+			ID:        "contract-session",
+			UserID:    userID,
+			ExpiresAt: time.Now().Add(1 * time.Hour),
+		},
+	}
+	deps := &RouterDeps{
+		SessionFinder:     &mockSessionFinderForRouter{sessions: sessions},
+		CORSAllowedOrigin: "http://localhost:3000",
+		RateLimiter:       middleware.NewRateLimiter(middleware.DefaultRateLimiterConfig()),
+		AuthService:       &mockAuthService{},
+		AuthConfig:        AuthHandlerConfig{BaseURL: "http://localhost:3000"},
+		JWTVerifier:       auth.NewJWTVerifier(secret),
+		SubscriptionService: &mockSubscriptionService{
+			// userID 連動の fixture: 認証経路によらず「誰として認証されたか」が応答に現れる
+			listSubscriptionsFn: func(ctx context.Context, uid string) ([]subscriptionResponse, error) {
+				return []subscriptionResponse{{ID: "sub-of-" + uid, FeedID: "feed-1"}}, nil
+			},
+		},
+	}
+	router := NewRouter(deps)
+
+	// Act 1: Bearer 経由（Cookie 無し）
+	reqBearer := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+	reqBearer.Header.Set("Authorization", "Bearer "+accessToken)
+	wBearer := httptest.NewRecorder()
+	router.ServeHTTP(wBearer, reqBearer)
+
+	// Act 2: Cookie 経由（Bearer 無し）
+	reqCookie := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+	reqCookie.AddCookie(&http.Cookie{Name: "session_id", Value: "contract-session"})
+	wCookie := httptest.NewRecorder()
+	router.ServeHTTP(wCookie, reqCookie)
+
+	// Assert: 両経路とも 200 で、応答 body が完全一致（同一ユーザーとして処理 / Req 1.5）
+	if wBearer.Result().StatusCode != http.StatusOK {
+		t.Fatalf("Bearer status = %d, want %d", wBearer.Result().StatusCode, http.StatusOK)
+	}
+	if wCookie.Result().StatusCode != http.StatusOK {
+		t.Fatalf("Cookie status = %d, want %d", wCookie.Result().StatusCode, http.StatusOK)
+	}
+	if wBearer.Body.String() != wCookie.Body.String() {
+		t.Errorf("Bearer body = %q, Cookie body = %q, want identical (Req 1.5: 同一ユーザー識別)",
+			wBearer.Body.String(), wCookie.Body.String())
+	}
+	// 応答に userID 連動 fixture が含まれる（JWT sub から解決されたことの直接確認）
+	if !strings.Contains(wBearer.Body.String(), "sub-of-"+userID) {
+		t.Errorf("Bearer body %q does not contain %q (JWT sub からの userID 解決)",
+			wBearer.Body.String(), "sub-of-"+userID)
+	}
+}
+
+// TestContract_BearerToken_RejectionUniformity_AllRejectionShapes は Bearer 拒否の 4 区分
+// （署名不正 / 期限切れ / token_use 不一致 / 形式不正）がすべて 401 + 完全同一の応答 body
+// を返すことを契約として固定する（Req 3.5, 3.6 / 拒否理由の fingerprinting 防止）。
+// 有効 Cookie 併送時にも fallback しないことを 1 ケース追加検証する。
+func TestContract_BearerToken_RejectionUniformity_AllRejectionShapes(t *testing.T) {
+	// Arrange: real verifier を注入した router と、各区分の不正 token を組み立てる
+	secret := []byte("contract-bearer-secret-32bytes-xx")
+	wrongSecret := []byte("contract-wrong-secret-32bytes-yyy")
+	now := time.Now()
+
+	signToken := func(key []byte, claims jwt.MapClaims) string {
+		t.Helper()
+		s, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(key)
+		if err != nil {
+			t.Fatalf("SignedString returned error: %v", err)
+		}
+		return s
+	}
+	validClaims := func() jwt.MapClaims {
+		return jwt.MapClaims{
+			"sub":       "contract-user-1",
+			"iat":       now.Unix(),
+			"exp":       now.Add(15 * time.Minute).Unix(),
+			"token_use": "access",
+		}
+	}
+
+	wrongSignature := signToken(wrongSecret, validClaims())
+	expiredClaims := validClaims()
+	expiredClaims["iat"] = now.Add(-1 * time.Hour).Unix()
+	expiredClaims["exp"] = now.Add(-45 * time.Minute).Unix()
+	expired := signToken(secret, expiredClaims)
+	wrongUseClaims := validClaims()
+	wrongUseClaims["token_use"] = "refresh"
+	wrongUse := signToken(secret, wrongUseClaims)
+
+	sessions := map[string]*model.Session{
+		"contract-session": {
+			ID:        "contract-session",
+			UserID:    "contract-user-1",
+			ExpiresAt: time.Now().Add(1 * time.Hour),
+		},
+	}
+	deps := &RouterDeps{
+		SessionFinder:     &mockSessionFinderForRouter{sessions: sessions},
+		CORSAllowedOrigin: "http://localhost:3000",
+		RateLimiter:       middleware.NewRateLimiter(middleware.DefaultRateLimiterConfig()),
+		AuthService:       &mockAuthService{},
+		AuthConfig:        AuthHandlerConfig{BaseURL: "http://localhost:3000"},
+		JWTVerifier:       auth.NewJWTVerifier(secret),
+		SubscriptionService: &mockSubscriptionService{
+			listSubscriptionsFn: func(ctx context.Context, uid string) ([]subscriptionResponse, error) {
+				return []subscriptionResponse{}, nil
+			},
+		},
+	}
+	router := NewRouter(deps)
+
+	cases := []struct {
+		name       string
+		token      string
+		withCookie bool
+	}{
+		{name: "署名不正（別 secret で sign）のとき 401", token: wrongSignature},
+		{name: "期限切れのとき 401", token: expired},
+		{name: "token_use 不一致（refresh）のとき 401", token: wrongUse},
+		{name: "形式不正（not-a-jwt）のとき 401", token: "not-a-jwt"},
+		{name: "署名不正 + 有効 Cookie 併送でも fallback せず 401", token: wrongSignature, withCookie: true},
+	}
+
+	// 全区分の応答（status / Content-Type / body）が完全同一であることを比較するため、
+	// 最初のケースの応答を基準として保持する。
+	var baseStatus int
+	var baseBody, baseContentType string
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Act
+			req := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			if tc.withCookie {
+				req.AddCookie(&http.Cookie{Name: "session_id", Value: "contract-session"})
+			}
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+			resp := w.Result()
+
+			// Assert: 401 固定
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want %d (Req 3.5)", resp.StatusCode, http.StatusUnauthorized)
+			}
+			// Assert: 全区分で応答が完全同一（Req 3.6: 拒否理由を区別できない）
+			if i == 0 {
+				baseStatus = resp.StatusCode
+				baseBody = w.Body.String()
+				baseContentType = resp.Header.Get("Content-Type")
+				return
+			}
+			if resp.StatusCode != baseStatus {
+				t.Errorf("status = %d, want %d (全拒否区分で同一)", resp.StatusCode, baseStatus)
+			}
+			if got := w.Body.String(); got != baseBody {
+				t.Errorf("body = %q, want %q (Req 3.6: 完全同一の拒否応答)", got, baseBody)
+			}
+			if got := resp.Header.Get("Content-Type"); got != baseContentType {
+				t.Errorf("Content-Type = %q, want %q", got, baseContentType)
+			}
+		})
 	}
 }

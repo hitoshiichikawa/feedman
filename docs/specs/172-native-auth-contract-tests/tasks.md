@@ -6,7 +6,7 @@
 タスクでは `TEST_DATABASE_URL` 接続時のみ実行されるサブテスト）が green であることを
 確認してから次タスクへ進む。
 
-- [ ] 1. JSON 応答契約テスト（token / refresh / revoke）を追加する
+- [x] 1. JSON 応答契約テスト（token / refresh / revoke）を追加する
   - `internal/handler/integration_test.go` の末尾に以下 3 ケースを追加する
   - `TestContract_TokenResponse_ExactJSONShape`: 既存 `createNativeAuthIntegrationRouter`
     + 既存 `runNativeLoginCallbackAndExchange` を用いて 200 を取得し、レスポンス JSON
@@ -20,7 +20,7 @@
     `TestIntegration_RevokeFlow_*`）は変更しない（NFR 2.2）
   - `_Requirements: 2.1, 2.2, 2.3, 2.4, 2.5_`
 
-- [ ] 2. native callback の Location 契約テストを追加する
+- [x] 2. native callback の Location 契約テストを追加する
   - `internal/handler/integration_test.go` の末尾に
     `TestContract_NativeCallbackLocation_AppSchemeAndAuthCode` を追加する
   - native login → callback で得た 303 応答の `Location` ヘッダが
@@ -31,7 +31,7 @@
     （scheme / host / path / クエリ名）の正規表現的固定に専念する
   - `_Requirements: 2.6_`
 
-- [ ] 3. Bearer access token が既存 API に到達し Cookie と同一ユーザーで応答する契約テストを追加する
+- [x] 3. Bearer access token が既存 API に到達し Cookie と同一ユーザーで応答する契約テストを追加する
   - `internal/handler/integration_test.go` の末尾に
     `TestContract_BearerAccessToken_ReachesProtectedAPI_SameUserAsCookie` を追加する
   - 既存 `auth.NewJWTIssuer` + `auth.NewJWTVerifier` を同一 secret で生成し、
@@ -45,7 +45,7 @@
     固定する（既存 round-trip は 200 status 到達のみ）
   - `_Requirements: 1.5_`
 
-- [ ] 4. Bearer 拒否 4 区分の uniform 契約テストを追加する
+- [x] 4. Bearer 拒否 4 区分の uniform 契約テストを追加する
   - `internal/handler/integration_test.go` の末尾に
     `TestContract_BearerToken_RejectionUniformity_AllRejectionShapes` を追加する
   - 同一 secret の `JWTVerifier` を `RouterDeps.JWTVerifier` に注入した router を構築し、
@@ -60,7 +60,7 @@
     fallback しないことを 1 ケースだけ追加検証する
   - `_Requirements: 3.5, 3.6_`
 
-- [ ] 5. E2E DB-backed full-flow テストを追加する
+- [x] 5. E2E DB-backed full-flow テストを追加する
   - 新規ファイル `internal/handler/native_auth_e2e_db_test.go` を作成し、以下を実装する
   - `TEST_DATABASE_URL` 接続セットアップ（既存 `setupRefreshTokenTestDB` / `setupWithdrawTestDB`
     と同型）を関数 `setupNativeAuthE2EDB(t *testing.T) *sql.DB` として配置。DB 未到達時は
@@ -87,7 +87,7 @@
     を最小限差し込み、`DB の永続化状態が API 応答と整合する` ことまで検証
   - `_Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 3.1, 3.2, 3.3, 3.4_`
 
-- [ ] 6. SERVER.md §1 ↔ 実装の契約同期文書を作成する
+- [x] 6. SERVER.md §1 ↔ 実装の契約同期文書を作成する
   - 新規ファイル `docs/specs/172-native-auth-contract-tests/contract-notes.md` を作成
   - design.md「Contract Notes Document」の `Structure` に従い、以下のセクションを記述:
     a. `## §1.3 Endpoint contracts` — `/token` / `/refresh` / `/revoke` 各エンドポイント
@@ -108,7 +108,7 @@
     （Req 4.5）
   - `_Requirements: 4.1, 4.2, 4.3, 4.4, 4.5_`
 
-- [ ] 7. 既存テストとの非重複・既存挙動非干渉の最終確認
+- [x] 7. 既存テストとの非重複・既存挙動非干渉の最終確認
   - 本タスクは独立コミット単位として 1〜6 完了後にチェックする整理タスク（diff は
     生じない想定だが、必要に応じて重複箇所をリファクタリング）
   - 確認事項:
