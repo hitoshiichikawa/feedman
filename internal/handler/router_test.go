@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/time/rate"
 
 	"github.com/hitoshi/feedman/internal/auth"
 	"github.com/hitoshi/feedman/internal/middleware"
@@ -574,5 +575,167 @@ func TestNewRouter_BearerAuth_ExpiredTokenWithValidCookie_Returns401(t *testing.
 	if w.Result().StatusCode != http.StatusUnauthorized {
 		t.Errorf("status = %d, want %d (期限切れ Bearer は Cookie へ fallback しない / Req 2.2, 2.4)",
 			w.Result().StatusCode, http.StatusUnauthorized)
+	}
+}
+
+// --- native auth 3 ルートの IP 単位レート制限（Issue #171 / design.md Testing Strategy） ---
+
+// newNativeAuthRateLimitRouter は NativeAuthHandler + UnauthIPRateLimiter（指定 burst）を
+// 注入した router を構築する。burst=1 なら同一 IP の 2 回目で必ず 429 になる。
+func newNativeAuthRateLimitRouter(burst int) (http.Handler, *alwaysSucceedExchangeService, *middleware.IPRateLimiter) {
+	svc := &alwaysSucceedExchangeService{}
+	nh := NewNativeAuthHandler(svc)
+	deps := newMinimalDepsForNativeAuth(nh)
+	deps.UnauthIPRateLimiter = middleware.NewIPRateLimiter(middleware.IPRateLimiterConfig{
+		Rate:            rate.Limit(1),
+		Burst:           burst,
+		CleanupInterval: 1 * time.Minute,
+	})
+	return NewRouter(deps), svc, deps.UnauthIPRateLimiter
+}
+
+// nativeAuthRouteCases は 3 ルートの path / リクエストボディ / 通過時 status / service
+// 呼び出し回数の参照を共通化する table。
+type nativeAuthRouteCase struct {
+	name       string
+	path       string
+	body       string
+	wantStatus int
+	calls      func(svc *alwaysSucceedExchangeService) int
+}
+
+func nativeAuthRouteCases() []nativeAuthRouteCase {
+	return []nativeAuthRouteCase{
+		{
+			name:       "token",
+			path:       "/api/auth/token",
+			body:       `{"auth_code":"a","code_verifier":"v"}`,
+			wantStatus: http.StatusOK,
+			calls:      func(svc *alwaysSucceedExchangeService) int { return svc.callCount },
+		},
+		{
+			name:       "refresh",
+			path:       "/api/auth/refresh",
+			body:       `{"refresh_token":"x"}`,
+			wantStatus: http.StatusOK,
+			calls:      func(svc *alwaysSucceedExchangeService) int { return svc.rotateCalls },
+		},
+		{
+			name:       "revoke",
+			path:       "/api/auth/revoke",
+			body:       `{"refresh_token":"x"}`,
+			wantStatus: http.StatusNoContent,
+			calls:      func(svc *alwaysSucceedExchangeService) int { return svc.revokeCalls },
+		},
+	}
+}
+
+// doNativeAuthPost は指定 path へ JSON POST を送る（RemoteAddr 指定付き）。
+func doNativeAuthPost(router http.Handler, path, body, remoteAddr string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = remoteAddr
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	return w
+}
+
+// TestNewRouter_NativeAuthIPRateLimit_429OnExcess は同一 IP の閾値超過時に 3 ルートが
+// 429 + Retry-After で応答し、service（handler 以降）に到達しないことを検証する
+// （Testing Strategy 1〜3 / Req 1.1, 1.2, 1.3, 1.4, 1.5）。
+func TestNewRouter_NativeAuthIPRateLimit_429OnExcess(t *testing.T) {
+	for _, tc := range nativeAuthRouteCases() {
+		t.Run(tc.name+"で同一IP超過のとき429を返しserviceに到達しない", func(t *testing.T) {
+			// Arrange: burst=1（1 回目で枯渇）
+			router, svc, ipRL := newNativeAuthRateLimitRouter(1)
+			defer ipRL.Stop()
+
+			// Act 1: 1 回目は閾値以内なので通常応答（Req 1.4）
+			w1 := doNativeAuthPost(router, tc.path, tc.body, "203.0.113.10:50000")
+			if w1.Result().StatusCode != tc.wantStatus {
+				t.Fatalf("1st status = %d, want %d (閾値以内は通過 / Req 1.4)",
+					w1.Result().StatusCode, tc.wantStatus)
+			}
+			if got := tc.calls(svc); got != 1 {
+				t.Fatalf("1st service calls = %d, want 1", got)
+			}
+
+			// Act 2: 2 回目は超過 → 429
+			w2 := doNativeAuthPost(router, tc.path, tc.body, "203.0.113.10:50001")
+
+			// Assert: 429 + Retry-After、service 未到達（Req 1.1〜1.3, 1.5）
+			resp := w2.Result()
+			if resp.StatusCode != http.StatusTooManyRequests {
+				t.Fatalf("2nd status = %d, want %d (Req 1.1-1.3)", resp.StatusCode, http.StatusTooManyRequests)
+			}
+			if resp.Header.Get("Retry-After") == "" {
+				t.Error("Retry-After header is empty (Req 1.5)")
+			}
+			if got := tc.calls(svc); got != 1 {
+				t.Errorf("service calls after 429 = %d, want 1 (429 は handler 到達前に遮断)", got)
+			}
+		})
+	}
+}
+
+// TestNewRouter_NativeAuthIPRateLimit_IndependentPerIP は別 IP からの要求が超過 IP の
+// 影響を受けないことを検証する（Testing Strategy 4 / Req 1.6）。
+func TestNewRouter_NativeAuthIPRateLimit_IndependentPerIP(t *testing.T) {
+	// Arrange: burst=1 で IP A を枯渇させる
+	router, svc, ipRL := newNativeAuthRateLimitRouter(1)
+	defer ipRL.Stop()
+	body := `{"auth_code":"a","code_verifier":"v"}`
+
+	if w := doNativeAuthPost(router, "/api/auth/token", body, "203.0.113.10:50000"); w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("IP A 1st status = %d, want 200", w.Result().StatusCode)
+	}
+	if w := doNativeAuthPost(router, "/api/auth/token", body, "203.0.113.10:50001"); w.Result().StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("IP A 2nd status = %d, want 429", w.Result().StatusCode)
+	}
+
+	// Act: 別 IP B からの要求
+	w := doNativeAuthPost(router, "/api/auth/token", body, "198.51.100.20:50000")
+
+	// Assert: IP B は独立カウントのため通過する（Req 1.6）
+	if w.Result().StatusCode != http.StatusOK {
+		t.Errorf("IP B status = %d, want 200 (IP ごとに独立カウント / Req 1.6)", w.Result().StatusCode)
+	}
+	if svc.callCount != 2 {
+		t.Errorf("service calls = %d, want 2 (IP A 1回 + IP B 1回)", svc.callCount)
+	}
+}
+
+// TestNewRouter_NativeAuthIPRateLimit_SameShapeAsExistingRoutes は native auth ルートの
+// 429 応答（status / Retry-After / Content-Type / JSON ボディ）が既存未認証ルート
+// （/health）の 429 と同一形式であることを検証する（Testing Strategy 5 / Req 2.3）。
+func TestNewRouter_NativeAuthIPRateLimit_SameShapeAsExistingRoutes(t *testing.T) {
+	// Arrange: 基準となる /health の 429 応答を取得する
+	router, _, ipRL := newNativeAuthRateLimitRouter(1)
+	defer ipRL.Stop()
+	doRouterReq(router, http.MethodGet, "/health", "203.0.113.30:50000") // burst 消費
+	baseW := doRouterReq(router, http.MethodGet, "/health", "203.0.113.30:50001")
+	baseResp := baseW.Result()
+	if baseResp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("health 2nd status = %d, want 429", baseResp.StatusCode)
+	}
+
+	// Act: native auth ルートの 429 応答（別 IP で burst 消費 → 超過）
+	body := `{"auth_code":"a","code_verifier":"v"}`
+	doNativeAuthPost(router, "/api/auth/token", body, "203.0.113.40:50000")
+	w := doNativeAuthPost(router, "/api/auth/token", body, "203.0.113.40:50001")
+	resp := w.Result()
+
+	// Assert: status / Content-Type / ボディが /health の 429 と一致（Req 2.3）
+	if resp.StatusCode != baseResp.StatusCode {
+		t.Errorf("status = %d, want %d", resp.StatusCode, baseResp.StatusCode)
+	}
+	if got, want := resp.Header.Get("Content-Type"), baseResp.Header.Get("Content-Type"); got != want {
+		t.Errorf("Content-Type = %q, want %q", got, want)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Error("Retry-After header is empty")
+	}
+	if got, want := w.Body.String(), baseW.Body.String(); got != want {
+		t.Errorf("429 body = %q, want %q (既存未認証ルートと同一形式 / Req 2.3)", got, want)
 	}
 }
