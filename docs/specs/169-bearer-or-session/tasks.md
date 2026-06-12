@@ -25,7 +25,7 @@
   - _Requirements: 1.1, 1.3, 1.4, 2.4, 2.5, 2.6, 2.7, 3.1, 3.2, 4.2, 4.3, NFR 1.1_
   - _Depends: 1_
 
-- [ ] 3. router / app: 認証必須グループの差し替えと wiring
+- [x] 3. router / app: 認証必須グループの差し替えと wiring
   - `internal/handler/router.go`: `RouterDeps.JWTVerifier middleware.JWTVerifier`（任意・nil 可）を
     追加し、認証必須グループの `middleware.NewSessionMiddleware(deps.SessionFinder)` 行を
     `middleware.NewBearerOrSessionMiddleware(deps.JWTVerifier, deps.SessionFinder)` に 1 行
