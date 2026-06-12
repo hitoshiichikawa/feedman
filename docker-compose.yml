@@ -70,6 +70,10 @@ services:
       - BASE_URL=${BASE_URL:-http://localhost:3000}
       - CORS_ALLOWED_ORIGIN=${CORS_ALLOWED_ORIGIN:-http://localhost:3000}
       - COOKIE_DOMAIN=${COOKIE_DOMAIN:-}
+      # Native Auth（iOS token 認証 / #163）。未設定なら token / refresh / revoke と
+      # Bearer 認証は無効化される（fail-closed。.env.sample の NATIVE_AUTH_JWT_SECRET 参照）。
+      - NATIVE_AUTH_JWT_SECRET=${NATIVE_AUTH_JWT_SECRET:-}
+      - NATIVE_AUTH_JWT_KID=${NATIVE_AUTH_JWT_KID:-v1}
       - SERVER_PORT=8080
       - LOG_RETENTION_DAYS=14
     logging:
