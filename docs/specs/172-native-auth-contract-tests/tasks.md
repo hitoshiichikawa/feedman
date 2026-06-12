@@ -6,7 +6,7 @@
 タスクでは `TEST_DATABASE_URL` 接続時のみ実行されるサブテスト）が green であることを
 確認してから次タスクへ進む。
 
-- [ ] 1. JSON 応答契約テスト（token / refresh / revoke）を追加する
+- [x] 1. JSON 応答契約テスト（token / refresh / revoke）を追加する
   - `internal/handler/integration_test.go` の末尾に以下 3 ケースを追加する
   - `TestContract_TokenResponse_ExactJSONShape`: 既存 `createNativeAuthIntegrationRouter`
     + 既存 `runNativeLoginCallbackAndExchange` を用いて 200 を取得し、レスポンス JSON
