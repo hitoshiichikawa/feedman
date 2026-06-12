@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. router: native auth 3 ルートへ unauthIPMW を適用しレート制限テストを追加
+- [x] 1. router: native auth 3 ルートへ unauthIPMW を適用しレート制限テストを追加
   - `internal/handler/router.go`: `NativeAuthHandler != nil` ガード内の
     `POST /api/auth/token` / `POST /api/auth/refresh` / `POST /api/auth/revoke` の
     route 単位チェーン最外（MaxBodyBytes より外側）に既存 `unauthIPMW` を追加する
@@ -12,7 +12,7 @@
   - 拒否ログ（NFR 1.1, 1.2）は既存 `IPRateLimiter` の共用で充足（実装変更なし）
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 2.3, NFR 1.1, NFR 1.2, NFR 3.1_
 
-- [ ] 2. 縮退・後方互換の regression テスト
+- [x] 2. 縮退・後方互換の regression テスト
   - `internal/handler/router_test.go` に design.md Testing Strategy 6 を追加
     （`NativeAuthHandler` nil で 3 ルートが 404 のまま = 本変更 no-op /
     `UnauthIPRateLimiter` nil で 3 ルートが制限なしで到達する縮退規約）

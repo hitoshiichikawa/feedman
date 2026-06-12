@@ -212,13 +212,15 @@ func NewRouter(deps *RouterDeps) http.Handler {
 		// 登録しない（404 / fail-closed / NFR 2.2）。Session / Bearer middleware は通らない
 		// （Req 1.5 / #168 Req 2.4: revoke は token 所持自体を失効権限とみなす）。
 		// 巨大ボディ DoS 防止のためボディ上限ミドルウェア（DefaultMaxBodyBytes）を重ねる。
-		// IP レート制限（unauthIPMW）は Issue #171 の領分のため本 spec では適用しない。
+		// 未認証で公開される token 系入口のため、既存未認証 3 ルートと同じ IP 単位
+		// レート制限（unauthIPMW）を route チェーン最外に重ねる（Issue #171 / SERVER.md §1.7。
+		// 閾値超過時はボディ上限 wrap・JSON decode・永続化層参照に到達せず 429 で遮断）。
 		if deps.NativeAuthHandler != nil {
-			r.With(middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
+			r.With(unauthIPMW, middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
 				Post("/api/auth/token", deps.NativeAuthHandler.Token)
-			r.With(middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
+			r.With(unauthIPMW, middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
 				Post("/api/auth/refresh", deps.NativeAuthHandler.Refresh)
-			r.With(middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
+			r.With(unauthIPMW, middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
 				Post("/api/auth/revoke", deps.NativeAuthHandler.Revoke)
 		}
 	})
