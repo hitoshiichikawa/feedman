@@ -20,7 +20,7 @@
     `TestIntegration_RevokeFlow_*`）は変更しない（NFR 2.2）
   - `_Requirements: 2.1, 2.2, 2.3, 2.4, 2.5_`
 
-- [ ] 2. native callback の Location 契約テストを追加する
+- [x] 2. native callback の Location 契約テストを追加する
   - `internal/handler/integration_test.go` の末尾に
     `TestContract_NativeCallbackLocation_AppSchemeAndAuthCode` を追加する
   - native login → callback で得た 303 応答の `Location` ヘッダが
