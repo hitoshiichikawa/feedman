@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+
 	"github.com/hitoshi/feedman/internal/auth"
 	"github.com/hitoshi/feedman/internal/middleware"
 	"github.com/hitoshi/feedman/internal/model"
@@ -2208,5 +2210,116 @@ func TestContract_BearerAccessToken_ReachesProtectedAPI_SameUserAsCookie(t *test
 	if !strings.Contains(wBearer.Body.String(), "sub-of-"+userID) {
 		t.Errorf("Bearer body %q does not contain %q (JWT sub からの userID 解決)",
 			wBearer.Body.String(), "sub-of-"+userID)
+	}
+}
+
+// TestContract_BearerToken_RejectionUniformity_AllRejectionShapes は Bearer 拒否の 4 区分
+// （署名不正 / 期限切れ / token_use 不一致 / 形式不正）がすべて 401 + 完全同一の応答 body
+// を返すことを契約として固定する（Req 3.5, 3.6 / 拒否理由の fingerprinting 防止）。
+// 有効 Cookie 併送時にも fallback しないことを 1 ケース追加検証する。
+func TestContract_BearerToken_RejectionUniformity_AllRejectionShapes(t *testing.T) {
+	// Arrange: real verifier を注入した router と、各区分の不正 token を組み立てる
+	secret := []byte("contract-bearer-secret-32bytes-xx")
+	wrongSecret := []byte("contract-wrong-secret-32bytes-yyy")
+	now := time.Now()
+
+	signToken := func(key []byte, claims jwt.MapClaims) string {
+		t.Helper()
+		s, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(key)
+		if err != nil {
+			t.Fatalf("SignedString returned error: %v", err)
+		}
+		return s
+	}
+	validClaims := func() jwt.MapClaims {
+		return jwt.MapClaims{
+			"sub":       "contract-user-1",
+			"iat":       now.Unix(),
+			"exp":       now.Add(15 * time.Minute).Unix(),
+			"token_use": "access",
+		}
+	}
+
+	wrongSignature := signToken(wrongSecret, validClaims())
+	expiredClaims := validClaims()
+	expiredClaims["iat"] = now.Add(-1 * time.Hour).Unix()
+	expiredClaims["exp"] = now.Add(-45 * time.Minute).Unix()
+	expired := signToken(secret, expiredClaims)
+	wrongUseClaims := validClaims()
+	wrongUseClaims["token_use"] = "refresh"
+	wrongUse := signToken(secret, wrongUseClaims)
+
+	sessions := map[string]*model.Session{
+		"contract-session": {
+			ID:        "contract-session",
+			UserID:    "contract-user-1",
+			ExpiresAt: time.Now().Add(1 * time.Hour),
+		},
+	}
+	deps := &RouterDeps{
+		SessionFinder:     &mockSessionFinderForRouter{sessions: sessions},
+		CORSAllowedOrigin: "http://localhost:3000",
+		RateLimiter:       middleware.NewRateLimiter(middleware.DefaultRateLimiterConfig()),
+		AuthService:       &mockAuthService{},
+		AuthConfig:        AuthHandlerConfig{BaseURL: "http://localhost:3000"},
+		JWTVerifier:       auth.NewJWTVerifier(secret),
+		SubscriptionService: &mockSubscriptionService{
+			listSubscriptionsFn: func(ctx context.Context, uid string) ([]subscriptionResponse, error) {
+				return []subscriptionResponse{}, nil
+			},
+		},
+	}
+	router := NewRouter(deps)
+
+	cases := []struct {
+		name       string
+		token      string
+		withCookie bool
+	}{
+		{name: "署名不正（別 secret で sign）のとき 401", token: wrongSignature},
+		{name: "期限切れのとき 401", token: expired},
+		{name: "token_use 不一致（refresh）のとき 401", token: wrongUse},
+		{name: "形式不正（not-a-jwt）のとき 401", token: "not-a-jwt"},
+		{name: "署名不正 + 有効 Cookie 併送でも fallback せず 401", token: wrongSignature, withCookie: true},
+	}
+
+	// 全区分の応答（status / Content-Type / body）が完全同一であることを比較するため、
+	// 最初のケースの応答を基準として保持する。
+	var baseStatus int
+	var baseBody, baseContentType string
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Act
+			req := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			if tc.withCookie {
+				req.AddCookie(&http.Cookie{Name: "session_id", Value: "contract-session"})
+			}
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+			resp := w.Result()
+
+			// Assert: 401 固定
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want %d (Req 3.5)", resp.StatusCode, http.StatusUnauthorized)
+			}
+			// Assert: 全区分で応答が完全同一（Req 3.6: 拒否理由を区別できない）
+			if i == 0 {
+				baseStatus = resp.StatusCode
+				baseBody = w.Body.String()
+				baseContentType = resp.Header.Get("Content-Type")
+				return
+			}
+			if resp.StatusCode != baseStatus {
+				t.Errorf("status = %d, want %d (全拒否区分で同一)", resp.StatusCode, baseStatus)
+			}
+			if got := w.Body.String(); got != baseBody {
+				t.Errorf("body = %q, want %q (Req 3.6: 完全同一の拒否応答)", got, baseBody)
+			}
+			if got := resp.Header.Get("Content-Type"); got != baseContentType {
+				t.Errorf("Content-Type = %q, want %q", got, baseContentType)
+			}
+		})
 	}
 }
