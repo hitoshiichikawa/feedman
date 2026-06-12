@@ -45,22 +45,27 @@ func (m *mockAuthCodes) MarkUsed(ctx context.Context, id string) error {
 
 // mockRefreshTokens は RefreshTokenStore 最小 IF の record-and-return モック。
 // 永続化された family / token を捕捉して、テストで TokenHash / FamilyID / ExpiresAt
-// の整合を検証する。FindByHash / MarkRotated は Issue #167 の rotation で追加された。
+// の整合を検証する。FindByHash / MarkRotated は Issue #167 の rotation で、
+// RevokeFamily は Issue #168 の再利用検知昇格 / revoke で追加された。
 type mockRefreshTokens struct {
 	createFamilyFn func(ctx context.Context, f *model.RefreshTokenFamily) error
 	createTokenFn  func(ctx context.Context, t *model.RefreshToken) error
 	findByHashFn   func(ctx context.Context, tokenHash string) (*model.RefreshToken, error)
 	markRotatedFn  func(ctx context.Context, id string, rotatedAt time.Time) error
+	revokeFamilyFn func(ctx context.Context, familyID string, revokedAt time.Time) error
 
-	createFamilyCalls int
-	createTokenCalls  int
-	findByHashCalls   int
-	markRotatedCalls  int
-	storedFamily      *model.RefreshTokenFamily
-	storedToken       *model.RefreshToken
-	lastFindHash      string
-	lastMarkID        string
-	lastMarkAt        time.Time
+	createFamilyCalls  int
+	createTokenCalls   int
+	findByHashCalls    int
+	markRotatedCalls   int
+	revokeFamilyCalls  int
+	storedFamily       *model.RefreshTokenFamily
+	storedToken        *model.RefreshToken
+	lastFindHash       string
+	lastMarkID         string
+	lastMarkAt         time.Time
+	lastRevokeFamilyID string
+	lastRevokeAt       time.Time
 }
 
 func (m *mockRefreshTokens) CreateFamily(ctx context.Context, f *model.RefreshTokenFamily) error {
@@ -96,6 +101,16 @@ func (m *mockRefreshTokens) MarkRotated(ctx context.Context, id string, rotatedA
 	m.lastMarkAt = rotatedAt
 	if m.markRotatedFn != nil {
 		return m.markRotatedFn(ctx, id, rotatedAt)
+	}
+	return nil
+}
+
+func (m *mockRefreshTokens) RevokeFamily(ctx context.Context, familyID string, revokedAt time.Time) error {
+	m.revokeFamilyCalls++
+	m.lastRevokeFamilyID = familyID
+	m.lastRevokeAt = revokedAt
+	if m.revokeFamilyFn != nil {
+		return m.revokeFamilyFn(ctx, familyID, revokedAt)
 	}
 	return nil
 }
@@ -746,7 +761,9 @@ func TestRotateRefreshToken_Revoked(t *testing.T) {
 // TestRotateRefreshToken_AlreadyRotated は RotatedAt が set 済みの token（再利用）に対して
 // ErrInvalidRefreshToken を返し、MarkRotated / CreateToken に進まないことを検証する
 // （Testing Strategy 5 / Req 2.4, 2.6, 2.7）。
-// #168 が family 失効へ昇格するまでは単純拒否のみ。
+// #168 で family 失効への昇格が追加された（昇格時の RevokeFamily 呼び出しは
+// TestRotateRefreshToken_ReuseEscalatesToFamilyRevoke が検証する。本テストの
+// 検証内容＝拒否応答と新 token 未作成は #167 から不変）。
 func TestRotateRefreshToken_AlreadyRotated(t *testing.T) {
 	// Arrange
 	svc, _, refreshTokens, issuer := newServiceWithMocks(t)
@@ -895,6 +912,300 @@ func TestRotateRefreshToken_DoesNotLeakPlainSecretsInError(t *testing.T) {
 	msg := err.Error()
 	if strings.Contains(msg, secretToken) {
 		t.Errorf("error message %q contains plain refresh token (NFR 1.2 / 1.3)", msg)
+	}
+}
+
+// --- 再利用検知の family 失効昇格と RevokeRefreshToken のテスト
+// （Issue #168 / design.md Testing Strategy 1〜7） ---
+
+// TestRotateRefreshToken_ReuseEscalatesToFamilyRevoke は RotatedAt 済み token の提示
+// （再利用検知）で RevokeFamily が当該 FamilyID と now で呼ばれ、ErrInvalidRefreshToken
+// が返り、新 token が作成されないことを検証する（Testing Strategy 1 / Req 1.1, 1.4）。
+func TestRotateRefreshToken_ReuseEscalatesToFamilyRevoke(t *testing.T) {
+	// Arrange
+	svc, _, refreshTokens, issuer := newServiceWithMocks(t)
+	stored := newStoredRefreshToken("user-test-1")
+	rotatedAt := fixedTokenServiceIssuedAt.Add(-1 * time.Hour)
+	stored.RotatedAt = &rotatedAt
+	refreshTokens.findByHashFn = func(ctx context.Context, hash string) (*model.RefreshToken, error) {
+		return stored, nil
+	}
+
+	// Act
+	pair, err := svc.RotateRefreshToken(context.Background(), "plain-refresh-token")
+
+	// Assert: 拒否応答は通常の無効 token と同一 sentinel（Req 1.4）
+	if !errors.Is(err, ErrInvalidRefreshToken) {
+		t.Errorf("err = %v, want ErrInvalidRefreshToken (Req 1.4: 通常拒否と区別しない)", err)
+	}
+	if pair != nil {
+		t.Errorf("pair = %+v, want nil", pair)
+	}
+	// Assert: RevokeFamily が当該 FamilyID と now で 1 回呼ばれる（Req 1.1）
+	if refreshTokens.revokeFamilyCalls != 1 {
+		t.Errorf("RevokeFamily calls = %d, want 1 (再利用検知で family 失効昇格 / Req 1.1)",
+			refreshTokens.revokeFamilyCalls)
+	}
+	if refreshTokens.lastRevokeFamilyID != stored.FamilyID {
+		t.Errorf("RevokeFamily called with familyID=%q, want %q",
+			refreshTokens.lastRevokeFamilyID, stored.FamilyID)
+	}
+	if !refreshTokens.lastRevokeAt.Equal(fixedTokenServiceIssuedAt) {
+		t.Errorf("RevokeFamily revokedAt = %v, want %v",
+			refreshTokens.lastRevokeAt, fixedTokenServiceIssuedAt)
+	}
+	// Assert: 新 token は作成されない
+	if refreshTokens.createTokenCalls != 0 {
+		t.Errorf("CreateToken calls = %d, want 0 (再利用検知時は新 token 未作成)",
+			refreshTokens.createTokenCalls)
+	}
+	if issuer.issueCalls != 0 {
+		t.Errorf("IssueAccessToken calls = %d, want 0", issuer.issueCalls)
+	}
+}
+
+// TestRotateRefreshToken_RaceLoserEscalatesToFamilyRevoke は並行 rotation race の敗者
+// （MarkRotated が ErrRefreshTokenAlreadyRotated を返す = atomic な rotation 確定で
+// 先行された提示）でも同様に RevokeFamily へ昇格することを検証する
+// （Testing Strategy 2 / Req 1.2, 1.4）。
+func TestRotateRefreshToken_RaceLoserEscalatesToFamilyRevoke(t *testing.T) {
+	// Arrange
+	svc, _, refreshTokens, issuer := newServiceWithMocks(t)
+	stored := newStoredRefreshToken("user-test-1")
+	refreshTokens.findByHashFn = func(ctx context.Context, hash string) (*model.RefreshToken, error) {
+		return stored, nil
+	}
+	refreshTokens.markRotatedFn = func(ctx context.Context, id string, rotatedAt time.Time) error {
+		return repository.ErrRefreshTokenAlreadyRotated
+	}
+
+	// Act
+	pair, err := svc.RotateRefreshToken(context.Background(), "plain-refresh-token")
+
+	// Assert
+	if !errors.Is(err, ErrInvalidRefreshToken) {
+		t.Errorf("err = %v, want ErrInvalidRefreshToken (Req 1.4)", err)
+	}
+	if pair != nil {
+		t.Errorf("pair = %+v, want nil", pair)
+	}
+	// Assert: race 敗者も family 失効に昇格する（Req 1.2: 検知漏れ防止）
+	if refreshTokens.revokeFamilyCalls != 1 {
+		t.Errorf("RevokeFamily calls = %d, want 1 (race 敗者も昇格 / Req 1.2)",
+			refreshTokens.revokeFamilyCalls)
+	}
+	if refreshTokens.lastRevokeFamilyID != stored.FamilyID {
+		t.Errorf("RevokeFamily called with familyID=%q, want %q",
+			refreshTokens.lastRevokeFamilyID, stored.FamilyID)
+	}
+	if refreshTokens.createTokenCalls != 0 {
+		t.Errorf("CreateToken calls = %d, want 0", refreshTokens.createTokenCalls)
+	}
+	if issuer.issueCalls != 0 {
+		t.Errorf("IssueAccessToken calls = %d, want 0", issuer.issueCalls)
+	}
+}
+
+// TestRotateRefreshToken_ReuseRevokeFamilyFailureStillRejects は昇格時の RevokeFamily が
+// 失敗しても、拒否（ErrInvalidRefreshToken）が維持され新 token が発行されないことを
+// 検証する（Testing Strategy 3 / Req 1.5: 安全側に倒す）。
+func TestRotateRefreshToken_ReuseRevokeFamilyFailureStillRejects(t *testing.T) {
+	// Arrange
+	svc, _, refreshTokens, issuer := newServiceWithMocks(t)
+	stored := newStoredRefreshToken("user-test-1")
+	rotatedAt := fixedTokenServiceIssuedAt.Add(-1 * time.Hour)
+	stored.RotatedAt = &rotatedAt
+	refreshTokens.findByHashFn = func(ctx context.Context, hash string) (*model.RefreshToken, error) {
+		return stored, nil
+	}
+	refreshTokens.revokeFamilyFn = func(ctx context.Context, familyID string, revokedAt time.Time) error {
+		return errors.New("db unavailable")
+	}
+
+	// Act
+	pair, err := svc.RotateRefreshToken(context.Background(), "plain-refresh-token")
+
+	// Assert: RevokeFamily 失敗でも拒否は維持（内部エラーへ昇格させない / Req 1.5）
+	if !errors.Is(err, ErrInvalidRefreshToken) {
+		t.Errorf("err = %v, want ErrInvalidRefreshToken (RevokeFamily 失敗でも拒否を維持 / Req 1.5)", err)
+	}
+	if pair != nil {
+		t.Errorf("pair = %+v, want nil", pair)
+	}
+	if refreshTokens.revokeFamilyCalls != 1 {
+		t.Errorf("RevokeFamily calls = %d, want 1", refreshTokens.revokeFamilyCalls)
+	}
+	// Req 1.5: 新 token は発行されない
+	if refreshTokens.createTokenCalls != 0 {
+		t.Errorf("CreateToken calls = %d, want 0 (Req 1.5)", refreshTokens.createTokenCalls)
+	}
+	if issuer.issueCalls != 0 {
+		t.Errorf("IssueAccessToken calls = %d, want 0", issuer.issueCalls)
+	}
+}
+
+// TestRotateRefreshToken_RevokedIsNotEscalated は RevokedAt set 済み（失効済み）token の
+// refresh が引き続き昇格なしの単純拒否であることを検証する（Testing Strategy 7 /
+// #167 既存挙動の回帰。失効済み提示は再利用検知ではない）。
+func TestRotateRefreshToken_RevokedIsNotEscalated(t *testing.T) {
+	// Arrange
+	svc, _, refreshTokens, _ := newServiceWithMocks(t)
+	stored := newStoredRefreshToken("user-test-1")
+	revokedAt := fixedTokenServiceIssuedAt.Add(-30 * time.Minute)
+	stored.RevokedAt = &revokedAt
+	refreshTokens.findByHashFn = func(ctx context.Context, hash string) (*model.RefreshToken, error) {
+		return stored, nil
+	}
+
+	// Act
+	_, err := svc.RotateRefreshToken(context.Background(), "plain-refresh-token")
+
+	// Assert
+	if !errors.Is(err, ErrInvalidRefreshToken) {
+		t.Errorf("err = %v, want ErrInvalidRefreshToken", err)
+	}
+	// 失効済みは再利用ではないため RevokeFamily は呼ばれない（昇格なし）
+	if refreshTokens.revokeFamilyCalls != 0 {
+		t.Errorf("RevokeFamily calls = %d, want 0 (失効済みは昇格対象外)",
+			refreshTokens.revokeFamilyCalls)
+	}
+}
+
+// TestRevokeRefreshToken_KnownToken は既知 token の提示で RevokeFamily が当該 FamilyID と
+// now で呼ばれ、nil が返ることを検証する（Testing Strategy 4 / Req 2.1）。
+// token の状態（有効・期限切れ・rotation 済み・失効済み）に関わらず family を失効する
+// （design.md「Revoke フロー」: 古い世代の token しか持たないクライアントのログアウトも
+// 成立させる）。
+func TestRevokeRefreshToken_KnownToken(t *testing.T) {
+	pastTime := fixedTokenServiceIssuedAt.Add(-1 * time.Hour)
+	cases := []struct {
+		name   string
+		mutate func(tok *model.RefreshToken)
+	}{
+		{name: "有効な token のとき family を失効する", mutate: func(tok *model.RefreshToken) {}},
+		{name: "期限切れ token でも family を失効する", mutate: func(tok *model.RefreshToken) {
+			tok.ExpiresAt = pastTime
+		}},
+		{name: "rotation 済み token でも family を失効する", mutate: func(tok *model.RefreshToken) {
+			tok.RotatedAt = &pastTime
+		}},
+		{name: "失効済み token でも冪等に成功する", mutate: func(tok *model.RefreshToken) {
+			tok.RevokedAt = &pastTime
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			svc, _, refreshTokens, _ := newServiceWithMocks(t)
+			stored := newStoredRefreshToken("user-test-1")
+			tc.mutate(stored)
+			refreshTokens.findByHashFn = func(ctx context.Context, hash string) (*model.RefreshToken, error) {
+				return stored, nil
+			}
+
+			// Act
+			err := svc.RevokeRefreshToken(context.Background(), "plain-refresh-token")
+
+			// Assert
+			if err != nil {
+				t.Fatalf("RevokeRefreshToken returned error: %v", err)
+			}
+			if refreshTokens.findByHashCalls != 1 {
+				t.Errorf("FindByHash calls = %d, want 1", refreshTokens.findByHashCalls)
+			}
+			if refreshTokens.lastFindHash != HashNativeSecret("plain-refresh-token") {
+				t.Errorf("FindByHash called with hash=%q, want hash of plain token",
+					refreshTokens.lastFindHash)
+			}
+			if refreshTokens.revokeFamilyCalls != 1 {
+				t.Errorf("RevokeFamily calls = %d, want 1 (Req 2.1)", refreshTokens.revokeFamilyCalls)
+			}
+			if refreshTokens.lastRevokeFamilyID != stored.FamilyID {
+				t.Errorf("RevokeFamily called with familyID=%q, want %q",
+					refreshTokens.lastRevokeFamilyID, stored.FamilyID)
+			}
+			if !refreshTokens.lastRevokeAt.Equal(fixedTokenServiceIssuedAt) {
+				t.Errorf("RevokeFamily revokedAt = %v, want %v",
+					refreshTokens.lastRevokeAt, fixedTokenServiceIssuedAt)
+			}
+		})
+	}
+}
+
+// TestRevokeRefreshToken_UnknownTokenIsNoop は不明 token の提示で RevokeFamily を
+// 呼ばずに nil を返すことを検証する（Testing Strategy 5 / Req 2.2: 冪等・存在オラクル
+// なし）。
+func TestRevokeRefreshToken_UnknownTokenIsNoop(t *testing.T) {
+	// Arrange
+	svc, _, refreshTokens, _ := newServiceWithMocks(t)
+	refreshTokens.findByHashFn = func(ctx context.Context, hash string) (*model.RefreshToken, error) {
+		return nil, nil
+	}
+
+	// Act
+	err := svc.RevokeRefreshToken(context.Background(), "unknown-token")
+
+	// Assert
+	if err != nil {
+		t.Fatalf("RevokeRefreshToken returned error: %v (不明 token は成功扱い / Req 2.2)", err)
+	}
+	if refreshTokens.revokeFamilyCalls != 0 {
+		t.Errorf("RevokeFamily calls = %d, want 0 (不明 token は no-op / Req 2.2)",
+			refreshTokens.revokeFamilyCalls)
+	}
+}
+
+// TestRevokeRefreshToken_InfraErrorPropagates は FindByHash / RevokeFamily の DB 障害が
+// error として上層に伝播する（500 系）こと、およびエラーメッセージに平文 token が
+// 含まれないことを検証する（Testing Strategy 6 / NFR 1.1, 1.3）。
+func TestRevokeRefreshToken_InfraErrorPropagates(t *testing.T) {
+	const secretToken = "very-secret-refresh-token-plain-value-67890"
+	wantErr := errors.New("db unavailable")
+
+	cases := []struct {
+		name  string
+		setup func(m *mockRefreshTokens)
+	}{
+		{
+			name: "FindByHash の DB 障害が伝播する",
+			setup: func(m *mockRefreshTokens) {
+				m.findByHashFn = func(ctx context.Context, hash string) (*model.RefreshToken, error) {
+					return nil, wantErr
+				}
+			},
+		},
+		{
+			name: "RevokeFamily の DB 障害が伝播する",
+			setup: func(m *mockRefreshTokens) {
+				m.findByHashFn = func(ctx context.Context, hash string) (*model.RefreshToken, error) {
+					return newStoredRefreshToken("user-test-1"), nil
+				}
+				m.revokeFamilyFn = func(ctx context.Context, familyID string, revokedAt time.Time) error {
+					return wantErr
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			svc, _, refreshTokens, _ := newServiceWithMocks(t)
+			tc.setup(refreshTokens)
+
+			// Act
+			err := svc.RevokeRefreshToken(context.Background(), secretToken)
+
+			// Assert
+			if err == nil {
+				t.Fatal("err = nil, want non-nil (DB 障害は 500 系へ)")
+			}
+			if !errors.Is(err, wantErr) {
+				t.Errorf("err = %v, want wrap of %v", err, wantErr)
+			}
+			if strings.Contains(err.Error(), secretToken) {
+				t.Errorf("error message %q contains plain refresh token (NFR 1.1 / 1.3)", err.Error())
+			}
+		})
 	}
 }
 

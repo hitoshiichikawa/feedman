@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. auth: 再利用検知の昇格と RevokeRefreshToken
+- [x] 1. auth: 再利用検知の昇格と RevokeRefreshToken
   - `internal/auth/token_service.go`: `RefreshTokenStore` interface に `RevokeFamily` を追加
     （compile-time check で `repository.RefreshTokenRepository` 充足を確認）
   - `RotateRefreshToken` の拒否分岐 2 箇所（手順 3 の RotatedAt 検出 / 手順 4 の
@@ -13,7 +13,7 @@
     （#167 既存ケースの検証内容は変えない。モックの interface 追従は可）
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.1, 2.2, NFR 1.1, NFR 1.3, NFR 3.1_
 
-- [ ] 2. handler: Revoke エンドポイントと router 登録
+- [x] 2. handler: Revoke エンドポイントと router 登録
   - `internal/handler/native_auth_handler.go`: `TokenExchangeService` interface に
     `RevokeRefreshToken` を追加し、`Revoke` handler を実装（204 ボディなし /
     400 INVALID_REQUEST / 500 INTERNAL_ERROR）
@@ -24,7 +24,7 @@
   - _Requirements: 2.1, 2.2, 2.4, 2.5, 2.6, NFR 1.2, NFR 2.1, NFR 2.2_
   - _Depends: 1_
 
-- [ ] 3. 統合テスト: 再利用 family 全滅と revoke 後拒否
+- [x] 3. 統合テスト: 再利用 family 全滅と revoke 後拒否
   - `internal/handler/integration_test.go` に design.md Testing Strategy 10 の 2 シナリオ
     （再利用 → family 全滅 / revoke 204 → refresh 401 → 再 revoke 204 の冪等）を追加
   - 既存の統合テスト・既存ルートが無変更で green であることを確認

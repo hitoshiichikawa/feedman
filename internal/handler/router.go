@@ -200,10 +200,11 @@ func NewRouter(deps *RouterDeps) http.Handler {
 			}
 		}
 
-		// Native Auth トークン交換エンドポイント（Issue #166）と
-		// refresh ローテーションエンドポイント（Issue #167）。
-		// NATIVE_AUTH_JWT_SECRET 未設定のデプロイは NativeAuthHandler が nil となり、両ルートを
-		// 登録しない（404 / fail-closed / NFR 2.2）。Session / Bearer middleware は通らない（Req 1.5）。
+		// Native Auth トークン交換エンドポイント（Issue #166）・refresh ローテーション
+		// エンドポイント（Issue #167）・revoke エンドポイント（Issue #168）。
+		// NATIVE_AUTH_JWT_SECRET 未設定のデプロイは NativeAuthHandler が nil となり、全ルートを
+		// 登録しない（404 / fail-closed / NFR 2.2）。Session / Bearer middleware は通らない
+		// （Req 1.5 / #168 Req 2.4: revoke は token 所持自体を失効権限とみなす）。
 		// 巨大ボディ DoS 防止のためボディ上限ミドルウェア（DefaultMaxBodyBytes）を重ねる。
 		// IP レート制限（unauthIPMW）は Issue #171 の領分のため本 spec では適用しない。
 		if deps.NativeAuthHandler != nil {
@@ -211,6 +212,8 @@ func NewRouter(deps *RouterDeps) http.Handler {
 				Post("/api/auth/token", deps.NativeAuthHandler.Token)
 			r.With(middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
 				Post("/api/auth/refresh", deps.NativeAuthHandler.Refresh)
+			r.With(middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
+				Post("/api/auth/revoke", deps.NativeAuthHandler.Revoke)
 		}
 	})
 
