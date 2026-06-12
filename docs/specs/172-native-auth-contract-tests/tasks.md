@@ -31,7 +31,7 @@
     （scheme / host / path / クエリ名）の正規表現的固定に専念する
   - `_Requirements: 2.6_`
 
-- [ ] 3. Bearer access token が既存 API に到達し Cookie と同一ユーザーで応答する契約テストを追加する
+- [x] 3. Bearer access token が既存 API に到達し Cookie と同一ユーザーで応答する契約テストを追加する
   - `internal/handler/integration_test.go` の末尾に
     `TestContract_BearerAccessToken_ReachesProtectedAPI_SameUserAsCookie` を追加する
   - 既存 `auth.NewJWTIssuer` + `auth.NewJWTVerifier` を同一 secret で生成し、
