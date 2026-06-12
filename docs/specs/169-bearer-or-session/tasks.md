@@ -38,7 +38,7 @@
   - _Requirements: 1.2, 3.3, 3.4, 4.2, 4.4, NFR 2.1, NFR 2.2_
   - _Depends: 2_
 
-- [ ] 4. 統合確認: 発行 ↔ 検証の通しと既存回帰
+- [x] 4. 統合確認: 発行 ↔ 検証の通しと既存回帰
   - `internal/handler/router_test.go` に、#166 `auth.JWTIssuer` で発行した token を
     `auth.JWTVerifier` 注入済み `NewRouter` へ Bearer 提示し、Cookie 無しで既存 API ルートの
     認証が成立する通しケース（同一 secret・固定 now）を追加
