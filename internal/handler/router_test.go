@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+
 	"github.com/hitoshi/feedman/internal/auth"
 	"github.com/hitoshi/feedman/internal/middleware"
 	"github.com/hitoshi/feedman/internal/model"
@@ -502,4 +504,75 @@ func TestNewRouter_BearerAuth_NilVerifierKeepsLegacyBehavior(t *testing.T) {
 			t.Errorf("status = %d, want %d (Req 4.2 / 4.3)", w.Result().StatusCode, http.StatusUnauthorized)
 		}
 	})
+}
+
+// TestNewRouter_BearerAuth_IssuerVerifierRoundTrip は #166 auth.JWTIssuer で発行した
+// 実物 token を auth.JWTVerifier 注入済み NewRouter へ Bearer 提示し、Cookie 無しで
+// 既存 API ルートの認証が成立することを検証する（Testing Strategy router 3 /
+// Req 1.1, 4.1: 同一 secret での発行 ↔ 検証の通し）。
+func TestNewRouter_BearerAuth_IssuerVerifierRoundTrip(t *testing.T) {
+	// Arrange: 発行と検証で同一 secret を共有する実物ペア
+	secret := []byte("router-roundtrip-secret-32bytes-x")
+	issuer := auth.NewJWTIssuer(secret, "v1")
+	tokenString, err := issuer.IssueAccessToken("user-roundtrip-1")
+	if err != nil {
+		t.Fatalf("IssueAccessToken returned error: %v", err)
+	}
+	deps := newBearerAuthDeps(auth.NewJWTVerifier(secret), map[string]*model.Session{})
+	router := NewRouter(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenString)
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert
+	if w.Result().StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d (実物 issuer ↔ verifier の通し / Req 4.1)",
+			w.Result().StatusCode, http.StatusOK)
+	}
+}
+
+// TestNewRouter_BearerAuth_ExpiredTokenWithValidCookie_Returns401 は期限切れ token +
+// 有効 Cookie 併送で 401 になる（Cookie へ fallback しない）ことを router 通しで検証する
+// （Testing Strategy router 通し / Req 2.2, 2.4）。
+func TestNewRouter_BearerAuth_ExpiredTokenWithValidCookie_Returns401(t *testing.T) {
+	// Arrange: exp が過去の token を同一 secret で直接組み立てる
+	secret := []byte("router-roundtrip-secret-32bytes-x")
+	past := time.Now().Add(-1 * time.Hour)
+	expiredToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub":       "user-roundtrip-1",
+		"iat":       past.Add(-15 * time.Minute).Unix(),
+		"exp":       past.Unix(),
+		"token_use": "access",
+	})
+	tokenString, err := expiredToken.SignedString(secret)
+	if err != nil {
+		t.Fatalf("SignedString returned error: %v", err)
+	}
+
+	sessions := map[string]*model.Session{
+		"valid-session": {
+			ID:        "valid-session",
+			UserID:    "user-test-1",
+			ExpiresAt: time.Now().Add(1 * time.Hour),
+		},
+	}
+	router := NewRouter(newBearerAuthDeps(auth.NewJWTVerifier(secret), sessions))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenString)
+	req.AddCookie(&http.Cookie{Name: "session_id", Value: "valid-session"})
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: 有効 Cookie が併送されていても fallback せず 401（Req 2.4）
+	if w.Result().StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d (期限切れ Bearer は Cookie へ fallback しない / Req 2.2, 2.4)",
+			w.Result().StatusCode, http.StatusUnauthorized)
+	}
 }
