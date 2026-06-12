@@ -739,3 +739,46 @@ func TestNewRouter_NativeAuthIPRateLimit_SameShapeAsExistingRoutes(t *testing.T)
 		t.Errorf("429 body = %q, want %q (既存未認証ルートと同一形式 / Req 2.3)", got, want)
 	}
 }
+
+// TestNewRouter_NativeAuthIPRateLimit_Degradations は縮退構成での後方互換を検証する
+// （Testing Strategy 6 / Req 2.4）。
+func TestNewRouter_NativeAuthIPRateLimit_Degradations(t *testing.T) {
+	t.Run("NativeAuthHandler nilのとき3ルートは404のまま（本変更はno-op）", func(t *testing.T) {
+		// Arrange: handler なし + limiter あり
+		deps := newMinimalDepsForNativeAuth(nil)
+		ipRL := middleware.NewIPRateLimiter(middleware.IPRateLimiterConfig{
+			Rate: rate.Limit(1), Burst: 1, CleanupInterval: 1 * time.Minute,
+		})
+		defer ipRL.Stop()
+		deps.UnauthIPRateLimiter = ipRL
+		router := NewRouter(deps)
+
+		// Act & Assert: 3 ルートとも 404（fail-closed のまま / Req 2.4）
+		for _, path := range []string{"/api/auth/token", "/api/auth/refresh", "/api/auth/revoke"} {
+			w := doNativeAuthPost(router, path, `{}`, "203.0.113.50:50000")
+			if w.Result().StatusCode != http.StatusNotFound {
+				t.Errorf("%s status = %d, want 404 (NativeAuthHandler nil / Req 2.4)", path, w.Result().StatusCode)
+			}
+		}
+	})
+
+	t.Run("UnauthIPRateLimiter nilのとき3ルートは制限なしで到達する", func(t *testing.T) {
+		// Arrange: handler あり + limiter なし（既存縮退規約: 素通し no-op）
+		svc := &alwaysSucceedExchangeService{}
+		deps := newMinimalDepsForNativeAuth(NewNativeAuthHandler(svc))
+		router := NewRouter(deps)
+		body := `{"auth_code":"a","code_verifier":"v"}`
+
+		// Act: 同一 IP から連続リクエスト
+		for i := 0; i < 5; i++ {
+			w := doNativeAuthPost(router, "/api/auth/token", body, "203.0.113.60:50000")
+			// Assert: すべて通過（制限なし）
+			if w.Result().StatusCode != http.StatusOK {
+				t.Fatalf("request %d status = %d, want 200 (limiter nil は素通し)", i+1, w.Result().StatusCode)
+			}
+		}
+		if svc.callCount != 5 {
+			t.Errorf("service calls = %d, want 5", svc.callCount)
+		}
+	})
+}
