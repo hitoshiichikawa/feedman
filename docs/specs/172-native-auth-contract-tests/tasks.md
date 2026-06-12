@@ -87,7 +87,7 @@
     を最小限差し込み、`DB の永続化状態が API 応答と整合する` ことまで検証
   - `_Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 3.1, 3.2, 3.3, 3.4_`
 
-- [ ] 6. SERVER.md §1 ↔ 実装の契約同期文書を作成する
+- [x] 6. SERVER.md §1 ↔ 実装の契約同期文書を作成する
   - 新規ファイル `docs/specs/172-native-auth-contract-tests/contract-notes.md` を作成
   - design.md「Contract Notes Document」の `Structure` に従い、以下のセクションを記述:
     a. `## §1.3 Endpoint contracts` — `/token` / `/refresh` / `/revoke` 各エンドポイント
