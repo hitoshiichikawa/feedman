@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. auth: JWTVerifier を追加
+- [x] 1. auth: JWTVerifier を追加
   - `internal/auth/jwt_verifier.go` を新規作成: `NewJWTVerifier(secret []byte)` /
     `VerifyAccessToken(tokenString string) (string, error)`（design.md 検証規則表どおり:
     `jwt.WithValidMethods` で HS256 限定・`jwt.WithExpirationRequired` で exp 必須・
@@ -11,7 +11,7 @@
     alg 偽装 / sub 空・不正文字列を table-driven で検証）
   - _Requirements: 2.1, 2.2, 2.3, 4.1, 4.5, NFR 1.2, NFR 3.1_
 
-- [ ] 2. middleware: BearerOrSession 複合認証を追加
+- [x] 2. middleware: BearerOrSession 複合認証を追加
   - `internal/middleware/bearer_or_session.go` を新規作成: `JWTVerifier` 最小 IF +
     `NewBearerOrSessionMiddleware(jwtVerifier, sessionFinder)`（design.md 判定フロー 0〜3:
     verifier nil なら `NewSessionMiddleware(sessionFinder)` をそのまま返す縮退 / Bearer scheme
@@ -25,7 +25,7 @@
   - _Requirements: 1.1, 1.3, 1.4, 2.4, 2.5, 2.6, 2.7, 3.1, 3.2, 4.2, 4.3, NFR 1.1_
   - _Depends: 1_
 
-- [ ] 3. router / app: 認証必須グループの差し替えと wiring
+- [x] 3. router / app: 認証必須グループの差し替えと wiring
   - `internal/handler/router.go`: `RouterDeps.JWTVerifier middleware.JWTVerifier`（任意・nil 可）を
     追加し、認証必須グループの `middleware.NewSessionMiddleware(deps.SessionFinder)` 行を
     `middleware.NewBearerOrSessionMiddleware(deps.JWTVerifier, deps.SessionFinder)` に 1 行
@@ -38,7 +38,7 @@
   - _Requirements: 1.2, 3.3, 3.4, 4.2, 4.4, NFR 2.1, NFR 2.2_
   - _Depends: 2_
 
-- [ ] 4. 統合確認: 発行 ↔ 検証の通しと既存回帰
+- [x] 4. 統合確認: 発行 ↔ 検証の通しと既存回帰
   - `internal/handler/router_test.go` に、#166 `auth.JWTIssuer` で発行した token を
     `auth.JWTVerifier` 注入済み `NewRouter` へ Bearer 提示し、Cookie 無しで既存 API ルートの
     認証が成立する通しケース（同一 secret・固定 now）を追加

@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+
 	"github.com/hitoshi/feedman/internal/auth"
 	"github.com/hitoshi/feedman/internal/middleware"
 	"github.com/hitoshi/feedman/internal/model"
@@ -407,5 +409,170 @@ func TestNewRouter_NativeAuthRevoke_NotRegisteredWhenHandlerNil(t *testing.T) {
 	if w.Result().StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want %d (NativeAuthHandler nil で fail-closed / NFR 2.2)",
 			w.Result().StatusCode, http.StatusNotFound)
+	}
+}
+
+// --- Bearer-or-Session 認証ルーティング（Issue #169 / design.md Testing Strategy router 1〜4） ---
+
+// newBearerAuthDeps は認証必須ルート（/api/subscriptions）への Bearer / Cookie 認証を
+// 検証するための最小 deps を返す。verifier / sessions を差し替えて各ケースを構成する。
+func newBearerAuthDeps(verifier middleware.JWTVerifier, sessions map[string]*model.Session) *RouterDeps {
+	deps := newMinimalDepsForNativeAuth(nil)
+	deps.JWTVerifier = verifier
+	deps.SessionFinder = &mockSessionFinderForRouter{sessions: sessions}
+	deps.SubscriptionService = &mockSubscriptionService{
+		listSubscriptionsFn: func(ctx context.Context, userID string) ([]subscriptionResponse, error) {
+			return []subscriptionResponse{}, nil
+		},
+	}
+	return deps
+}
+
+// stubRouterJWTVerifier は router テスト用の固定結果 JWTVerifier スタブ。
+type stubRouterJWTVerifier struct {
+	userID string
+	err    error
+}
+
+func (s *stubRouterJWTVerifier) VerifyAccessToken(tokenString string) (string, error) {
+	return s.userID, s.err
+}
+
+// TestNewRouter_BearerAuth_ReachesAPIWithoutCookie は JWTVerifier 注入時に Cookie 無し +
+// Bearer で既存の認証必須ルートに到達できることを検証する（Testing Strategy router 1 /
+// Req 1.1, 1.2: 下流ルートは変更ゼロで透過動作）。
+func TestNewRouter_BearerAuth_ReachesAPIWithoutCookie(t *testing.T) {
+	// Arrange
+	deps := newBearerAuthDeps(&stubRouterJWTVerifier{userID: "user-test-1"}, map[string]*model.Session{})
+	router := NewRouter(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+	req.Header.Set("Authorization", "Bearer stub-valid-token")
+	// Cookie 無し
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: Bearer 認証で既存ルートに到達し 200
+	if w.Result().StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d (Bearer で認証必須ルート到達 / Req 1.1)",
+			w.Result().StatusCode, http.StatusOK)
+	}
+}
+
+// TestNewRouter_BearerAuth_NilVerifierKeepsLegacyBehavior は JWTVerifier nil のとき
+// 従来構成（Cookie セッション認証のみ）と同一挙動になることを検証する
+// （Testing Strategy router 2 / Req 4.2 / NFR 2.2）。
+func TestNewRouter_BearerAuth_NilVerifierKeepsLegacyBehavior(t *testing.T) {
+	sessions := map[string]*model.Session{
+		"valid-session": {
+			ID:        "valid-session",
+			UserID:    "user-test-1",
+			ExpiresAt: time.Now().Add(1 * time.Hour),
+		},
+	}
+
+	t.Run("有効 Cookie のとき従来どおり 200", func(t *testing.T) {
+		// Arrange
+		router := NewRouter(newBearerAuthDeps(nil, sessions))
+		req := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+		req.AddCookie(&http.Cookie{Name: "session_id", Value: "valid-session"})
+		w := httptest.NewRecorder()
+
+		// Act
+		router.ServeHTTP(w, req)
+
+		// Assert
+		if w.Result().StatusCode != http.StatusOK {
+			t.Errorf("status = %d, want %d (NFR 2.1: 既存 Cookie 認証は不変)", w.Result().StatusCode, http.StatusOK)
+		}
+	})
+
+	t.Run("Bearer 付き + Cookie 無しのとき従来どおり 401（token は評価されない）", func(t *testing.T) {
+		// Arrange
+		router := NewRouter(newBearerAuthDeps(nil, sessions))
+		req := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+		req.Header.Set("Authorization", "Bearer anything")
+		w := httptest.NewRecorder()
+
+		// Act
+		router.ServeHTTP(w, req)
+
+		// Assert: 導入前と同一の未認証応答（Req 4.3）
+		if w.Result().StatusCode != http.StatusUnauthorized {
+			t.Errorf("status = %d, want %d (Req 4.2 / 4.3)", w.Result().StatusCode, http.StatusUnauthorized)
+		}
+	})
+}
+
+// TestNewRouter_BearerAuth_IssuerVerifierRoundTrip は #166 auth.JWTIssuer で発行した
+// 実物 token を auth.JWTVerifier 注入済み NewRouter へ Bearer 提示し、Cookie 無しで
+// 既存 API ルートの認証が成立することを検証する（Testing Strategy router 3 /
+// Req 1.1, 4.1: 同一 secret での発行 ↔ 検証の通し）。
+func TestNewRouter_BearerAuth_IssuerVerifierRoundTrip(t *testing.T) {
+	// Arrange: 発行と検証で同一 secret を共有する実物ペア
+	secret := []byte("router-roundtrip-secret-32bytes-x")
+	issuer := auth.NewJWTIssuer(secret, "v1")
+	tokenString, err := issuer.IssueAccessToken("user-roundtrip-1")
+	if err != nil {
+		t.Fatalf("IssueAccessToken returned error: %v", err)
+	}
+	deps := newBearerAuthDeps(auth.NewJWTVerifier(secret), map[string]*model.Session{})
+	router := NewRouter(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenString)
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert
+	if w.Result().StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d (実物 issuer ↔ verifier の通し / Req 4.1)",
+			w.Result().StatusCode, http.StatusOK)
+	}
+}
+
+// TestNewRouter_BearerAuth_ExpiredTokenWithValidCookie_Returns401 は期限切れ token +
+// 有効 Cookie 併送で 401 になる（Cookie へ fallback しない）ことを router 通しで検証する
+// （Testing Strategy router 通し / Req 2.2, 2.4）。
+func TestNewRouter_BearerAuth_ExpiredTokenWithValidCookie_Returns401(t *testing.T) {
+	// Arrange: exp が過去の token を同一 secret で直接組み立てる
+	secret := []byte("router-roundtrip-secret-32bytes-x")
+	past := time.Now().Add(-1 * time.Hour)
+	expiredToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub":       "user-roundtrip-1",
+		"iat":       past.Add(-15 * time.Minute).Unix(),
+		"exp":       past.Unix(),
+		"token_use": "access",
+	})
+	tokenString, err := expiredToken.SignedString(secret)
+	if err != nil {
+		t.Fatalf("SignedString returned error: %v", err)
+	}
+
+	sessions := map[string]*model.Session{
+		"valid-session": {
+			ID:        "valid-session",
+			UserID:    "user-test-1",
+			ExpiresAt: time.Now().Add(1 * time.Hour),
+		},
+	}
+	router := NewRouter(newBearerAuthDeps(auth.NewJWTVerifier(secret), sessions))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenString)
+	req.AddCookie(&http.Cookie{Name: "session_id", Value: "valid-session"})
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: 有効 Cookie が併送されていても fallback せず 401（Req 2.4）
+	if w.Result().StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d (期限切れ Bearer は Cookie へ fallback しない / Req 2.2, 2.4)",
+			w.Result().StatusCode, http.StatusUnauthorized)
 	}
 }

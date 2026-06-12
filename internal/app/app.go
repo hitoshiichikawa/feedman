@@ -210,20 +210,28 @@ func runServe(cfg *config.Config) error {
 		middleware.DefaultIPRateLimiterConfig(cfg.RateLimitUnauthIP),
 	)
 
-	// Native Auth トークン交換（Issue #166）: NATIVE_AUTH_JWT_SECRET が設定されているときのみ
-	// issuer / service / handler を組み立てて RouterDeps に注入する。未設定なら nil のまま、
-	// router 側で POST /api/auth/token は登録されず 404 になる（fail-closed / Req 3.2）。
-	// 起動時に運用者向け Warn を 1 回記録する（Req 3.3）。
+	// Native Auth トークン交換（Issue #166）と Bearer 認証の検証器（Issue #169）:
+	// NATIVE_AUTH_JWT_SECRET が設定されているときのみ issuer / service / handler /
+	// verifier を組み立てて RouterDeps に注入する。未設定なら nil のまま、router 側で
+	// POST /api/auth/token は登録されず 404（fail-closed / Req 3.2）、Bearer 認証は
+	// 無効化され認証必須 API は従来どおり Cookie セッション認証のみで動作する
+	// （#169 Req 4.2 / 4.4。起動は成功する）。起動時に運用者向け Warn を 1 回記録する。
+	//
+	// jwtVerifier は interface 型のため secret 設定時のみ非 nil の具象
+	// （*auth.JWTVerifier）を代入する（typed-nil を作らない）。
 	var nativeAuthHandler *handler.NativeAuthHandler
+	var jwtVerifier middleware.JWTVerifier
 	if cfg.NativeAuthJWTSecret != "" {
 		jwtIssuer := auth.NewJWTIssuer([]byte(cfg.NativeAuthJWTSecret), cfg.NativeAuthJWTKid)
 		nativeTokenService := auth.NewTokenService(authCodeRepo, refreshTokenRepo, jwtIssuer)
 		nativeAuthHandler = handler.NewNativeAuthHandler(nativeTokenService)
+		// 検証は発行と同一の env 値（署名鍵）を共用する（#169 Req 4.1）。
+		jwtVerifier = auth.NewJWTVerifier([]byte(cfg.NativeAuthJWTSecret))
 		slog.Info("native token exchange enabled",
 			slog.String("kid", cfg.NativeAuthJWTKid),
 		)
 	} else {
-		slog.Warn("NATIVE_AUTH_JWT_SECRET is not set; POST /api/auth/token is disabled")
+		slog.Warn("NATIVE_AUTH_JWT_SECRET is not set; POST /api/auth/token and Bearer auth are disabled")
 	}
 
 	deps := &handler.RouterDeps{
@@ -246,8 +254,9 @@ func runServe(cfg *config.Config) error {
 			SessionMaxAge: cfg.SessionMaxAge,
 		},
 
-		// Native Auth (Issue #166)
+		// Native Auth (Issue #166 / #169)
 		NativeAuthHandler: nativeAuthHandler,
+		JWTVerifier:       jwtVerifier,
 
 		FeedService:         feedService,
 		SubscriptionDeleter: subDeleterAdapter,
