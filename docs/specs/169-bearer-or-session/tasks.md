@@ -11,7 +11,7 @@
     alg 偽装 / sub 空・不正文字列を table-driven で検証）
   - _Requirements: 2.1, 2.2, 2.3, 4.1, 4.5, NFR 1.2, NFR 3.1_
 
-- [ ] 2. middleware: BearerOrSession 複合認証を追加
+- [x] 2. middleware: BearerOrSession 複合認証を追加
   - `internal/middleware/bearer_or_session.go` を新規作成: `JWTVerifier` 最小 IF +
     `NewBearerOrSessionMiddleware(jwtVerifier, sessionFinder)`（design.md 判定フロー 0〜3:
     verifier nil なら `NewSessionMiddleware(sessionFinder)` をそのまま返す縮退 / Bearer scheme
