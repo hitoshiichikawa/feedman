@@ -409,3 +409,97 @@ func TestNewRouter_NativeAuthRevoke_NotRegisteredWhenHandlerNil(t *testing.T) {
 			w.Result().StatusCode, http.StatusNotFound)
 	}
 }
+
+// --- Bearer-or-Session 認証ルーティング（Issue #169 / design.md Testing Strategy router 1〜4） ---
+
+// newBearerAuthDeps は認証必須ルート（/api/subscriptions）への Bearer / Cookie 認証を
+// 検証するための最小 deps を返す。verifier / sessions を差し替えて各ケースを構成する。
+func newBearerAuthDeps(verifier middleware.JWTVerifier, sessions map[string]*model.Session) *RouterDeps {
+	deps := newMinimalDepsForNativeAuth(nil)
+	deps.JWTVerifier = verifier
+	deps.SessionFinder = &mockSessionFinderForRouter{sessions: sessions}
+	deps.SubscriptionService = &mockSubscriptionService{
+		listSubscriptionsFn: func(ctx context.Context, userID string) ([]subscriptionResponse, error) {
+			return []subscriptionResponse{}, nil
+		},
+	}
+	return deps
+}
+
+// stubRouterJWTVerifier は router テスト用の固定結果 JWTVerifier スタブ。
+type stubRouterJWTVerifier struct {
+	userID string
+	err    error
+}
+
+func (s *stubRouterJWTVerifier) VerifyAccessToken(tokenString string) (string, error) {
+	return s.userID, s.err
+}
+
+// TestNewRouter_BearerAuth_ReachesAPIWithoutCookie は JWTVerifier 注入時に Cookie 無し +
+// Bearer で既存の認証必須ルートに到達できることを検証する（Testing Strategy router 1 /
+// Req 1.1, 1.2: 下流ルートは変更ゼロで透過動作）。
+func TestNewRouter_BearerAuth_ReachesAPIWithoutCookie(t *testing.T) {
+	// Arrange
+	deps := newBearerAuthDeps(&stubRouterJWTVerifier{userID: "user-test-1"}, map[string]*model.Session{})
+	router := NewRouter(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+	req.Header.Set("Authorization", "Bearer stub-valid-token")
+	// Cookie 無し
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: Bearer 認証で既存ルートに到達し 200
+	if w.Result().StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d (Bearer で認証必須ルート到達 / Req 1.1)",
+			w.Result().StatusCode, http.StatusOK)
+	}
+}
+
+// TestNewRouter_BearerAuth_NilVerifierKeepsLegacyBehavior は JWTVerifier nil のとき
+// 従来構成（Cookie セッション認証のみ）と同一挙動になることを検証する
+// （Testing Strategy router 2 / Req 4.2 / NFR 2.2）。
+func TestNewRouter_BearerAuth_NilVerifierKeepsLegacyBehavior(t *testing.T) {
+	sessions := map[string]*model.Session{
+		"valid-session": {
+			ID:        "valid-session",
+			UserID:    "user-test-1",
+			ExpiresAt: time.Now().Add(1 * time.Hour),
+		},
+	}
+
+	t.Run("有効 Cookie のとき従来どおり 200", func(t *testing.T) {
+		// Arrange
+		router := NewRouter(newBearerAuthDeps(nil, sessions))
+		req := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+		req.AddCookie(&http.Cookie{Name: "session_id", Value: "valid-session"})
+		w := httptest.NewRecorder()
+
+		// Act
+		router.ServeHTTP(w, req)
+
+		// Assert
+		if w.Result().StatusCode != http.StatusOK {
+			t.Errorf("status = %d, want %d (NFR 2.1: 既存 Cookie 認証は不変)", w.Result().StatusCode, http.StatusOK)
+		}
+	})
+
+	t.Run("Bearer 付き + Cookie 無しのとき従来どおり 401（token は評価されない）", func(t *testing.T) {
+		// Arrange
+		router := NewRouter(newBearerAuthDeps(nil, sessions))
+		req := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+		req.Header.Set("Authorization", "Bearer anything")
+		w := httptest.NewRecorder()
+
+		// Act
+		router.ServeHTTP(w, req)
+
+		// Assert: 導入前と同一の未認証応答（Req 4.3）
+		if w.Result().StatusCode != http.StatusUnauthorized {
+			t.Errorf("status = %d, want %d (Req 4.2 / 4.3)", w.Result().StatusCode, http.StatusUnauthorized)
+		}
+	})
+}

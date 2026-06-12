@@ -75,6 +75,12 @@ type RouterDeps struct {
 	// fail-closed パターン。/metrics と同じ後方互換指針）。
 	NativeAuthHandler *NativeAuthHandler
 
+	// JWTVerifier は Bearer access token の検証器（任意 / Issue #169）。
+	// nil の場合、認証必須グループは従来どおり Cookie セッション認証のみで動作する
+	// （NATIVE_AUTH_JWT_SECRET 未設定環境の後方互換。NewBearerOrSessionMiddleware が
+	// nil 縮退で既存 SessionMiddleware をそのまま返す）。
+	JWTVerifier middleware.JWTVerifier
+
 	// フィード
 	FeedService         FeedServiceInterface
 	SubscriptionDeleter SubscriptionDeleter
@@ -218,10 +224,15 @@ func NewRouter(deps *RouterDeps) http.Handler {
 	})
 
 	// --- 認証が必要なルート ---
-	// ミドルウェアスタック: Session → RateLimit(General) → Logging
-	// Logging を Session の後ろに置くことで user_id をログに含める。
+	// ミドルウェアスタック: BearerOrSession → RateLimit(General) → Logging
+	// Logging を認証 middleware の後ろに置くことで user_id をログに含める。
+	// BearerOrSession（Issue #169）は Authorization: Bearer があれば JWT 検証で認証し、
+	// 無ければ既存 SessionMiddleware に委譲する。deps.JWTVerifier が nil
+	// （NATIVE_AUTH_JWT_SECRET 未設定）の場合は SessionMiddleware そのものが返るため、
+	// 構成は本機能導入前と完全に同一（NFR 2.2）。RateLimit / MaxBodyBytes / Logging の
+	// 順序・位置・適用範囲は不変（NFR 2.1）。
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.NewSessionMiddleware(deps.SessionFinder))
+		r.Use(middleware.NewBearerOrSessionMiddleware(deps.JWTVerifier, deps.SessionFinder))
 		r.Use(deps.RateLimiter.GeneralMiddleware())
 		// リクエストボディ上限を適用し、巨大ボディによるメモリ枯渇 DoS を防ぐ。
 		// 上限超過時は各ハンドラの json.Decode がエラーを返し 400 応答となる。
