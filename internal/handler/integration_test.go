@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -1950,5 +1951,118 @@ func TestIntegration_RevokeFlow_RefreshRejectedAndIdempotent(t *testing.T) {
 	if w.Result().StatusCode != http.StatusNoContent {
 		t.Errorf("revoke unknown status = %d, want %d (Req 2.2: 不明 token でも区別しない)",
 			w.Result().StatusCode, http.StatusNoContent)
+	}
+}
+
+// --- 契約テスト（Issue #172 / design.md Contract Test Suite） ---
+
+// TestContract_TokenResponse_ExactJSONShape は POST /api/auth/token の 200 応答 JSON が
+// {access_token, refresh_token, token_type:"Bearer", expires_in:900} の 4 フィールド
+// **厳密集合**であること（余剰キー混入なし）を契約として固定する
+// （Req 2.1, 2.3, 2.4 / SERVER.md §1.3）。
+func TestContract_TokenResponse_ExactJSONShape(t *testing.T) {
+	// Arrange: native login → callback で auth_code を払い出した状態を作る
+	state := newIntegrationState()
+	tokenSvc := &mockNativeTokenExchangeService{}
+	router := createNativeAuthIntegrationRouter(state, tokenSvc)
+	tokenSvc.IssueCode("contract-auth-code")
+
+	// Act: token 交換
+	body := `{"auth_code":"contract-auth-code","code_verifier":"plain-verifier"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/token", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	// Assert: 200 + 4 フィールド厳密集合
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	assertTokenPairExactShape(t, resp.Body)
+}
+
+// TestContract_RefreshResponse_ExactJSONShape は POST /api/auth/refresh の 200 応答 JSON が
+// token 交換と同一の 4 フィールド厳密集合であることを契約として固定する
+// （Req 2.2, 2.3, 2.4 / SERVER.md §1.3）。
+func TestContract_RefreshResponse_ExactJSONShape(t *testing.T) {
+	// Arrange: 交換済みの refresh token を払い出した状態を作る
+	state := newIntegrationState()
+	tokenSvc := &mockNativeTokenExchangeService{}
+	router := createNativeAuthIntegrationRouter(state, tokenSvc)
+	refreshToken := runNativeLoginCallbackAndExchange(t, router)
+
+	// Act: refresh
+	body := fmt.Sprintf(`{"refresh_token":%q}`, refreshToken)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/refresh", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	// Assert: 200 + 4 フィールド厳密集合
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	assertTokenPairExactShape(t, resp.Body)
+}
+
+// assertTokenPairExactShape は token / refresh 共通の応答契約
+// （SERVER.md §1.3: 4 フィールドのみ / token_type:"Bearer" / expires_in:900）を検証する。
+func assertTokenPairExactShape(t *testing.T, body io.Reader) {
+	t.Helper()
+	var got map[string]any
+	if err := json.NewDecoder(body).Decode(&got); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	// 余剰キー混入なし（総キー数 4 / Req 2.1, 2.2）
+	if len(got) != 4 {
+		t.Errorf("response has %d keys %v, want exactly 4 keys (余剰キー混入なし)", len(got), keysOf(got))
+	}
+	if v, ok := got["access_token"].(string); !ok || v == "" {
+		t.Errorf("access_token = %v, want non-empty string", got["access_token"])
+	}
+	if v, ok := got["refresh_token"].(string); !ok || v == "" {
+		t.Errorf("refresh_token = %v, want non-empty string", got["refresh_token"])
+	}
+	if got["token_type"] != "Bearer" {
+		t.Errorf("token_type = %v, want %q (Req 2.3)", got["token_type"], "Bearer")
+	}
+	if v, _ := got["expires_in"].(float64); v != 900 {
+		t.Errorf("expires_in = %v, want 900 (Req 2.4)", got["expires_in"])
+	}
+}
+
+// keysOf は map のキー一覧を返す（assert メッセージ用）。
+func keysOf(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// TestContract_RevokeResponse_204AndEmptyBody は POST /api/auth/revoke の成功応答が
+// 204 No Content + ボディなしであることを契約として固定する（Req 2.5 / SERVER.md §1.3）。
+func TestContract_RevokeResponse_204AndEmptyBody(t *testing.T) {
+	// Arrange: 交換済みの refresh token を払い出した状態を作る
+	state := newIntegrationState()
+	tokenSvc := &mockNativeTokenExchangeService{}
+	router := createNativeAuthIntegrationRouter(state, tokenSvc)
+	refreshToken := runNativeLoginCallbackAndExchange(t, router)
+
+	// Act: revoke
+	body := fmt.Sprintf(`{"refresh_token":%q}`, refreshToken)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/revoke", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	// Assert: 204 + ボディ長 0
+	if w.Result().StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d (Req 2.5)", w.Result().StatusCode, http.StatusNoContent)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("body = %q (len %d), want empty body", w.Body.String(), w.Body.Len())
 	}
 }
