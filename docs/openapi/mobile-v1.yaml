@@ -1,0 +1,981 @@
+openapi: 3.0.3
+info:
+  title: Feedman Mobile API
+  version: 1.0.0-draft
+  license:
+    name: Proprietary
+    url: https://github.com/hitoshiichikawa/feedman
+  description: |
+    Feedman v1 mobile client API contract shared by iOS and Android clients.
+
+    This document intentionally covers the mobile v1 surface only. Web-only
+    Cookie endpoints, keyword push notification APIs, OPML, and other next-phase
+    APIs are outside this contract.
+
+    Contract notes:
+    - Authenticated `/api/*` endpoints accept `Authorization: Bearer <access_token>`.
+    - Web Cookie sessions may also work on the server for backward compatibility,
+      but mobile clients should not depend on Cookies.
+    - Date-time values are RFC3339 strings.
+    - Cursor pagination uses `{ items, next_cursor, has_more }`.
+    - `GET /api/users/me` and item detail feed metadata are part of the target
+      mobile contract and may require the server-side follow-up tracked by
+      hitoshiichikawa/feedman#207 if not yet deployed.
+servers:
+  - url: /
+    description: Configure the concrete API origin in each mobile client environment.
+tags:
+  - name: NativeAuth
+    description: Native OAuth + PKCE token flow.
+  - name: User
+    description: Current user and account lifecycle.
+  - name: Timeline
+    description: Cross-feed timeline and last-seen state.
+  - name: Feeds
+    description: Feed registration and feed-scoped items.
+  - name: Items
+    description: Item detail and read/star state.
+  - name: Search
+    description: Global and feed-scoped item search.
+  - name: Subscriptions
+    description: Subscription list and settings.
+security:
+  - bearerAuth: []
+paths:
+  /auth/google/login:
+    get:
+      tags:
+        - NativeAuth
+      operationId: startNativeGoogleLogin
+      summary: Start native Google OAuth flow.
+      description: |
+        Opens the Google OAuth flow for native clients.
+        Mobile clients must send `flow=native`, an S256 `code_challenge`, and
+        `code_challenge_method=S256`.
+
+        The successful OAuth callback eventually redirects to the app callback
+        URL, for example `feedman://auth/callback?auth_code=...`.
+      security: []
+      parameters:
+        - name: flow
+          in: query
+          required: true
+          schema:
+            type: string
+            enum:
+              - native
+        - name: code_challenge
+          in: query
+          required: true
+          description: Base64url no-padding SHA-256 challenge. Expected length is 43.
+          schema:
+            type: string
+            minLength: 43
+            maxLength: 43
+            pattern: '^[A-Za-z0-9_-]{43}$'
+        - name: code_challenge_method
+          in: query
+          required: true
+          schema:
+            type: string
+            enum:
+              - S256
+      responses:
+        "302":
+          description: Redirects to Google OAuth authorization URL.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/auth/token:
+    post:
+      tags:
+        - NativeAuth
+      operationId: exchangeNativeAuthCode
+      summary: Exchange native auth code for token pair.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthTokenRequest"
+      responses:
+        "200":
+          description: Token pair issued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthTokenResponse"
+        "400":
+          description: Invalid request or invalid grant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIError"
+
+  /api/auth/refresh:
+    post:
+      tags:
+        - NativeAuth
+      operationId: refreshNativeAuthToken
+      summary: Rotate refresh token and issue a new token pair.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthRefreshRequest"
+      responses:
+        "200":
+          description: Token pair rotated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthTokenResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: Invalid refresh token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIError"
+
+  /api/auth/revoke:
+    post:
+      tags:
+        - NativeAuth
+      operationId: revokeNativeRefreshToken
+      summary: Revoke refresh token.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthRevokeRequest"
+      responses:
+        "204":
+          description: Refresh token revoked or already unavailable.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/users/me:
+    get:
+      tags:
+        - User
+      operationId: getCurrentUser
+      summary: Get current user.
+      description: |
+        Mobile current-user endpoint. This is the mobile counterpart of the
+        web-only Cookie endpoint `/auth/me`.
+      responses:
+        "200":
+          description: Current user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    delete:
+      tags:
+        - User
+      operationId: deleteCurrentUser
+      summary: Delete current user account.
+      responses:
+        "204":
+          description: Account deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/users/me/cross-feed-last-seen:
+    put:
+      tags:
+        - Timeline
+      operationId: updateCrossFeedLastSeen
+      summary: Mark cross-feed timeline as seen.
+      responses:
+        "204":
+          description: Last-seen timestamp updated.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/items/cross-feed:
+    get:
+      tags:
+        - Timeline
+      operationId: listCrossFeedItems
+      summary: List new items across subscribed feeds.
+      description: |
+        The request parameter is `since`; the response baseline field is
+        `since_time`. Clients should keep the first page's `since_time` for the
+        session and send it back as `since` on subsequent pages.
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - name: since
+          in: query
+          required: false
+          description: Session baseline returned by the first page as `since_time`.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Cross-feed page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CrossFeedItemsPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/feeds:
+    post:
+      tags:
+        - Feeds
+      operationId: registerFeed
+      summary: Register a feed.
+      description: |
+        Registers a feed by site URL or feed URL. Mobile clients that need the
+        new subscription row should refresh `GET /api/subscriptions` after this
+        request succeeds.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterFeedRequest"
+      responses:
+        "201":
+          description: Feed registered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Feed"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /api/feeds/{feed_id}/items:
+    get:
+      tags:
+        - Feeds
+      operationId: listFeedItems
+      summary: List items in one feed.
+      description: |
+        Feed-scoped items may omit `feed_title` and favicon metadata because the
+        selected feed already provides that context.
+      parameters:
+        - $ref: "#/components/parameters/FeedID"
+        - name: filter
+          in: query
+          required: false
+          schema:
+            type: string
+            default: all
+            enum:
+              - all
+              - unread
+              - starred
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Feed item page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedItemsPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/feeds/starred/items:
+    get:
+      tags:
+        - Feeds
+      operationId: listStarredItems
+      summary: List starred items across feeds.
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Starred item page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StarredItemsPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/items/{item_id}:
+    get:
+      tags:
+        - Items
+      operationId: getItemDetail
+      summary: Get item detail.
+      description: |
+        Returns item detail content. `feed_title` and `feed_favicon_url` are part
+        of the target mobile contract; clients should still tolerate older
+        deployments where those fields are absent.
+      parameters:
+        - $ref: "#/components/parameters/ItemID"
+      responses:
+        "200":
+          description: Item detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ItemDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/items/{item_id}/state:
+    put:
+      tags:
+        - Items
+      operationId: updateItemState
+      summary: Update read/star state.
+      parameters:
+        - $ref: "#/components/parameters/ItemID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ItemStateUpdateRequest"
+      responses:
+        "204":
+          description: State updated.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/items/search:
+    get:
+      tags:
+        - Search
+      operationId: searchItems
+      summary: Search items.
+      description: |
+        Global search omits `feed_id`. Feed-scoped search sends `feed_id`.
+        `scope=global|feed` is not part of the mobile v1 contract.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: feed_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Search result page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchItemsPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/subscriptions:
+    get:
+      tags:
+        - Subscriptions
+      operationId: listSubscriptions
+      summary: List subscriptions.
+      responses:
+        "200":
+          description: Subscription list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Subscription"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/subscriptions/{subscription_id}:
+    delete:
+      tags:
+        - Subscriptions
+      operationId: unsubscribe
+      summary: Unsubscribe.
+      parameters:
+        - $ref: "#/components/parameters/SubscriptionID"
+      responses:
+        "204":
+          description: Subscription deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/subscriptions/{subscription_id}/settings:
+    put:
+      tags:
+        - Subscriptions
+      operationId: updateSubscriptionSettings
+      summary: Update subscription settings.
+      parameters:
+        - $ref: "#/components/parameters/SubscriptionID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubscriptionSettingsRequest"
+      responses:
+        "200":
+          description: Updated subscription.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Subscription"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/subscriptions/{subscription_id}/resume:
+    post:
+      tags:
+        - Subscriptions
+      operationId: resumeSubscription
+      summary: Resume a stopped subscription.
+      parameters:
+        - $ref: "#/components/parameters/SubscriptionID"
+      responses:
+        "200":
+          description: Resumed subscription.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Subscription"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/subscriptions/{subscription_id}/fetch:
+    post:
+      tags:
+        - Subscriptions
+      operationId: fetchSubscription
+      summary: Manually fetch a subscription.
+      parameters:
+        - $ref: "#/components/parameters/SubscriptionID"
+      responses:
+        "204":
+          description: Fetch queued or completed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size. Defaults to 50. Server clamps values above 200 where supported.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    FeedID:
+      name: feed_id
+      in: path
+      required: true
+      schema:
+        type: string
+    ItemID:
+      name: item_id
+      in: path
+      required: true
+      schema:
+        type: string
+    SubscriptionID:
+      name: subscription_id
+      in: path
+      required: true
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: Invalid request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/APIError"
+    Unauthorized:
+      description: Authentication required or token invalid.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/APIError"
+    Forbidden:
+      description: Authenticated user cannot access the resource.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/APIError"
+    NotFound:
+      description: Resource not found or not visible to this user.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/APIError"
+    TooManyRequests:
+      description: Rate limited.
+      headers:
+        Retry-After:
+          schema:
+            type: string
+          description: Seconds until retry, when available.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/APIError"
+
+  schemas:
+    APIError:
+      type: object
+      required:
+        - code
+        - message
+        - category
+        - action
+      properties:
+        code:
+          type: string
+          example: UNAUTHORIZED
+        message:
+          type: string
+        category:
+          type: string
+          example: auth
+        action:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+
+    AuthTokenRequest:
+      type: object
+      required:
+        - auth_code
+        - code_verifier
+      properties:
+        auth_code:
+          type: string
+        code_verifier:
+          type: string
+          minLength: 43
+          maxLength: 128
+
+    AuthRefreshRequest:
+      type: object
+      required:
+        - refresh_token
+      properties:
+        refresh_token:
+          type: string
+
+    AuthRevokeRequest:
+      type: object
+      required:
+        - refresh_token
+      properties:
+        refresh_token:
+          type: string
+
+    AuthTokenResponse:
+      type: object
+      required:
+        - access_token
+        - refresh_token
+        - token_type
+        - expires_in
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        token_type:
+          type: string
+          enum:
+            - Bearer
+        expires_in:
+          type: integer
+          description: Access token lifetime in seconds.
+          example: 900
+
+    User:
+      type: object
+      required:
+        - id
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          nullable: true
+          format: email
+        name:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          nullable: true
+          format: uri
+
+    RegisterFeedRequest:
+      type: object
+      required:
+        - url
+      properties:
+        url:
+          type: string
+          format: uri
+
+    Feed:
+      type: object
+      required:
+        - id
+        - feed_url
+        - site_url
+        - title
+        - fetch_status
+      properties:
+        id:
+          type: string
+        feed_url:
+          type: string
+          format: uri
+        site_url:
+          type: string
+          format: uri
+        title:
+          type: string
+        fetch_status:
+          type: string
+
+    Subscription:
+      type: object
+      required:
+        - id
+        - feed_id
+        - feed_title
+        - feed_url
+        - fetch_interval_minutes
+        - feed_status
+        - unread_count
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        feed_id:
+          type: string
+        feed_title:
+          type: string
+        feed_url:
+          type: string
+          format: uri
+        favicon_url:
+          type: string
+          nullable: true
+          description: Data URL or absolute URL, when available.
+        fetch_interval_minutes:
+          type: integer
+          minimum: 30
+          maximum: 720
+          multipleOf: 30
+        feed_status:
+          type: string
+          enum:
+            - active
+            - stopped
+            - error
+        error_message:
+          type: string
+          nullable: true
+        unread_count:
+          type: integer
+          minimum: 0
+        created_at:
+          type: string
+          format: date-time
+
+    SubscriptionSettingsRequest:
+      type: object
+      required:
+        - fetch_interval_minutes
+      properties:
+        fetch_interval_minutes:
+          type: integer
+          minimum: 30
+          maximum: 720
+          multipleOf: 30
+
+    ItemStateUpdateRequest:
+      type: object
+      properties:
+        is_read:
+          type: boolean
+        is_starred:
+          type: boolean
+      anyOf:
+        - required:
+            - is_read
+        - required:
+            - is_starred
+
+    FeedItem:
+      type: object
+      required:
+        - id
+        - feed_id
+        - title
+        - link
+        - summary
+        - published_at
+        - is_date_estimated
+        - is_read
+        - is_starred
+        - hatebu_count
+      properties:
+        id:
+          type: string
+        feed_id:
+          type: string
+        title:
+          type: string
+        link:
+          type: string
+          format: uri
+        summary:
+          type: string
+        published_at:
+          type: string
+          format: date-time
+        is_date_estimated:
+          type: boolean
+        is_read:
+          type: boolean
+        is_starred:
+          type: boolean
+        hatebu_count:
+          type: integer
+          minimum: 0
+
+    CrossFeedItem:
+      allOf:
+        - $ref: "#/components/schemas/FeedItem"
+        - type: object
+          required:
+            - feed_title
+          properties:
+            feed_title:
+              type: string
+            feed_favicon_url:
+              type: string
+              nullable: true
+              description: Data URL or absolute URL, when available.
+
+    StarredItem:
+      allOf:
+        - $ref: "#/components/schemas/FeedItem"
+        - type: object
+          required:
+            - feed_title
+          properties:
+            feed_title:
+              type: string
+            feed_favicon_url:
+              type: string
+              nullable: true
+
+    SearchItem:
+      type: object
+      required:
+        - id
+        - feed_id
+        - feed_title
+        - title
+        - link
+        - summary
+        - published_at
+        - is_date_estimated
+        - is_read
+        - is_starred
+        - hatebu_count
+      properties:
+        id:
+          type: string
+        feed_id:
+          type: string
+        feed_title:
+          type: string
+        favicon_url:
+          type: string
+          nullable: true
+        title:
+          type: string
+        link:
+          type: string
+          format: uri
+        summary:
+          type: string
+        published_at:
+          type: string
+          format: date-time
+        is_date_estimated:
+          type: boolean
+        is_read:
+          type: boolean
+        is_starred:
+          type: boolean
+        hatebu_count:
+          type: integer
+          minimum: 0
+        hatebu_fetched_at:
+          type: string
+          nullable: true
+          format: date-time
+
+    ItemDetail:
+      allOf:
+        - $ref: "#/components/schemas/FeedItem"
+        - type: object
+          required:
+            - content
+            - feed_title
+          properties:
+            content:
+              type: string
+              description: Sanitized HTML content.
+            author:
+              type: string
+            feed_title:
+              type: string
+            feed_favicon_url:
+              type: string
+              nullable: true
+
+    FeedItemsPage:
+      type: object
+      required:
+        - items
+        - has_more
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/FeedItem"
+        next_cursor:
+          type: string
+          nullable: true
+        has_more:
+          type: boolean
+
+    StarredItemsPage:
+      type: object
+      required:
+        - items
+        - has_more
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/StarredItem"
+        next_cursor:
+          type: string
+          nullable: true
+        has_more:
+          type: boolean
+
+    CrossFeedItemsPage:
+      type: object
+      required:
+        - items
+        - has_more
+        - since_time
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CrossFeedItem"
+        next_cursor:
+          type: string
+          nullable: true
+        has_more:
+          type: boolean
+        since_time:
+          type: string
+          format: date-time
+
+    SearchItemsPage:
+      type: object
+      required:
+        - items
+        - has_more
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchItem"
+        next_cursor:
+          type: string
+          nullable: true
+        has_more:
+          type: boolean
