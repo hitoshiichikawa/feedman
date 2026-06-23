@@ -138,7 +138,9 @@ func runServe(cfg *config.Config) error {
 
 	// itemService / itemStateService は subRepo を SubscriptionChecker として注入し、
 	// 記事詳細取得・状態更新時に購読外フィードへの越境アクセスを拒否する（#175）。
-	itemService := item.NewItemService(itemRepo, itemStateRepo, subRepo)
+	// itemService には追加で feedRepo を FeedMetaProvider として注入し、記事詳細応答に
+	// 所属フィードの表示メタデータ（タイトル / favicon）を付与する（Issue #207 / Req 3.1, 3.2）。
+	itemService := item.NewItemService(itemRepo, itemStateRepo, subRepo, feedRepo)
 	itemStateService := item.NewItemStateService(itemRepo, itemStateRepo, subRepo)
 
 	// 横断新着一覧サービス（Issue #121）。itemRepo の ListNewAcrossFeeds と
