@@ -32,7 +32,7 @@
   - _Requirements: 1.6_
   - _Boundary: README.md_
 
-- [ ] 3. user.Service に GetByID を追加し単体テストを通す
+- [x] 3. user.Service に GetByID を追加し単体テストを通す
   - `internal/user/service.go` に `func (s *Service) GetByID(ctx context.Context, userID string) (*model.User, error)`
     を追加。実装は `s.userRepo.FindByID` を呼ぶ（レガシーパス）、または
     `s.txUserDeleter.FindByID` を呼ぶ（txBeginner パス）薄い wrapper
