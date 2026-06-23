@@ -59,3 +59,42 @@
     repository ルート相対パスでマークダウンリンクとして記述（GitHub UI でも閲覧可能）。
 - 残存課題: なし（README のみの変更で Go コード / テストは未変更。`go test` / `go vet` は
   挙動を変えないため本 task では実行不要。後続 task 3〜7 で実装変更時に verify される）。
+
+### Task 3
+- 採用方針: design.md L348-377「user.Service.GetByID（新規）」節と既存 `Withdraw` の
+  lookup ロジック（service.go L171 / L252 / L425-428）を踏襲し、`txBeginner != nil` ⇒
+  `txUserDeleter.FindByID`、それ以外 ⇒ `userRepo.FindByID` の二択で薄い wrapper として
+  実装した。nil ユーザーは `model.NewUserNotFoundError()`、repository error は
+  `fmt.Errorf("ユーザーの取得に失敗しました: %w", err)` で wrap して返す（既存
+  `withdrawLegacy` / `withdrawTx` の文言と完全一致）。
+- 重要な判断:
+  - **`Withdraw` の選択ロジックを `if s.txBeginner != nil` 単独で判定**: 既存 `Withdraw` は
+    `withdrawTx` / `withdrawLegacy` の 2 メソッドへ分岐するが、`GetByID` は分岐先のロジック
+    が「FindByID を 1 回呼ぶだけ」なので、別関数に分けずに 1 メソッド内で if-else 分岐する形に
+    した。コード重複を避けつつ「同パターン」を保つ最小実装。design.md「実装は `s.userRepo.FindByID`
+    を呼ぶだけ」「txBeginner パス時は `s.txUserDeleter.FindByID` を使う」の指針と整合。
+  - **error wrap 文言は既存 `Withdraw` の "ユーザーの取得に失敗しました" を再利用**: 既存
+    `withdrawLegacy` L173 / `withdrawTx` L173 と同一文言を採用し、運用ログ上で `Withdraw`
+    と `GetByID` の lookup error が同じ書式で出るようにした。新しい文言を発明しない。
+  - **doc comment で「認可を行わない理由」を明示**: design.md L362「ビジネス認可は実施しない
+    （caller userID = lookup userID であり middleware で済んでいる）」をそのまま採用し、
+    将来読者が「サービス層認可漏れではないか？」と疑わないようにした。CLAUDE.md「Backend §1.
+    レイヤリングと依存方向」の「認可はサービス層に集約」の例外条件（middleware が解決した
+    userID をそのまま使う read endpoint）を doc comment で説明する形。
+  - **テストは subtest で「レガシー / tx 両パス」を 1 つの top-level test 関数に集約**:
+    tasks.md L49「レガシーパスと txBeginner パスの両方で挙動が同一であることを確認」を、
+    `t.Run` で 2 subtest に分離する形で実装。`TestService_GetByID_Success` /
+    `_NotFound_ReturnsUserNotFoundError` / `_RepoError_PropagatesError` の 3 関数 ×
+    レガシー・tx の 2 subtest = 計 6 ケース。既存 `TestService_Withdraw_Tx_*` が並列に並ぶ
+    既存パターンと一貫させた。
+  - **tx パスの subtest で `beginCalled` を assert**: `GetByID` は read-only lookup なので
+    `txBeginner.BeginTx` を呼ばない（既存 `Withdraw` は `withdrawTx` でも user 存在確認は
+    トランザクション外で実施するパターン / service.go L171）。本 task ではさらに lookup のみ
+    なので一切 tx を開始しないことを `if beginner.beginCalled` で明示的に検証した。回帰防止。
+  - **`mockUserRepo.findByIDFn` 内で受け取った id を assert**: 「caller userID = lookup userID」
+    の前提が崩れないよう、subtest 内で `id != want.ID` のときに `t.Errorf` を発火させる
+    軽い contract check を加えた（design.md「認可」節の前提が裏で破られないよう保護）。
+- 残存課題: なし。後続 task 4 で `UserServiceInterface` 経由で `GetCurrent` adapter から
+  本メソッドを呼び出す配線が入る（adapter は `a.svc.GetByID(ctx, userID)` を呼んで
+  `currentUserResponse` に変換 / tasks.md L62-64）。本 task では service 層に閉じた追加のみで
+  外部公開 / 配線は触っていない。
