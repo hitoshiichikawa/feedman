@@ -51,7 +51,7 @@
   - _Requirements: 2.1, 2.2, 2.3_
   - _Boundary: user.Service_
 
-- [ ] 4. GET /api/users/me ハンドラ・アダプタ・ルーティング配線を追加し契約テストを通す
+- [x] 4. GET /api/users/me ハンドラ・アダプタ・ルーティング配線を追加し契約テストを通す
   - `internal/handler/user_handler.go` に以下を追加:
     - `UserServiceInterface` に `GetCurrent(ctx context.Context, userID string) (*currentUserResponse, error)`
       メソッド追加
