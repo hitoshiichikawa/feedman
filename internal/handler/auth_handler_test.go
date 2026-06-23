@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -829,4 +830,121 @@ func TestAuthHandler_Callback_Native_TamperedChallenge_Rejects(t *testing.T) {
 	if nativeCalled {
 		t.Error("HandleNativeCallback must not be called with tampered challenge")
 	}
+}
+
+// TestAuthHandler_Me_CookiePathUnchanged は /auth/me の Cookie 経路応答が本 spec（#207）
+// 導入で変化していないことを保護する non-regression テスト（Req 2.6 / 4.3 / NFR 1.1）。
+//
+// 既存 TestAuthHandler_Me_Authenticated_ReturnsUserJSON は status と Content-Type のみを
+// 検査するが、本テストは応答 JSON 本文のキー集合まで踏み込み:
+//
+//   - サブテスト Cookie_Present_ReturnsExistingShape:
+//     応答 200 / Content-Type: application/json / JSON のキー集合が **厳密に**
+//     {id, email, name} のみであること（avatar_url / session_id / refresh_token 等の
+//     新フィールド・secret は含まれない）と、各フィールドの値が mock の返り値と一致
+//     することを集合演算的に assert する。
+//   - サブテスト NoCookie_ReturnsUnauthorized:
+//     Cookie 不在で 401 を返す既存挙動が変化していないことを保護する。
+//
+// 本 task は実装変更を伴わない。`/api/users/me`（#207 で新設）と `/auth/me`（既存 Web Cookie 経路）の
+// 棲み分けを維持し、後者に新フィールドが漏れて返らないことを将来の変更で機械的に検出する gate。
+func TestAuthHandler_Me_CookiePathUnchanged(t *testing.T) {
+	t.Run("Cookie_Present_ReturnsExistingShape", func(t *testing.T) {
+		// Arrange: 既存 mockAuthService パターンで getCurrentUser を注入。
+		// model.User には ID/Email/Name のみ存在し、AvatarURL フィールドは無い
+		// （avatar_url が応答に漏れないことの構造的保証は handler 側の map literal にも依存）。
+		wantUser := &model.User{
+			ID:    "user-id-cookie",
+			Email: "cookie@example.com",
+			Name:  "Cookie User",
+		}
+		svc := &mockAuthService{
+			getCurrentUserFn: func(ctx context.Context, sessionID string) (*model.User, error) {
+				if sessionID != "valid-session" {
+					t.Errorf("sessionID = %q, want %q", sessionID, "valid-session")
+				}
+				return wantUser, nil
+			},
+		}
+		h := NewAuthHandler(svc, AuthHandlerConfig{
+			BaseURL: "http://localhost:3000",
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+		req.AddCookie(&http.Cookie{Name: "session_id", Value: "valid-session"})
+		w := httptest.NewRecorder()
+
+		// Act
+		h.Me(w, req)
+
+		// Assert: status / Content-Type は既存仕様通り
+		resp := w.Result()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+		}
+		if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+			t.Errorf("Content-Type = %q, want %q", ct, "application/json")
+		}
+
+		// JSON 本文を decode してキー集合と値を検査
+		var body map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+
+		// 1. 必須キー {id, email, name} が全て存在し、値が一致する
+		if got, ok := body["id"].(string); !ok || got != wantUser.ID {
+			t.Errorf("id = %v (ok=%v), want %q", body["id"], ok, wantUser.ID)
+		}
+		if got, ok := body["email"].(string); !ok || got != wantUser.Email {
+			t.Errorf("email = %v (ok=%v), want %q", body["email"], ok, wantUser.Email)
+		}
+		if got, ok := body["name"].(string); !ok || got != wantUser.Name {
+			t.Errorf("name = %v (ok=%v), want %q", body["name"], ok, wantUser.Name)
+		}
+
+		// 2. キー集合は **厳密に** {id, email, name} のみであること
+		//    （avatar_url や将来追加されるフィールドが /auth/me から漏れないことを保護）
+		allowed := map[string]bool{
+			"id":    true,
+			"email": true,
+			"name":  true,
+		}
+		if len(body) != len(allowed) {
+			t.Errorf("response key count = %d, want %d (keys=%v)", len(body), len(allowed), keysOf(body))
+		}
+		for k := range body {
+			if !allowed[k] {
+				t.Errorf("response contains forbidden key %q (shape regression: /auth/me should keep {id, email, name})", k)
+			}
+		}
+
+		// 3. 明示的に新フィールド / secret キーが含まれないことを assert（regression net の二重化）
+		//    grep でも検出可能にするため individual key check を残す
+		forbidden := []string{"avatar_url", "session_id", "refresh_token", "password", "password_hash", "access_token"}
+		for _, k := range forbidden {
+			if _, ok := body[k]; ok {
+				t.Errorf("response leaks forbidden key %q from /auth/me (non-regression violation)", k)
+			}
+		}
+	})
+
+	t.Run("NoCookie_ReturnsUnauthorized", func(t *testing.T) {
+		// Arrange: session_id Cookie 不在
+		h := NewAuthHandler(&mockAuthService{}, AuthHandlerConfig{
+			BaseURL: "http://localhost:3000",
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+		w := httptest.NewRecorder()
+
+		// Act
+		h.Me(w, req)
+
+		// Assert: 既存仕様通り 401 を返す
+		resp := w.Result()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+		}
+	})
 }
