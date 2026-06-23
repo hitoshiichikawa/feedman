@@ -28,3 +28,34 @@
     「1 commit = 1 task ID」契約に従い分離。
 - 残存課題: なし（後続 task 2〜7 は本契約文書を参照しながら実装される想定。本 task では
   Go コード変更は一切なし、`go vet` 等の verify も実装変更を含む後続 task で実行される）。
+
+### Task 2
+- 採用方針: tasks.md task 2 本文に列挙された 5 種類の追記項目（Native auth / starred items /
+  search / cross-feed / 手動フェッチ / `GET /api/users/me` / cross-feed-last-seen）を
+  既存の責務別 h3 セクション（認証 / フィード管理 / 記事管理 / 購読管理 / ユーザー管理）に
+  そのまま追記し、ユーザー管理表の直後に Mobile API Contract Document への参照リンクを
+  blockquote 形式で追加した。
+- 重要な判断:
+  - **`POST /api/auth/token` / `/refresh` / `/revoke` は「認証（認証不要）」表に追記**:
+    design.md「Architecture Pattern & Boundary Map」と router.go の認証グループ配線では
+    native auth 系は `BearerOrSession` の **外側**（認証不要グループ）に配置されるため、
+    README 上も既存 `/auth/google/login` / `/auth/logout` 等と同じ「認証（認証不要）」表に
+    束ねる方が境界の説明と整合する。mobile-api-contract.md §3 とも整合（「認証 不要（auth_code
+    or refresh_token を body で提示）」と記載）。
+  - **`GET /api/users/me` の説明文に「モバイル / Web 共通。Bearer または Cookie で認証」と
+    明記**: 既存 `DELETE /api/users/me` と並べた際、両エンドポイントの認証境界が同じ
+    （BearerOrSession 必須）であり、`GET /api/users/me` が `/auth/me` とは別の新規モバイル/Web
+    共通エンドポイントである旨を 1 行で示せるようにした。
+  - **`GET /auth/me` の説明文を「Web Cookie 専用」に補足**: 本 spec の Req 2.6 / NFR 1.1 で
+    `/auth/me` の Cookie 動線を保持する方針なので、README 上で `GET /api/users/me` との
+    棲み分け（モバイルクライアントは `/auth/me` を呼ばず `/api/users/me` を使う）が読者に
+    伝わるよう補足した。
+  - **`GET /api/items/{id}` の説明文に `feed_title` / `feed_favicon_url` の追加を補足**:
+    task 7 で実装する記事詳細応答の拡張内容を README 上でも示し、mobile-api-contract.md §5.3
+    と整合させた。
+  - **Mobile API Contract Document への参照は blockquote 形式**: 既存 README のスタイル
+    （`NEXT_PUBLIC_API_URL は廃止しました。` のような注釈が blockquote で記述されている）と
+    揃え、API エンドポイント全体に対する補足説明としての位置付けを明示。リンク文字列は
+    repository ルート相対パスでマークダウンリンクとして記述（GitHub UI でも閲覧可能）。
+- 残存課題: なし（README のみの変更で Go コード / テストは未変更。`go test` / `go vet` は
+  挙動を変えないため本 task では実行不要。後続 task 3〜7 で実装変更時に verify される）。
