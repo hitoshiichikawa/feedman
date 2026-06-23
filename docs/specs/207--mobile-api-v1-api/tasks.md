@@ -85,7 +85,7 @@
   - _Boundary: UserHandler, UserServiceAdapter, router.go_
   - _Depends: 3_
 
-- [ ] 5. /auth/me の Cookie 経路 non-regression テストを追加する
+- [x] 5. /auth/me の Cookie 経路 non-regression テストを追加する
   - `internal/handler/auth_handler_test.go` に
     `TestAuthHandler_Me_CookiePathUnchanged` を追加:
     - 既存 `mockAuthService` パターンを踏襲し、Cookie `session_id` を持つリクエストで
