@@ -16,7 +16,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.3, 2.4, 3.1, 3.2, 3.4, NFR 2.1, NFR 2.2_
   - _Boundary: mobile-api-contract.md_
 
-- [ ] 2. README の API エンドポイント一覧を更新する (P)
+- [x] 2. README の API エンドポイント一覧を更新する (P)
   - `README.md` の `## API エンドポイント` 配下の表を以下の通り更新:
     - 「ユーザー管理（認証必須）」に `GET /api/users/me`（モバイル / Web 共通の current
       user 取得）を新設項として追加
