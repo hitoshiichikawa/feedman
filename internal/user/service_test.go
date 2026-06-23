@@ -624,6 +624,188 @@ func TestService_Withdraw_Tx_RollsBackOnRefreshTokenDeleteError(t *testing.T) {
 	}
 }
 
+// --- Issue #207: user.Service.GetByID のテスト ---
+
+// TestService_GetByID_Success は GetByID が repository から取得した user を
+// そのまま返すことを検証する（Req 2.1 / 2.2）。レガシーパスと txBeginner パスの
+// 両方で同一挙動になることを subtest で確認する。
+func TestService_GetByID_Success(t *testing.T) {
+	want := &model.User{ID: "user-1", Email: "test@example.com", Name: "Test User"}
+
+	t.Run("レガシーパスのとき repository が返した user をそのまま返す", func(t *testing.T) {
+		// Arrange
+		userRepo := &mockUserRepo{
+			findByIDFn: func(ctx context.Context, id string) (*model.User, error) {
+				if id != want.ID {
+					t.Errorf("FindByID id = %q, want %q", id, want.ID)
+				}
+				return want, nil
+			},
+		}
+		svc := NewService(userRepo, nil, nil, nil)
+
+		// Act
+		got, err := svc.GetByID(context.Background(), want.ID)
+
+		// Assert
+		if err != nil {
+			t.Fatalf("GetByID returned error: %v", err)
+		}
+		if got != want {
+			t.Errorf("GetByID returned %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("txBeginner パスのとき txUserDeleter が返した user をそのまま返す", func(t *testing.T) {
+		// Arrange
+		rec := &txRecorder{}
+		beginner := &fakeTxBeginner{}
+		user := &txUserDeleter{
+			rec: rec,
+			findByIDFn: func(ctx context.Context, id string) (*model.User, error) {
+				if id != want.ID {
+					t.Errorf("FindByID id = %q, want %q", id, want.ID)
+				}
+				return want, nil
+			},
+		}
+		svc := newTxService(beginner, user,
+			&txSessionDeleter{rec: rec},
+			&txSubDeleter{rec: rec},
+			&txItemStateDeleter{rec: rec},
+			nil, nil,
+		)
+
+		// Act
+		got, err := svc.GetByID(context.Background(), want.ID)
+
+		// Assert
+		if err != nil {
+			t.Fatalf("GetByID returned error: %v", err)
+		}
+		if got != want {
+			t.Errorf("GetByID returned %+v, want %+v", got, want)
+		}
+		if beginner.beginCalled {
+			t.Error("expected no transaction to be started for read-only lookup")
+		}
+	})
+}
+
+// TestService_GetByID_NotFound_ReturnsUserNotFoundError は repository が nil を
+// 返したとき model.NewUserNotFoundError が返ることを検証する（Req 2.3）。
+// レガシーパスと txBeginner パスの両方を確認する。
+func TestService_GetByID_NotFound_ReturnsUserNotFoundError(t *testing.T) {
+	t.Run("レガシーパスのとき repository が nil なら UserNotFound を返す", func(t *testing.T) {
+		// Arrange
+		userRepo := &mockUserRepo{
+			findByIDFn: func(ctx context.Context, id string) (*model.User, error) {
+				return nil, nil
+			},
+		}
+		svc := NewService(userRepo, nil, nil, nil)
+
+		// Act
+		got, err := svc.GetByID(context.Background(), "missing-user")
+
+		// Assert
+		if got != nil {
+			t.Errorf("expected nil user, got %+v", got)
+		}
+		var apiErr *model.APIError
+		if !errors.As(err, &apiErr) || apiErr.Code != model.ErrCodeUserNotFound {
+			t.Fatalf("expected UserNotFound error, got %v", err)
+		}
+	})
+
+	t.Run("txBeginner パスのとき txUserDeleter が nil なら UserNotFound を返す", func(t *testing.T) {
+		// Arrange
+		rec := &txRecorder{}
+		beginner := &fakeTxBeginner{}
+		user := &txUserDeleter{
+			rec: rec,
+			findByIDFn: func(ctx context.Context, id string) (*model.User, error) {
+				return nil, nil
+			},
+		}
+		svc := newTxService(beginner, user,
+			&txSessionDeleter{rec: rec},
+			&txSubDeleter{rec: rec},
+			&txItemStateDeleter{rec: rec},
+			nil, nil,
+		)
+
+		// Act
+		got, err := svc.GetByID(context.Background(), "missing-user")
+
+		// Assert
+		if got != nil {
+			t.Errorf("expected nil user, got %+v", got)
+		}
+		var apiErr *model.APIError
+		if !errors.As(err, &apiErr) || apiErr.Code != model.ErrCodeUserNotFound {
+			t.Fatalf("expected UserNotFound error, got %v", err)
+		}
+	})
+}
+
+// TestService_GetByID_RepoError_PropagatesError は repository がエラーを返したとき
+// wrap された error が返ることを検証する。レガシーパスと txBeginner パスの両方で
+// 同一挙動になることを subtest で確認する。
+func TestService_GetByID_RepoError_PropagatesError(t *testing.T) {
+	repoErr := errors.New("db connection lost")
+
+	t.Run("レガシーパスのとき repository のエラーを wrap して返す", func(t *testing.T) {
+		// Arrange
+		userRepo := &mockUserRepo{
+			findByIDFn: func(ctx context.Context, id string) (*model.User, error) {
+				return nil, repoErr
+			},
+		}
+		svc := NewService(userRepo, nil, nil, nil)
+
+		// Act
+		got, err := svc.GetByID(context.Background(), "user-1")
+
+		// Assert
+		if got != nil {
+			t.Errorf("expected nil user on error, got %+v", got)
+		}
+		if !errors.Is(err, repoErr) {
+			t.Errorf("expected error to wrap %v, got %v", repoErr, err)
+		}
+	})
+
+	t.Run("txBeginner パスのとき txUserDeleter のエラーを wrap して返す", func(t *testing.T) {
+		// Arrange
+		rec := &txRecorder{}
+		beginner := &fakeTxBeginner{}
+		user := &txUserDeleter{
+			rec: rec,
+			findByIDFn: func(ctx context.Context, id string) (*model.User, error) {
+				return nil, repoErr
+			},
+		}
+		svc := newTxService(beginner, user,
+			&txSessionDeleter{rec: rec},
+			&txSubDeleter{rec: rec},
+			&txItemStateDeleter{rec: rec},
+			nil, nil,
+		)
+
+		// Act
+		got, err := svc.GetByID(context.Background(), "user-1")
+
+		// Assert
+		if got != nil {
+			t.Errorf("expected nil user on error, got %+v", got)
+		}
+		if !errors.Is(err, repoErr) {
+			t.Errorf("expected error to wrap %v, got %v", repoErr, err)
+		}
+	})
+}
+
 // TestService_Withdraw_Tx_NilNativeAuthDeletersSkip は native auth deleter が
 // 両方 nil のとき、退会が従来どおり成功し（NFR 1.1 後方互換）、
 // auth_codes / refresh_token_families の段がスキップされることを検証する
