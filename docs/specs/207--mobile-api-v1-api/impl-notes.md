@@ -98,3 +98,51 @@
   本メソッドを呼び出す配線が入る（adapter は `a.svc.GetByID(ctx, userID)` を呼んで
   `currentUserResponse` に変換 / tasks.md L62-64）。本 task では service 層に閉じた追加のみで
   外部公開 / 配線は触っていない。
+
+### Task 4
+- 採用方針: design.md「Components and Interfaces」節 UserHandler.GetCurrent / UserServiceAdapter.GetCurrent
+  / router.go の認証必須グループ配下 `r.Route("/api/users", ...)` 追加の 4 箇所の変更指針を
+  そのまま採用。`currentUserResponse` を `user_handler.go` 内 private 型として宣言し、
+  既存 `UserHandler.Withdraw` の error pattern（`middleware.UserIDFromContext` 失敗 → 401
+  UNAUTHORIZED / service エラー → `handleServiceError`）と完全同型で実装した。
+- 重要な判断:
+  - **`currentUserResponse` の宣言場所を `user_handler.go` 内に集約**: design.md L274-280 の
+    interface 定義例と一致させ、handler package 内 private 型として 1 箇所に置いた。
+    `service_adapter.go` の `UserServiceAdapter.GetCurrent` も同 package 内で型を参照
+    できるため、`*currentUserResponse` を返り値型として直接利用できる（package 境界を跨がない）。
+  - **`AvatarURL *string` で `omitempty` 採用 + adapter で常時 nil 固定**: Req 2.4「JSON null
+    または応答からの省略」を「省略」側で実装した（design.md「設計判断」節と一致）。
+    `*string` + `omitempty` の Go 標準挙動として nil なら JSON から省略され、非 nil
+    （将来 OAuth `picture` claim 保存実装後）なら値が出力される。テストでは
+    `TestUserHandler_GetCurrent_OmitsAvatarWhenNil` で nil ケースの省略を、
+    `TestUserHandler_GetCurrent_OmitsSecrets` で非 nil ケース（`avatar_url` キーが
+    出現する場合でも許可キー集合内）を担保した。
+  - **既存 `TestUserHandler_Withdraw_*` パターンとテスト名・テスト構造を厳密に揃える**:
+    Success / NoUserID_ReturnsUnauthorized / UserNotFound / InternalError の 4 パターンを
+    Withdraw と同型で並べ、レビュワーが「対応する Withdraw 系テストを引き写した」と
+    一目で理解できるようにした。追加分は OmitsSecrets と OmitsAvatarWhenNil の 2 件で、
+    本 spec 固有の Req 2.3 / 2.4 / Security Considerations 検証として独立配置。
+  - **OmitsSecrets テストの構造**: 「許可キー集合 {id, email, name, avatar_url} 以外は出ない」
+    形で集合演算的に検査し、将来 currentUserResponse に追加フィールドが入った場合に
+    レビュワーが当該テストを意識せざるを得ない gate を作った（CLAUDE.md「機能追加
+    チェックリスト」の secret 露出禁止の運用上の保護線）。明示的な `forbidden` リスト
+    （session_id / refresh_token / password / password_hash / access_token）の検査も
+    別途追加し、grep でも検出可能な regression net を二重化。
+  - **`router_full_test.go` で `TestRouter_GetUsersMe_RequiresAuth` と
+    `TestNewRouter_UserRoutes_GetCurrentEndpoint` の 2 件を追加**: tasks.md L80-81 が指定する
+    認証必須グループ確認（401）に加え、session 経路で 200 が返ることも同様の既存
+    `TestNewRouter_UserRoutes_WithdrawEndpoint` パターンに揃えて追加した。createTestRouter の
+    `mockAuthService.getCurrentUserFn` が既に user-test-1 を返すモック構成なので、新規モック
+    を追加せずに動作する（`UserService: &mockUserService{}` の default `getCurrentFn`
+    が `&currentUserResponse{ID: userID}` を返すよう mock 側を実装したため、Cookie 経路でも
+    200 を返す）。
+  - **`SetupUserRoutes` で `r.Get("/me", h.GetCurrent)` を `r.Delete("/me", h.Withdraw)`
+    より前に登録**: chi は同一 path で method 別 handler を持つため順序は意味的に問題に
+    ならないが、design.md File Structure Plan の記述順序（GetCurrent → Withdraw）に
+    合わせ、可読性のため `r.Get` を先頭に置いた。`router.go` の認証必須グループ内も
+    同様の順序にした。
+- 残存課題: なし。本 task は handler / adapter / router の追加のみで `app.go` の wiring は
+  既存 `UserServiceAdapter` の生成箇所のままで GetCurrent メソッドが追加で見える
+  （adapter 拡張のみで配線変更不要）。`go test ./...` と `go vet ./...` は全て pass。
+  後続 task 5（`/auth/me` Cookie 経路 non-regression テスト）/ task 6 / 7（記事詳細応答の
+  feed_title / feed_favicon_url 追加）に本 task は影響を与えない。
