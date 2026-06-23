@@ -146,3 +146,42 @@
   （adapter 拡張のみで配線変更不要）。`go test ./...` と `go vet ./...` は全て pass。
   後続 task 5（`/auth/me` Cookie 経路 non-regression テスト）/ task 6 / 7（記事詳細応答の
   feed_title / feed_favicon_url 追加）に本 task は影響を与えない。
+
+### Task 5
+- 採用方針: 既存 `mockAuthService` パターン + `json.NewDecoder(...).Decode(&body)` で応答を
+  `map[string]interface{}` に decode し、サブテスト 2 件（`Cookie_Present_ReturnsExistingShape`
+  / `NoCookie_ReturnsUnauthorized`）で `/auth/me` の Cookie 経路応答が本 spec 導入で
+  変化していないことを保護する non-regression test を追加。`auth_handler.go` /
+  `SetupAuthRoutes` は一切変更しない（task 本文の制約）。
+- 重要な判断:
+  - **キー集合の「厳密一致」を採用**: 既存 `TestAuthHandler_Me_Authenticated_ReturnsUserJSON`
+    は status と Content-Type のみを検査するが、本テストでは `len(body) != len(allowed)`
+    によって応答キー集合が **厳密に** `{id, email, name}` のみであることを assert する。
+    将来 `model.User` に `AvatarURL` フィールドが追加されたり、`/auth/me` handler の
+    map literal に新フィールドが紛れ込んだ場合に、本テストが落ちることで mobile-api-contract.md
+    §2.2「`GET /api/users/me`（モバイル/Web 共通）と `GET /auth/me`（Web Cookie 専用）の
+    棲み分け」が壊れる regression を機械的に検出できる gate になる。
+  - **既存 `TestAuthHandler_Me_Authenticated_ReturnsUserJSON` との重複を許容**: 両テストの
+    観点は分離している（既存 = status/Content-Type のみ・本テスト = 応答本文のキー集合まで踏み込む
+    non-regression）。task 5 本文「**既存形** `{id, email, name}` を含み、本 spec 導入前と
+    同一であることを assert」「`avatar_url` のような新フィールドが `/auth/me` から漏れて
+    返らないことも合わせて assert」が要求する 2 つの観点は、既存テストでは満たせないため
+    新規追加が必要だった。
+  - **禁止キーの明示 enum 列挙で grep 可能な regression net を二重化**: `len(body)` ベースの
+    集合演算的検査に加え、`forbidden := []string{"avatar_url", "session_id", "refresh_token",
+    "password", "password_hash", "access_token"}` の明示 enum を追加 assert。前者は厳密一致で
+    確実に検出するが、後者は `grep -r 'session_id\|refresh_token\|avatar_url' internal/handler`
+    で「secret 漏出 / 新フィールド漏出を検知する gate がどこにあるか」を運用者が grep で
+    見つけられるようにする目的（task 4 の `TestUserHandler_GetCurrent_OmitsSecrets` と
+    同じ二重化パターン）。
+  - **`keysOf` ヘルパーは既存 `integration_test.go` のものを再利用**: 同 package 内に既存の
+    `keysOf(m map[string]any) []string`（integration_test.go:2040）が存在するため、新規定義は
+    重複宣言コンパイルエラーになる。私が一旦追加した重複定義を削除し、既存ヘルパーを利用する
+    形に修正した（`any` は `interface{}` のエイリアスなので `map[string]interface{}` を渡せる）。
+  - **`session_id` Cookie 値の assert**: mock `getCurrentUserFn` 内で受け取った `sessionID` が
+    request Cookie 値 `"valid-session"` と一致することを軽い contract check として確認。Cookie
+    の値が service 層に正しく渡される配線も併せて保護する。
+- 残存課題: なし。task 6 / 7 は記事詳細応答の `feed_title` / `feed_favicon_url` 追加だが、
+  `/auth/me`（本 task の保護対象）と `/api/items/{id}`（task 7 の拡張対象）は完全に異なる
+  endpoint であり、本 task の non-regression gate は互いに干渉しない。`go test ./internal/handler/...`
+  と `go vet ./...` は全て pass。
