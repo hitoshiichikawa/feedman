@@ -67,7 +67,7 @@ func TestIssueAccessToken_SuccessfulIssuance(t *testing.T) {
 			t.Errorf("unexpected signing method: %v", token.Method)
 		}
 		return fixedJWTSecret, nil
-	})
+	}, jwt.WithTimeFunc(func() time.Time { return fixedJWTIssuedAt }))
 	if err != nil {
 		t.Fatalf("jwt.Parse returned error: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestIssueAccessToken_KidPropagation(t *testing.T) {
 			// Assert: parse して header.kid を確認
 			parsed, err := jwt.Parse(tokenString, func(*jwt.Token) (interface{}, error) {
 				return fixedJWTSecret, nil
-			})
+			}, jwt.WithTimeFunc(func() time.Time { return fixedJWTIssuedAt }))
 			if err != nil {
 				t.Fatalf("jwt.Parse: %v", err)
 			}
@@ -196,7 +196,7 @@ func TestIssueAccessToken_DifferentJtisAcrossInvocations(t *testing.T) {
 		}
 		parsed, err := jwt.Parse(tokenString, func(*jwt.Token) (interface{}, error) {
 			return fixedJWTSecret, nil
-		})
+		}, jwt.WithTimeFunc(func() time.Time { return fixedJWTIssuedAt }))
 		if err != nil {
 			t.Fatalf("jwt.Parse[%d]: %v", i, err)
 		}
