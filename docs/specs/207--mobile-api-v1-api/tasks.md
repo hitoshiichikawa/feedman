@@ -99,7 +99,7 @@
   - _Requirements: 2.6, 4.3, NFR 1.1_
   - _Boundary: AuthHandler_
 
-- [ ] 6. item.ItemService.GetItem を拡張し FeedMetaProvider 依存を導入する
+- [x] 6. item.ItemService.GetItem を拡張し FeedMetaProvider 依存を導入する
   - `internal/item/service.go` に以下を追加:
     - `FeedMetaProvider` interface（`FindByID(ctx context.Context, id string) (*model.Feed, error)`
       の 1 メソッドのみ。既存 `SubscriptionChecker` と同じ interface segregation パターン）
