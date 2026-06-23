@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. Mobile API Contract Document を新規作成する (P)
+- [x] 1. Mobile API Contract Document を新規作成する (P)
   - `docs/specs/207--mobile-api-v1-api/mobile-api-contract.md` を新規作成
   - 構成は design.md「Mobile API Contract Document の構成」節に従う:
     概要 / 共通方針（認証ヘッダ・エラー応答形式・JSON 命名規約）/ Native Auth サマリ /
