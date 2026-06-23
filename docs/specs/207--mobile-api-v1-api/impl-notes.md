@@ -185,3 +185,52 @@
   `/auth/me`（本 task の保護対象）と `/api/items/{id}`（task 7 の拡張対象）は完全に異なる
   endpoint であり、本 task の non-regression gate は互いに干渉しない。`go test ./internal/handler/...`
   と `go vet ./...` は全て pass。
+
+### Task 6
+- 採用方針: design.md L379-447「item.ItemService.GetItem（拡張）」節と
+  「Components and Interfaces - Service Layer」の interface segregation 指針をそのまま採用し、
+  `FeedMetaProvider` 1 メソッド interface（既存 `SubscriptionChecker` と同パターン）を新設して
+  `NewItemService` を 4 引数化、既存認可フロー（FindByID → SubscriptionChecker →
+  FindByUserAndItem）の **後** に feed lookup → `model.FaviconDataURL` で整形して `ItemDetail` に
+  populate する形で実装した。
+- 重要な判断:
+  - **feed lookup を認可後に配置**: design.md L388 / L444-447 が要求する通り、認可フロー（購読確認 /
+    存在秘匿）を完全に通過した後にのみ feed メタを取得する形にした。これにより未購読 user に対して
+    feed が引き当てられること自体を秘匿でき、`ITEM_NOT_FOUND` 応答条件（Req 3.5）が完全に不変
+    となる。既存 `TestItemService_GetItem_Unsubscribed_ReturnsNotFound` /
+    `TestItemService_GetItem_NotFound` が変更なしで pass することで保証。
+  - **`feedRepo` が nil を返したときの応答は汎用 error**: design.md L396-398 が「FindByID が nil
+    なら error として上位に返す（fail-fast）」と指定しているため、`model.NewItemNotFoundError`
+    ではなく汎用 `fmt.Errorf("記事所属フィードの取得に失敗しました: feed_id=%s が見つかりません", ...)` を
+    返す形にした。`ItemNotFoundError` を返すと「存在しない item」と「内部不整合（孤立 item）」が
+    handler 層で同じ 404 に集約され、内部不整合の検出能力が落ちるため。汎用 error は上位
+    `handleServiceError` で 500 に集約され、運用ログから孤立 item を発見可能になる。FK 制約により
+    実運用では発生しないが、防御的に 500 に倒す側を採用。
+  - **既存 19 テストの mock 互換性確保のため `defaultFeedProvider()` ヘルパーを導入**:
+    `NewItemService` シグネチャ変更で全テストの呼び出し側に 4 引数目を追加する必要が
+    あったが、既存テストは `FeedTitle` / `FeedFaviconURL` を検査しないため、空 `Feed{ID: id}`
+    を返す `defaultFeedProvider()` ヘルパーで一括対応した。既存テストロジック自体は一切変更
+    せず、引数追加のみで互換性を確保。既存 `subscribedChecker()` / `unsubscribedChecker()`
+    と同型の命名で読みやすさを揃えた。
+  - **3 つの新規テストを既存 `GetItem` テストクラスタの末尾にまとめて配置**:
+    `TestItemService_GetItem_PopulatesFeedMetadata`（正常系 / Req 3.1, 3.2）→
+    `_NullFaviconWhenFeedHasNone`（境界 / Req 3.4）→ `_FeedRepoError_PropagatesError`
+    （異常系 / fail-fast）の順で、AC との対応を test 名と doc コメントに明示。
+    AC 起点 + 正常 / 境界 / 異常の網羅（CLAUDE.md「テスト規約」）。
+  - **`FeedMetaProvider.FindByID` の id 引数 contract check**: 正常系テスト
+    `_PopulatesFeedMetadata` の mock 内で `id != "feed-1"` のときに `t.Errorf` を発火させ、
+    「feed lookup が item.FeedID と一致する id で呼ばれること」を contract として保護した。
+    task 7 で adapter / handler 拡張時に id 渡しが壊れても本 service テストで検出可能になる。
+  - **`model.FaviconDataURL` 出力フォーマットの厳密一致**: `_PopulatesFeedMetadata` の assert
+    で `*detail.FeedFaviconURL == "data:image/png;base64,YWJj"` を厳密一致で検査
+    （base64("abc") = "YWJj"）。`model.FaviconDataURL` の出力契約が将来変わった場合に本テストが
+    落ちることで `subscription` / `crossfeed` / `itemsearch` 等の既存利用箇所と一貫した
+    favicon 整形ロジックが保たれることを担保する。
+  - **commit を 3 つに分割**: 実装 + テスト + wiring / impl-notes 追記 / tasks.md marker を
+    Issue #164「1 commit = 1 task ID」契約に従い分離。
+- 残存課題: なし。後続 task 7（itemDetailResponse JSON 拡張と handler 契約テスト）で本 task の
+  `ItemDetail.FeedTitle` / `FeedFaviconURL` が `service_adapter.go` の
+  `ItemServiceAdapterFromDomain.GetItem` 経由で `itemDetailResponse` の `feed_title` /
+  `feed_favicon_url` フィールドに転写される配線が入る。本 task は service 層に閉じた拡張と
+  app.go wiring の 1 行追加のみで handler 層は触っていない（_Boundary: item.ItemService,
+  app.go wiring_ 制約と一致）。`go test ./...` / `go vet ./...` は全て pass。
