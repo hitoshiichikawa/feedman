@@ -218,9 +218,11 @@ func (a *ItemServiceAdapterFromDomain) GetItem(ctx context.Context, userID, item
 			IsStarred:       detail.IsStarred,
 			HatebuCount:     detail.HatebuCount,
 		},
-		Content: detail.Content,
-		Summary: detail.Summary,
-		Author:  detail.Author,
+		Content:        detail.Content,
+		Summary:        detail.Summary,
+		Author:         detail.Author,
+		FeedTitle:      detail.FeedTitle,      // Req 3.1: service 層が populate した feed タイトルを転写
+		FeedFaviconURL: detail.FeedFaviconURL, // Req 3.2 / 3.4: *string なので nil で省略される
 	}, nil
 }
 

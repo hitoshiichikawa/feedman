@@ -589,6 +589,260 @@ func TestItemHandler_GetItem_ServiceError_ReturnsInternalServerError(t *testing.
 	}
 }
 
+// TestItemHandler_GetItem_ReturnsFeedMetadata は記事詳細応答 JSON に
+// feed_title と feed_favicon_url の両フィールドが含まれることを検証する
+// （Req 3.1, 3.2, 4.4）。
+//
+// service 層が feed メタを populate した itemDetailResponse を返す前提で、
+// handler が JSON エンコード時に両フィールドをそのまま出力することを確認する。
+func TestItemHandler_GetItem_ReturnsFeedMetadata(t *testing.T) {
+	// Arrange
+	now := time.Now().UTC().Truncate(time.Second)
+	favicon := "data:image/png;base64,YWJj"
+	svc := &mockItemService{
+		getItemFn: func(ctx context.Context, userID, itemID string) (*itemDetailResponse, error) {
+			return &itemDetailResponse{
+				itemSummaryResponse: itemSummaryResponse{
+					ID:          "item-1",
+					FeedID:      "feed-1",
+					Title:       "テスト記事",
+					Link:        "https://example.com/article",
+					PublishedAt: now,
+				},
+				Content:        "<p>本文</p>",
+				Summary:        "サマリー",
+				Author:         "著者",
+				FeedTitle:      "サンプルフィード",
+				FeedFaviconURL: &favicon,
+			}, nil
+		},
+	}
+	h := NewItemHandler(svc, &mockItemStateService{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/items/item-1", nil)
+	req = withUserID(req, "user-123")
+	req = withChiURLParam(req, "id", "item-1")
+	w := httptest.NewRecorder()
+
+	// Act
+	h.GetItem(w, req)
+
+	// Assert
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusOK)
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if result["feed_title"] != "サンプルフィード" {
+		t.Errorf("feed_title = %v, want %q", result["feed_title"], "サンプルフィード")
+	}
+	if result["feed_favicon_url"] != favicon {
+		t.Errorf("feed_favicon_url = %v, want %q", result["feed_favicon_url"], favicon)
+	}
+}
+
+// TestItemHandler_GetItem_PreservesExistingFields は本 spec 導入前から記事詳細応答に
+// 含まれていた既存 11 フィールド全てが、フィールド名・型不変で引き続き出現することを
+// 検証する（Req 3.3 / 4.5 / NFR 1.2）。
+//
+// 「フィールド名・型・null 表現を本 spec 導入により変更しない」契約を機械的な
+// 集合検査で保護する。将来 itemDetailResponse の既存フィールドが改名 / 削除 /
+// 型変更された場合に本テストが落ちることで、後方互換の regression を検出する。
+func TestItemHandler_GetItem_PreservesExistingFields(t *testing.T) {
+	// Arrange
+	now := time.Now().UTC().Truncate(time.Second)
+	favicon := "data:image/png;base64,YWJj"
+	svc := &mockItemService{
+		getItemFn: func(ctx context.Context, userID, itemID string) (*itemDetailResponse, error) {
+			return &itemDetailResponse{
+				itemSummaryResponse: itemSummaryResponse{
+					ID:              "item-1",
+					FeedID:          "feed-1",
+					Title:           "テスト記事",
+					Link:            "https://example.com/article",
+					Summary:         "サマリーテキスト",
+					PublishedAt:     now,
+					IsDateEstimated: true,
+					IsRead:          true,
+					IsStarred:       false,
+					HatebuCount:     42,
+				},
+				Content:        "<p>サニタイズ済みコンテンツ</p>",
+				Summary:        "サマリーテキスト",
+				Author:         "著者名",
+				FeedTitle:      "サンプルフィード",
+				FeedFaviconURL: &favicon,
+			}, nil
+		},
+	}
+	h := NewItemHandler(svc, &mockItemStateService{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/items/item-1", nil)
+	req = withUserID(req, "user-123")
+	req = withChiURLParam(req, "id", "item-1")
+	w := httptest.NewRecorder()
+
+	// Act
+	h.GetItem(w, req)
+
+	// Assert
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusOK)
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// 本 spec 導入前から存在する既存 11 フィールドを期待値とともに enum 列挙する。
+	// フィールド名（snake_case JSON タグ）と型は本 spec で一切変更されないことを保証する
+	// （NFR 1.2 / Req 3.3）。
+	wantExistingFields := map[string]interface{}{
+		"id":                "item-1",
+		"feed_id":           "feed-1",
+		"title":             "テスト記事",
+		"link":              "https://example.com/article",
+		"summary":           "サマリーテキスト",
+		"is_date_estimated": true,
+		"is_read":           true,
+		"is_starred":        false,
+		"hatebu_count":      float64(42),
+		"content":           "<p>サニタイズ済みコンテンツ</p>",
+		"author":            "著者名",
+	}
+	for k, want := range wantExistingFields {
+		got, ok := result[k]
+		if !ok {
+			t.Errorf("expected existing field %q to be present in response", k)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s = %v (%T), want %v (%T)", k, got, got, want, want)
+		}
+	}
+
+	// published_at は時刻形式のため値比較せず、存在のみ確認（型変更がないことの保証）。
+	if _, ok := result["published_at"]; !ok {
+		t.Error("expected existing field \"published_at\" to be present in response")
+	}
+}
+
+// TestItemHandler_GetItem_OmitsFaviconWhenNil は FeedFaviconURL が nil のとき
+// 応答 JSON から feed_favicon_url キーが省略されることを検証する（Req 3.4）。
+//
+// `*string` + `omitempty` の Go 標準挙動として nil なら JSON 出力されない。
+// 「JSON null または応答からの省略」のうち「省略」側で実装した design.md 「設計判断」
+// と一致する挙動を機械的に保護する。
+func TestItemHandler_GetItem_OmitsFaviconWhenNil(t *testing.T) {
+	// Arrange
+	now := time.Now().UTC().Truncate(time.Second)
+	svc := &mockItemService{
+		getItemFn: func(ctx context.Context, userID, itemID string) (*itemDetailResponse, error) {
+			return &itemDetailResponse{
+				itemSummaryResponse: itemSummaryResponse{
+					ID:          "item-1",
+					FeedID:      "feed-1",
+					Title:       "テスト記事",
+					Link:        "https://example.com/article",
+					PublishedAt: now,
+				},
+				Content:        "<p>本文</p>",
+				FeedTitle:      "favicon 無しフィード",
+				FeedFaviconURL: nil,
+			}, nil
+		},
+	}
+	h := NewItemHandler(svc, &mockItemStateService{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/items/item-1", nil)
+	req = withUserID(req, "user-123")
+	req = withChiURLParam(req, "id", "item-1")
+	w := httptest.NewRecorder()
+
+	// Act
+	h.GetItem(w, req)
+
+	// Assert
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusOK)
+	}
+
+	// JSON 文字列に "feed_favicon_url" が出現しないことを bytes レベルで確認する
+	// （omitempty による省略の機械的検証）。
+	bodyBytes := w.Body.Bytes()
+	if bytes.Contains(bodyBytes, []byte("feed_favicon_url")) {
+		t.Errorf("expected feed_favicon_url to be omitted, got %s", string(bodyBytes))
+	}
+
+	// 念のため map decode して同観点を二重に確認する
+	var result map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if _, ok := result["feed_favicon_url"]; ok {
+		t.Errorf("expected feed_favicon_url to be absent in JSON map, got %v", result["feed_favicon_url"])
+	}
+
+	// feed_title は値の有無に関わらず必ず出現する（`omitempty` 無し）。
+	if result["feed_title"] != "favicon 無しフィード" {
+		t.Errorf("feed_title = %v, want %q", result["feed_title"], "favicon 無しフィード")
+	}
+}
+
+// TestItemHandler_GetItem_NotFound_PreservesExistingBehavior は購読外 / 不在記事 ID に
+// 対する 404 ITEM_NOT_FOUND 応答が本 spec 導入で変化しないことを検証する
+// （Req 3.5）。
+//
+// 既存テスト TestItemHandler_GetItem_NotFound_ReturnsNotFound は status / code のみ
+// 検査するが、本テストでは「feed_title / feed_favicon_url が誤って 404 応答に
+// 紛れ込まないこと」も合わせて assert することで、応答 shape が成功時の追加
+// フィールドに影響されないことを機械的に保護する。
+func TestItemHandler_GetItem_NotFound_PreservesExistingBehavior(t *testing.T) {
+	// Arrange: service 層が ITEM_NOT_FOUND を返す（購読外 / 不在のどちらかは秘匿）
+	svc := &mockItemService{
+		getItemFn: func(ctx context.Context, userID, itemID string) (*itemDetailResponse, error) {
+			return nil, model.NewItemNotFoundError(itemID)
+		},
+	}
+	h := NewItemHandler(svc, &mockItemStateService{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/items/nonexistent", nil)
+	req = withUserID(req, "user-123")
+	req = withChiURLParam(req, "id", "nonexistent")
+	w := httptest.NewRecorder()
+
+	// Act
+	h.GetItem(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+
+	// 応答 body は既存 APIError 形式（code = ITEM_NOT_FOUND）であり、
+	// 記事詳細フィールド（feed_title / feed_favicon_url / id / content 等）が
+	// 含まれないことを確認する。
+	errResp := parseAPIErrorResponse(t, w)
+	if errResp["code"] != model.ErrCodeItemNotFound {
+		t.Errorf("code = %q, want %q", errResp["code"], model.ErrCodeItemNotFound)
+	}
+
+	// 404 応答に詳細フィールドが漏れ込まないこと（regression net）
+	bodyBytes := w.Body.Bytes()
+	forbidden := []string{"feed_title", "feed_favicon_url", "\"content\"", "\"author\""}
+	for _, key := range forbidden {
+		if bytes.Contains(bodyBytes, []byte(key)) {
+			t.Errorf("404 response should not contain %q, got %s", key, string(bodyBytes))
+		}
+	}
+}
+
 // --- PUT /api/items/:id/state テスト ---
 
 func TestItemHandler_UpdateItemState_SetRead_Success(t *testing.T) {
