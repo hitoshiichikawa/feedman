@@ -127,7 +127,7 @@
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 4.4_
   - _Boundary: item.ItemService, app.go wiring_
 
-- [ ] 7. itemDetailResponse を拡張し記事詳細契約テストを通す
+- [x] 7. itemDetailResponse を拡張し記事詳細契約テストを通す
   - `internal/handler/item_handler.go` の `itemDetailResponse` に以下を追加:
     - `FeedTitle string \`json:"feed_title"\``
     - `FeedFaviconURL *string \`json:"feed_favicon_url,omitempty"\``
