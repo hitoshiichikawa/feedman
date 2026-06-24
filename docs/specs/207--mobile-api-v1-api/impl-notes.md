@@ -234,3 +234,53 @@
   `feed_favicon_url` フィールドに転写される配線が入る。本 task は service 層に閉じた拡張と
   app.go wiring の 1 行追加のみで handler 層は触っていない（_Boundary: item.ItemService,
   app.go wiring_ 制約と一致）。`go test ./...` / `go vet ./...` は全て pass。
+
+### Task 7
+- 採用方針: design.md「Components and Interfaces - Handler Layer - ItemHandler.GetItem（拡張）」
+  節 L288-328 の指針（handler 本体の認可フロー / 既存 itemDetailResponse 既存フィールド不変 /
+  追加 2 フィールドのみ加算）をそのまま採用。`itemDetailResponse` に `FeedTitle string`（タグ
+  `feed_title`）と `FeedFaviconURL *string`（タグ `feed_favicon_url,omitempty`）を追加し、
+  `ItemServiceAdapterFromDomain.GetItem` で task 6 で導入済みの `detail.FeedTitle` /
+  `detail.FeedFaviconURL` をそのまま pass-through する 2 行を追加した。handler の
+  `GetItem` メソッド本体（認可 / 404 fallback / Content-Type set / JSON encode）は一切変更
+  しない（design.md L297「フロー・認可は不変」と一致）。
+- 重要な判断:
+  - **`itemDetailResponse` 構造体のフィールド順序は「既存末尾追加」を採用**: 既存 3 フィールド
+    （Content / Summary / Author）の後ろに FeedTitle → FeedFaviconURL を並べた。Go の struct
+    フィールド順序は JSON エンコード順序に影響するため、既存 JSON 出力順の前半部分（既存 11
+    フィールド）が完全に温存される（NFR 1.2 の「フィールド名・型・null 表現を変更しない」を
+    超え、出力順序まで保護することで snapshot test 等にも regression を発生させない）。
+  - **`FeedFaviconURL` を `*string` + `omitempty` で「省略」側に統一**: Req 3.4 の「JSON null
+    または応答からの省略」のうち、本 spec では一貫して「省略」側を選択（task 4 の
+    `avatar_url`、cross-feed の `feed_favicon_url` などと同パターン）。`*string` 型のため
+    将来 favicon を実値で返す場合も schema 変更なしで populate 可能。
+  - **テストは「正常 / 既存温存 / 境界 / 異常」の 4 観点で AC を直接担保**: tasks.md L138-147 の
+    4 テスト要件を 1:1 で実装した。`TestItemHandler_GetItem_ReturnsFeedMetadata`（Req 3.1, 3.2 /
+    4.4 正常）/ `_PreservesExistingFields`（Req 3.3 / 4.5 / NFR 1.2 既存温存）/
+    `_OmitsFaviconWhenNil`（Req 3.4 境界）/ `_NotFound_PreservesExistingBehavior`（Req 3.5
+    異常）。既存テスト `TestItemHandler_GetItem_NotFound_ReturnsNotFound` は status / code
+    のみ検査するため、本 spec 専用の non-regression 観点（404 応答に新フィールドが紛れ込ま
+    ないこと）として `_PreservesExistingBehavior` を別途追加した。
+  - **既存 11 フィールド enum 列挙の正典化**: `_PreservesExistingFields` テストで既存 11
+    フィールド（id / feed_id / title / link / summary / published_at / is_date_estimated /
+    is_read / is_starred / hatebu_count / content / author）を `wantExistingFields` map
+    として明示列挙し、将来既存フィールドが改名 / 削除 / 型変更された場合に本テストが
+    落ちることで NFR 1.2 を機械的に保護する gate にした。`published_at` のみ時刻形式のため
+    値比較せず存在確認のみ。テストコード上が contract document として機能する。
+  - **`_OmitsFaviconWhenNil` の二重検査（bytes + map）**: `omitempty` の省略を bytes
+    レベル（`bytes.Contains(bodyBytes, []byte("feed_favicon_url"))` が false）と map
+    decode 後の `_, ok := result["feed_favicon_url"]` の二重で確認した。前者は厳密な
+    JSON 出力検査、後者は decode 後の存在確認で、JSON 整形ロジックの将来変更
+    （indent 化等）に対する堅牢性を確保。
+  - **`_NotFound_PreservesExistingBehavior` の regression net**: 404 応答 body に
+    `feed_title` / `feed_favicon_url` / `"content"` / `"author"` 等の記事詳細フィールドが
+    含まれないことを `forbidden` リストで明示 enum 検査。`handleServiceError` の APIError
+    JSON shape が将来変わって新フィールドが漏れ出るような regression を grep 可能な形で
+    保護する。
+  - **commit を 3 つに分割**: 実装 + テスト / impl-notes 追記 / tasks.md marker を Issue #164
+    「1 commit = 1 task ID」契約に従い分離。task 7 は子タスクを持たないため、marker commit
+    は `mark 7 as done` の単記。
+- 残存課題: なし。本 spec の全 7 task が完了し、Req 1.x（契約文書） / Req 2.x（統一ユーザー情報
+  エンドポイント） / Req 3.x（記事詳細フィードメタ）/ Req 4.x（契約テスト）/ NFR 1.x（後方互換）/
+  NFR 2.x（文書可読性）/ NFR 3.x（テスト自動実行性）の全 AC が対応テスト・ドキュメントで
+  担保された。`go test ./...`（22 パッケージ全 pass）/ `go vet ./...`（クリーン）も確認済み。
