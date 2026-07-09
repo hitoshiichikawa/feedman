@@ -105,6 +105,22 @@ func (a *UserServiceAdapter) Withdraw(ctx context.Context, userID string) error 
 	return a.svc.Withdraw(ctx, userID)
 }
 
+// GetCurrent は指定 userID の current user 情報をハンドラ用 DTO で返す。
+// user.Service.GetByID を呼び、*model.User から currentUserResponse に変換する。
+// avatar_url は v1 では DB 未拡張のため常に nil を返す（design.md「設計判断」/ Req 2.4）。
+func (a *UserServiceAdapter) GetCurrent(ctx context.Context, userID string) (*currentUserResponse, error) {
+	u, err := a.svc.GetByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return &currentUserResponse{
+		ID:        u.ID,
+		Email:     u.Email,
+		Name:      u.Name,
+		AvatarURL: nil,
+	}, nil
+}
+
 // ItemServiceAdapterFromDomain は item.ItemService を ItemServiceInterface に適合させるアダプタ。
 type ItemServiceAdapterFromDomain struct {
 	svc *item.ItemService
@@ -202,9 +218,11 @@ func (a *ItemServiceAdapterFromDomain) GetItem(ctx context.Context, userID, item
 			IsStarred:       detail.IsStarred,
 			HatebuCount:     detail.HatebuCount,
 		},
-		Content: detail.Content,
-		Summary: detail.Summary,
-		Author:  detail.Author,
+		Content:        detail.Content,
+		Summary:        detail.Summary,
+		Author:         detail.Author,
+		FeedTitle:      detail.FeedTitle,      // Req 3.1: service 層が populate した feed タイトルを転写
+		FeedFaviconURL: detail.FeedFaviconURL, // Req 3.2 / 3.4: *string なので nil で省略される
 	}, nil
 }
 

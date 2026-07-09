@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. Mobile API Contract Document を新規作成する (P)
+- [x] 1. Mobile API Contract Document を新規作成する (P)
   - `docs/specs/207--mobile-api-v1-api/mobile-api-contract.md` を新規作成
   - 構成は design.md「Mobile API Contract Document の構成」節に従う:
     概要 / 共通方針（認証ヘッダ・エラー応答形式・JSON 命名規約）/ Native Auth サマリ /
@@ -16,7 +16,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.3, 2.4, 3.1, 3.2, 3.4, NFR 2.1, NFR 2.2_
   - _Boundary: mobile-api-contract.md_
 
-- [ ] 2. README の API エンドポイント一覧を更新する (P)
+- [x] 2. README の API エンドポイント一覧を更新する (P)
   - `README.md` の `## API エンドポイント` 配下の表を以下の通り更新:
     - 「ユーザー管理（認証必須）」に `GET /api/users/me`（モバイル / Web 共通の current
       user 取得）を新設項として追加
@@ -32,7 +32,7 @@
   - _Requirements: 1.6_
   - _Boundary: README.md_
 
-- [ ] 3. user.Service に GetByID を追加し単体テストを通す
+- [x] 3. user.Service に GetByID を追加し単体テストを通す
   - `internal/user/service.go` に `func (s *Service) GetByID(ctx context.Context, userID string) (*model.User, error)`
     を追加。実装は `s.userRepo.FindByID` を呼ぶ（レガシーパス）、または
     `s.txUserDeleter.FindByID` を呼ぶ（txBeginner パス）薄い wrapper
@@ -51,7 +51,7 @@
   - _Requirements: 2.1, 2.2, 2.3_
   - _Boundary: user.Service_
 
-- [ ] 4. GET /api/users/me ハンドラ・アダプタ・ルーティング配線を追加し契約テストを通す
+- [x] 4. GET /api/users/me ハンドラ・アダプタ・ルーティング配線を追加し契約テストを通す
   - `internal/handler/user_handler.go` に以下を追加:
     - `UserServiceInterface` に `GetCurrent(ctx context.Context, userID string) (*currentUserResponse, error)`
       メソッド追加
@@ -85,7 +85,7 @@
   - _Boundary: UserHandler, UserServiceAdapter, router.go_
   - _Depends: 3_
 
-- [ ] 5. /auth/me の Cookie 経路 non-regression テストを追加する
+- [x] 5. /auth/me の Cookie 経路 non-regression テストを追加する
   - `internal/handler/auth_handler_test.go` に
     `TestAuthHandler_Me_CookiePathUnchanged` を追加:
     - 既存 `mockAuthService` パターンを踏襲し、Cookie `session_id` を持つリクエストで
@@ -99,7 +99,7 @@
   - _Requirements: 2.6, 4.3, NFR 1.1_
   - _Boundary: AuthHandler_
 
-- [ ] 6. item.ItemService.GetItem を拡張し FeedMetaProvider 依存を導入する
+- [x] 6. item.ItemService.GetItem を拡張し FeedMetaProvider 依存を導入する
   - `internal/item/service.go` に以下を追加:
     - `FeedMetaProvider` interface（`FindByID(ctx context.Context, id string) (*model.Feed, error)`
       の 1 メソッドのみ。既存 `SubscriptionChecker` と同じ interface segregation パターン）
@@ -127,7 +127,7 @@
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 4.4_
   - _Boundary: item.ItemService, app.go wiring_
 
-- [ ] 7. itemDetailResponse を拡張し記事詳細契約テストを通す
+- [x] 7. itemDetailResponse を拡張し記事詳細契約テストを通す
   - `internal/handler/item_handler.go` の `itemDetailResponse` に以下を追加:
     - `FeedTitle string \`json:"feed_title"\``
     - `FeedFaviconURL *string \`json:"feed_favicon_url,omitempty"\``

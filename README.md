@@ -232,10 +232,14 @@ Docker Compose は 2 つのネットワークを定義:
 
 | メソッド | パス | 説明 |
 |---------|------|------|
-| GET | `/auth/google/login` | OAuth フロー開始 |
+| GET | `/auth/google/login` | OAuth フロー開始（Web Cookie / Native PKCE 両対応） |
 | GET | `/auth/google/callback` | OAuth コールバック |
 | POST | `/auth/logout` | ログアウト |
-| GET | `/auth/me` | 現在のユーザー情報 |
+| GET | `/auth/me` | 現在のユーザー情報（Web Cookie 専用） |
+| POST | `/api/auth/token` | Native auth: auth_code 交換による access token / refresh token 発行 |
+| POST | `/api/auth/refresh` | Native auth: refresh token rotation による新規 access token 発行 |
+| POST | `/api/auth/revoke` | Native auth: refresh token 無効化 |
+
 ### フィード管理（認証必須）
 
 | メソッド | パス | 説明 |
@@ -245,13 +249,16 @@ Docker Compose は 2 つのネットワークを定義:
 | PATCH | `/api/feeds/{id}` | フィード URL 変更 |
 | DELETE | `/api/feeds/{id}` | フィード削除 |
 | GET | `/api/feeds/{id}/items` | 記事一覧（カーソルページネーション） |
+| GET | `/api/feeds/starred/items` | 全フィード横断のスター記事一覧 |
 
 ### 記事管理（認証必須）
 
 | メソッド | パス | 説明 |
 |---------|------|------|
-| GET | `/api/items/{id}` | 記事詳細 |
+| GET | `/api/items/{id}` | 記事詳細（`feed_title` / `feed_favicon_url` を含む） |
 | PUT | `/api/items/{id}/state` | 既読/スター状態更新 |
+| GET | `/api/items/search` | 記事検索（全購読横断 / フィード内検索） |
+| GET | `/api/items/cross-feed` | 横断新着記事一覧 |
 
 ### 購読管理（認証必須）
 
@@ -261,12 +268,20 @@ Docker Compose は 2 つのネットワークを定義:
 | DELETE | `/api/subscriptions/{id}` | 購読解除 |
 | PUT | `/api/subscriptions/{id}/settings` | フェッチ間隔設定 |
 | POST | `/api/subscriptions/{id}/resume` | 停止フィードの再開 |
+| POST | `/api/subscriptions/{id}/fetch` | 手動フェッチ（10 分クールダウン） |
 
 ### ユーザー管理（認証必須）
 
 | メソッド | パス | 説明 |
 |---------|------|------|
+| GET | `/api/users/me` | 現在のユーザー情報（モバイル / Web 共通。Bearer または Cookie で認証） |
 | DELETE | `/api/users/me` | 退会（アカウント削除） |
+| PUT | `/api/users/me/cross-feed-last-seen` | 横断新着一覧の最終閲覧時刻を更新 |
+
+> **モバイル API 契約**: v1 モバイルクライアント（iOS / Android）が依存する API の詳細契約
+> （URL / 認証方式 / 要求・応答 JSON 形状 / エラー応答）は
+> [`docs/specs/207--mobile-api-v1-api/mobile-api-contract.md`](docs/specs/207--mobile-api-v1-api/mobile-api-contract.md)
+> を参照すること。
 
 ### 監視
 

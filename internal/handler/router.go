@@ -297,6 +297,10 @@ func NewRouter(deps *RouterDeps) http.Handler {
 
 		// ユーザー管理
 		r.Route("/api/users", func(r chi.Router) {
+			// GET /api/users/me - モバイル / Web 共通の current user 取得（Issue #207）。
+			// BearerOrSession middleware を通過した後に実行されるため、Bearer / Cookie の
+			// いずれの経路でも同じ handler で current user 情報を返す（Req 2.1 / 2.2）。
+			r.Get("/me", userHandler.GetCurrent)
 			r.Delete("/me", userHandler.Withdraw)
 			// PUT /api/users/me/cross-feed-last-seen - 横断一覧の最終閲覧時刻更新（Issue #121）
 			// CrossFeedService が未配線の deps では登録しない（後方互換）。

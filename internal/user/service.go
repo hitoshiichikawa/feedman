@@ -144,6 +144,33 @@ func NewServiceWithTx(
 	}
 }
 
+// GetByID は指定 userID の current user を取得する。
+//
+// 認可は呼び出し側（BearerOrSession middleware）が担保しており、本メソッドは
+// ビジネス認可を行わない（caller userID = lookup userID 前提）。userID が DB 上に
+// 存在しない場合は model.NewUserNotFoundError を返す（既存 Withdraw と同パターン）。
+//
+// txBeginner が設定されている場合は txUserDeleter.FindByID を、設定されていない
+// 場合は userRepo.FindByID を呼ぶ（既存 Withdraw の lookup と同一の選択ロジック）。
+func (s *Service) GetByID(ctx context.Context, userID string) (*model.User, error) {
+	var (
+		user *model.User
+		err  error
+	)
+	if s.txBeginner != nil {
+		user, err = s.txUserDeleter.FindByID(ctx, userID)
+	} else {
+		user, err = s.userRepo.FindByID(ctx, userID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("ユーザーの取得に失敗しました: %w", err)
+	}
+	if user == nil {
+		return nil, model.NewUserNotFoundError()
+	}
+	return user, nil
+}
+
 // Withdraw はユーザーの退会処理を実行する。
 // 削除順序（トランザクションパス）: item_states → subscriptions → sessions →
 // auth_codes → refresh_token_families → user
