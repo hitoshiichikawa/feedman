@@ -310,6 +310,44 @@ func TestNewRouter_SubscriptionRoutes_AllEndpoints(t *testing.T) {
 	}
 }
 
+// TestRouter_GetUsersMe_RequiresAuth は GET /api/users/me が認証必須グループに
+// 乗っていることを確認する（Req 2.5）。Authorization ヘッダも session_id Cookie も
+// 持たないリクエストは BearerOrSession middleware により 401 を返す。
+func TestRouter_GetUsersMe_RequiresAuth(t *testing.T) {
+	router, _ := createTestRouter()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/users/me", nil)
+	// Authorization ヘッダなし / Cookie なし
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Result().StatusCode != http.StatusUnauthorized {
+		t.Errorf("GET /api/users/me (no auth) status = %d, want %d",
+			w.Result().StatusCode, http.StatusUnauthorized)
+	}
+}
+
+// TestNewRouter_UserRoutes_GetCurrentEndpoint は GET /api/users/me が認証必須グループ内に
+// 登録され、有効な session で 200 を返すことを確認する（Req 2.1 / 2.2 のうち Cookie 経路）。
+func TestNewRouter_UserRoutes_GetCurrentEndpoint(t *testing.T) {
+	router, _ := createTestRouter()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/users/me", nil)
+	req.AddCookie(&http.Cookie{Name: "session_id", Value: "valid-session"})
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode == http.StatusNotFound {
+		t.Errorf("GET /api/users/me returned 404, route not found")
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /api/users/me status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
 // TestNewRouter_UserRoutes_WithdrawEndpoint は退会エンドポイントが登録されていることを検証する。
 func TestNewRouter_UserRoutes_WithdrawEndpoint(t *testing.T) {
 	router, _ := createTestRouter()

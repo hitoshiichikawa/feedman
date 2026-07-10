@@ -88,11 +88,22 @@ type starredItemListResult struct {
 }
 
 // itemDetailResponse は記事詳細のレスポンス。
+//
+// 既存 11 フィールド（itemSummaryResponse 経由の 9 フィールド + Content / Summary / Author）の
+// フィールド名・型・JSON タグは Issue #207 以前から不変であり、後方互換のため変更しない
+// （NFR 1.2 / Req 3.3）。
+//
+// 追加フィールド:
+//   - FeedTitle: 当該記事が属するフィードの表示タイトル（Req 3.1）
+//   - FeedFaviconURL: 同フィードの favicon を data URL 化したもの。
+//     値が無い場合は nil を保持し、`omitempty` で JSON から省略される（Req 3.2 / 3.4）
 type itemDetailResponse struct {
 	itemSummaryResponse
-	Content string `json:"content"` // サニタイズ済みHTML
-	Summary string `json:"summary"`
-	Author  string `json:"author"`
+	Content        string  `json:"content"` // サニタイズ済みHTML
+	Summary        string  `json:"summary"`
+	Author         string  `json:"author"`
+	FeedTitle      string  `json:"feed_title"`                 // Req 3.1: フィード表示タイトル
+	FeedFaviconURL *string `json:"feed_favicon_url,omitempty"` // Req 3.2 / 3.4: favicon data URL（無し時は省略）
 }
 
 // itemStateRequest は記事状態更新リクエストのボディ。

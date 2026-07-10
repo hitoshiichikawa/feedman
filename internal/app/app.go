@@ -107,6 +107,10 @@ func runServe(cfg *config.Config) error {
 	userRepo := repository.NewPostgresUserRepo(db)
 	identRepo := repository.NewPostgresIdentityRepo(db)
 	sessionRepo := repository.NewPostgresSessionRepo(db)
+	// native auth（#165）: flow=native callback の auth_code 保存に使用する。
+	authCodeRepo := repository.NewPostgresAuthCodeRepo(db)
+	// native auth（#166）: POST /api/auth/token の refresh family / token 永続化に使用する。
+	refreshTokenRepo := repository.NewPostgresRefreshTokenRepo(db)
 	feedRepo := repository.NewPostgresFeedRepo(db)
 	subRepo := repository.NewPostgresSubscriptionRepo(db)
 	itemRepo := repository.NewPostgresItemRepo(db)
@@ -124,7 +128,7 @@ func runServe(cfg *config.Config) error {
 		RedirectURL:  cfg.GoogleRedirectURL,
 	})
 	authService := auth.NewService(
-		oauthProvider, userRepo, identRepo, sessionRepo,
+		oauthProvider, userRepo, identRepo, sessionRepo, authCodeRepo,
 		auth.ServiceConfig{SessionMaxAge: cfg.SessionMaxAge},
 	)
 
@@ -132,7 +136,12 @@ func runServe(cfg *config.Config) error {
 	faviconFetcher := feed.NewFaviconFetcher(ssrfGuard)
 	feedService := feed.NewFeedService(feedRepo, subRepo, feedDetector, faviconFetcher)
 
-	itemService := item.NewItemService(itemRepo, itemStateRepo)
+	// itemService / itemStateService は subRepo を SubscriptionChecker として注入し、
+	// 記事詳細取得・状態更新時に購読外フィードへの越境アクセスを拒否する（#175）。
+	// itemService には追加で feedRepo を FeedMetaProvider として注入し、記事詳細応答に
+	// 所属フィードの表示メタデータ（タイトル / favicon）を付与する（Issue #207 / Req 3.1, 3.2）。
+	itemService := item.NewItemService(itemRepo, itemStateRepo, subRepo, feedRepo)
+	itemStateService := item.NewItemStateService(itemRepo, itemStateRepo, subRepo)
 
 	// 横断新着一覧サービス（Issue #121）。itemRepo の ListNewAcrossFeeds と
 	// userCrossFeedViewRepo の Get / Upsert を利用する。
@@ -169,13 +178,17 @@ func runServe(cfg *config.Config) error {
 		subRepo, itemStateRepo, feedRepo,
 		fetcher, manualFetchTxBeginner, serveCollector,
 	)
-	userService := newTxUserService(txBeginner, userRepo, sessionRepo, subRepo, itemStateRepo)
+	// Issue #170: 退会トランザクションへ native auth 認証状態（auth_codes /
+	// refresh_token_families）の明示削除を統合するため、authCodeRepo /
+	// refreshTokenRepo を newTxUserService に渡す。これらの repo は #165 / #166 で
+	// 上記の native auth 配線にも共用される。
+	userService := newTxUserService(txBeginner, userRepo, sessionRepo, subRepo, itemStateRepo, authCodeRepo, refreshTokenRepo)
 
 	// 5. ハンドラーアダプタの構築
 	subServiceAdapter := handler.NewSubscriptionServiceAdapter(subService)
 	userServiceAdapter := handler.NewUserServiceAdapter(userService)
 	itemServiceAdapter := handler.NewItemServiceAdapter(itemService)
-	itemStateServiceAdapter := handler.NewItemStateServiceAdapter(itemStateRepo)
+	itemStateServiceAdapter := handler.NewItemStateServiceAdapter(itemStateService)
 	itemSearchServiceAdapter := handler.NewItemSearchServiceAdapter(itemSearchService)
 	crossFeedServiceAdapter := handler.NewCrossFeedServiceAdapter(crossFeedService)
 
@@ -199,6 +212,30 @@ func runServe(cfg *config.Config) error {
 		middleware.DefaultIPRateLimiterConfig(cfg.RateLimitUnauthIP),
 	)
 
+	// Native Auth トークン交換（Issue #166）と Bearer 認証の検証器（Issue #169）:
+	// NATIVE_AUTH_JWT_SECRET が設定されているときのみ issuer / service / handler /
+	// verifier を組み立てて RouterDeps に注入する。未設定なら nil のまま、router 側で
+	// POST /api/auth/token は登録されず 404（fail-closed / Req 3.2）、Bearer 認証は
+	// 無効化され認証必須 API は従来どおり Cookie セッション認証のみで動作する
+	// （#169 Req 4.2 / 4.4。起動は成功する）。起動時に運用者向け Warn を 1 回記録する。
+	//
+	// jwtVerifier は interface 型のため secret 設定時のみ非 nil の具象
+	// （*auth.JWTVerifier）を代入する（typed-nil を作らない）。
+	var nativeAuthHandler *handler.NativeAuthHandler
+	var jwtVerifier middleware.JWTVerifier
+	if cfg.NativeAuthJWTSecret != "" {
+		jwtIssuer := auth.NewJWTIssuer([]byte(cfg.NativeAuthJWTSecret), cfg.NativeAuthJWTKid)
+		nativeTokenService := auth.NewTokenService(authCodeRepo, refreshTokenRepo, jwtIssuer)
+		nativeAuthHandler = handler.NewNativeAuthHandler(nativeTokenService)
+		// 検証は発行と同一の env 値（署名鍵）を共用する（#169 Req 4.1）。
+		jwtVerifier = auth.NewJWTVerifier([]byte(cfg.NativeAuthJWTSecret))
+		slog.Info("native token exchange enabled",
+			slog.String("kid", cfg.NativeAuthJWTKid),
+		)
+	} else {
+		slog.Warn("NATIVE_AUTH_JWT_SECRET is not set; POST /api/auth/token and Bearer auth are disabled")
+	}
+
 	deps := &handler.RouterDeps{
 		HealthChecker:       db,
 		SessionFinder:       sessionRepo,
@@ -218,6 +255,10 @@ func runServe(cfg *config.Config) error {
 			CookieSecure:  cfg.CookieSecure,
 			SessionMaxAge: cfg.SessionMaxAge,
 		},
+
+		// Native Auth (Issue #166 / #169)
+		NativeAuthHandler: nativeAuthHandler,
+		JWTVerifier:       jwtVerifier,
 
 		FeedService:         feedService,
 		SubscriptionDeleter: subDeleterAdapter,

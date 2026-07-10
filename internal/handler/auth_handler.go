@@ -4,23 +4,37 @@ package handler
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
 
+	"github.com/hitoshi/feedman/internal/auth"
 	"github.com/hitoshi/feedman/internal/model"
 )
 
 const (
 	sessionCookieName = "session_id"
 	oauthStateCookie  = "oauth_state"
+
+	// oauthNativeChallengeCookie は flow=native（#165）の PKCE challenge を
+	// OAuth round-trip をまたいで保持する HttpOnly Cookie。
+	// 存在 = native flow の文脈として callback が解釈する。
+	oauthNativeChallengeCookie = "oauth_native_challenge"
+	// nativeAuthCallbackURL は native flow 完了時に auth_code を返すアプリスキーム
+	// （feedman-ios SERVER.md §1.2 で固定）。
+	nativeAuthCallbackURL = "feedman://auth/callback"
 )
 
 // AuthServiceInterface は認証ハンドラーが必要とするサービスインターフェース。
 type AuthServiceInterface interface {
 	GetLoginURL(state string) string
 	HandleCallback(ctx context.Context, code string) (*model.Session, error)
+	// HandleNativeCallback は native flow の callback を処理し、平文 auth_code を返す。
+	// セッションは作成しない。
+	HandleNativeCallback(ctx context.Context, code, pkceChallenge string) (string, error)
 	Logout(ctx context.Context, sessionID string) error
 	GetCurrentUser(ctx context.Context, sessionID string) (*model.User, error)
 }
@@ -49,7 +63,33 @@ func NewAuthHandler(service AuthServiceInterface, config AuthHandlerConfig) *Aut
 
 // Login はGoogle OAuthフローを開始する。
 // GET /auth/google/login
+// GET /auth/google/login?flow=native&code_challenge=...&code_challenge_method=S256（#165）
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("flow") == "native" {
+		// native flow: PKCE S256 パラメータを検証し、challenge を callback まで
+		// Cookie で保持する。不合格時は OAuth リダイレクトを開始しない。
+		challenge := r.URL.Query().Get("code_challenge")
+		method := r.URL.Query().Get("code_challenge_method")
+		if err := auth.ValidatePKCES256(challenge, method); err != nil {
+			slog.Warn("native login rejected: invalid pkce parameters")
+			http.Error(w, "invalid pkce parameters", http.StatusBadRequest)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     oauthNativeChallengeCookie,
+			Value:    challenge,
+			Path:     "/",
+			MaxAge:   600, // oauth_state と同じ 10 分
+			HttpOnly: true,
+			Secure:   h.config.CookieSecure,
+			SameSite: http.SameSiteLaxMode,
+		})
+	} else if _, err := r.Cookie(oauthNativeChallengeCookie); err == nil {
+		// Web flow: 過去の native flow 文脈が残存している場合のみ破棄する
+		// （残存がない通常リクエストの応答ヘッダは従来と完全一致に保つ）。
+		h.clearNativeChallengeCookie(w)
+	}
+
 	state, err := generateState()
 	if err != nil {
 		slog.Error("failed to generate oauth state", slog.String("error", err.Error()))
@@ -72,13 +112,27 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
 }
 
+// clearNativeChallengeCookie は native flow 文脈 Cookie を削除する。
+func (h *AuthHandler) clearNativeChallengeCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     oauthNativeChallengeCookie,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   h.config.CookieSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
 // Callback はOAuthコールバックを処理する。
 // GET /auth/google/callback?code=xxx&state=yyy
 func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	// 1. stateの検証（CSRF対策）
 	state := r.URL.Query().Get("state")
 	stateCookie, err := r.Cookie(oauthStateCookie)
-	if err != nil || stateCookie.Value != state {
+	// state の比較はタイミング攻撃を避けるため定数時間比較を用いる（CWE-208）。
+	if err != nil || subtle.ConstantTimeCompare([]byte(stateCookie.Value), []byte(state)) != 1 {
 		slog.Warn("oauth state mismatch",
 			slog.String("query_state", state),
 		)
@@ -101,6 +155,14 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
 	if code == "" {
 		http.Error(w, "missing authorization code", http.StatusBadRequest)
+		return
+	}
+
+	// native flow（#165）: login で保持した PKCE challenge Cookie が存在する場合は
+	// Web セッションを発行せず auth_code をアプリスキームへ返す分岐に入る。
+	// Cookie 不在時は従来の Web flow として処理する（fail-safe）。
+	if nativeCookie, cookieErr := r.Cookie(oauthNativeChallengeCookie); cookieErr == nil {
+		h.handleNativeCallback(w, r, code, nativeCookie.Value)
 		return
 	}
 
@@ -139,8 +201,38 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 
-	// 6. フロントエンドにリダイレクト
-	http.Redirect(w, r, h.config.BaseURL, http.StatusTemporaryRedirect)
+	// 6. フロントエンドにリダイレクト（GET 化のため 303 See Other）
+	http.Redirect(w, r, h.config.BaseURL, http.StatusSeeOther)
+}
+
+// handleNativeCallback は native flow の OAuth callback を処理する（#165）。
+//
+// state 検証通過後に呼ばれる前提。native flow 文脈 Cookie は成否に関わらず破棄して
+// 単回性を保証し、auth_code 発行成功時はアプリスキーム（feedman://auth/callback）へ
+// 303 リダイレクトする。Web セッション・session_id Cookie は一切発行しない。
+func (h *AuthHandler) handleNativeCallback(w http.ResponseWriter, r *http.Request, code, challenge string) {
+	// native flow 文脈は単回利用: 後続の成否に関わらずここで破棄する。
+	h.clearNativeChallengeCookie(w)
+
+	// Cookie 改ざん・破損への defensive 検査（login 時と同一の検証関数）。
+	// 不正値を auth_codes に保存しない。
+	if err := auth.ValidatePKCES256(challenge, "S256"); err != nil {
+		slog.Warn("native callback rejected: invalid pkce challenge in cookie")
+		http.Error(w, "invalid pkce parameters", http.StatusBadRequest)
+		return
+	}
+
+	plainCode, err := h.service.HandleNativeCallback(r.Context(), code, challenge)
+	if err != nil {
+		slog.Error("native oauth callback failed", slog.String("error", err.Error()))
+		http.Error(w, "authentication failed", http.StatusInternalServerError)
+		return
+	}
+
+	// アプリスキームへ auth_code を返す（GET 化のため 303 See Other）。
+	// 平文 code はこのリダイレクト URL にのみ現れる（ログには出さない）。
+	redirectURL := nativeAuthCallbackURL + "?auth_code=" + url.QueryEscape(plainCode)
+	http.Redirect(w, r, redirectURL, http.StatusSeeOther)
 }
 
 // Logout はセッションを破棄する。
@@ -168,7 +260,9 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 
-	http.Redirect(w, r, h.config.BaseURL, http.StatusTemporaryRedirect)
+	// POST ログアウト後はリダイレクトを GET 化するため 303 See Other を用いる
+	// （307 だと method を保持し BaseURL へ再 POST してしまう）。
+	http.Redirect(w, r, h.config.BaseURL, http.StatusSeeOther)
 }
 
 // Me は現在のログインユーザー情報を返す。

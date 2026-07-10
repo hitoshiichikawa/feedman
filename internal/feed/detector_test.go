@@ -516,6 +516,215 @@ func TestDetectFeedURL_HTMLWithMultipleFeedLinks_PrioritySelection(t *testing.T)
 	}
 }
 
+// --- HTTP エラーレスポンスの判定テスト（Issue #153 / Req 1.3, 1.4, 1.5, 2.4, 4.4） ---
+
+// TestDetectFeedURL_HTTPError_4xx は 4xx 系ステータスコード（404 / 429）受信時に
+// FEED_HTTP_ERROR を返すことをテストする（Req 1.3, 1.5, 2.4）。
+func TestDetectFeedURL_HTTPError_4xx(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+	}{
+		{name: "404 Not Found", status: http.StatusNotFound},
+		{name: "429 Too Many Requests", status: http.StatusTooManyRequests},
+		{name: "403 Forbidden", status: http.StatusForbidden},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, `<html><body>Error</body></html>`)
+			}))
+			defer server.Close()
+
+			guard := &mockSSRFGuard{}
+			d := NewFeedDetector(guard)
+
+			// Act
+			_, err := d.DetectFeedURL(context.Background(), server.URL+"/")
+
+			// Assert
+			if err == nil {
+				t.Fatalf("HTTP %d 受信時はエラーを返すべき", tc.status)
+			}
+			apiErr, ok := err.(*model.APIError)
+			if !ok {
+				t.Fatalf("APIError型が期待されるが、%T が返された", err)
+			}
+			if apiErr.Code != model.ErrCodeFeedHTTPError {
+				t.Errorf("期待エラーコード: %s, 結果: %s", model.ErrCodeFeedHTTPError, apiErr.Code)
+			}
+			if apiErr.Code == model.ErrCodeFeedNotDetected {
+				t.Errorf("HTTP エラーは FEED_NOT_DETECTED と区別されるべき（Req 1.5）")
+			}
+			// Details["status_code"] にステータスコードが載っていること（Req 2.4）
+			if apiErr.Details == nil {
+				t.Fatal("Details が nil。status_code を載せるべき")
+			}
+			gotStatus, ok := apiErr.Details["status_code"].(int)
+			if !ok {
+				t.Fatalf("Details[\"status_code\"] は int であるべき。実型: %T", apiErr.Details["status_code"])
+			}
+			if gotStatus != tc.status {
+				t.Errorf("期待ステータスコード: %d, 結果: %d", tc.status, gotStatus)
+			}
+		})
+	}
+}
+
+// TestDetectFeedURL_HTTPError_5xx は 5xx 系ステータスコード（500 / 503）受信時に
+// FEED_HTTP_ERROR を返すことをテストする（Req 1.3, 1.5, 2.4）。
+func TestDetectFeedURL_HTTPError_5xx(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+	}{
+		{name: "500 Internal Server Error", status: http.StatusInternalServerError},
+		{name: "503 Service Unavailable", status: http.StatusServiceUnavailable},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, `<html><body>Server Error</body></html>`)
+			}))
+			defer server.Close()
+
+			guard := &mockSSRFGuard{}
+			d := NewFeedDetector(guard)
+
+			// Act
+			_, err := d.DetectFeedURL(context.Background(), server.URL+"/")
+
+			// Assert
+			if err == nil {
+				t.Fatalf("HTTP %d 受信時はエラーを返すべき", tc.status)
+			}
+			apiErr, ok := err.(*model.APIError)
+			if !ok {
+				t.Fatalf("APIError型が期待されるが、%T が返された", err)
+			}
+			if apiErr.Code != model.ErrCodeFeedHTTPError {
+				t.Errorf("期待エラーコード: %s, 結果: %s", model.ErrCodeFeedHTTPError, apiErr.Code)
+			}
+			if apiErr.Category != "feed" {
+				t.Errorf("期待カテゴリ: feed, 結果: %s", apiErr.Category)
+			}
+			if apiErr.Action == "" {
+				t.Error("ユーザー向け対処方法が空であるべきではない（Req 2.1）")
+			}
+			gotStatus, _ := apiErr.Details["status_code"].(int)
+			if gotStatus != tc.status {
+				t.Errorf("期待ステータスコード: %d, 結果: %d", tc.status, gotStatus)
+			}
+		})
+	}
+}
+
+// TestDetectFeedURL_HTTPError_4xx_DoesNotParseHTMLFeedLink は 4xx 応答ボディに
+// HTML 形式の <link rel="alternate" type="application/rss+xml"> が含まれていても
+// HTML パースを実行せず HTTP エラー由来の固有エラーとして失敗を返すことを
+// テストする（Req 4.4）。
+func TestDetectFeedURL_HTTPError_4xx_DoesNotParseHTMLFeedLink(t *testing.T) {
+	// Arrange: 429 でフィードリンクを持つ HTML を返すサーバ
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, `<html><head>
+			<link rel="alternate" type="application/rss+xml" href="https://example.com/feed.xml">
+		</head><body>Rate limited</body></html>`)
+	}))
+	defer server.Close()
+
+	guard := &mockSSRFGuard{}
+	d := NewFeedDetector(guard)
+
+	// Act
+	feedURL, err := d.DetectFeedURL(context.Background(), server.URL+"/")
+
+	// Assert: HTML 内の feed link を信頼せず FEED_HTTP_ERROR を返す
+	if err == nil {
+		t.Fatalf("4xx 応答内の HTML フィードリンクを信頼してはならない。返却URL: %s", feedURL)
+	}
+	apiErr, ok := err.(*model.APIError)
+	if !ok {
+		t.Fatalf("APIError型が期待されるが、%T が返された", err)
+	}
+	if apiErr.Code != model.ErrCodeFeedHTTPError {
+		t.Errorf("期待エラーコード: %s, 結果: %s", model.ErrCodeFeedHTTPError, apiErr.Code)
+	}
+	if feedURL != "" {
+		t.Errorf("HTTP エラー時はフィードURLを返してはならない。結果: %s", feedURL)
+	}
+}
+
+// TestDetectFeedURL_HTTPError_3xxFinalResponse は最終応答が 3xx だった場合
+// （HTTP クライアントのリダイレクト追跡後にも 3xx が残るケース）にも HTTP エラー
+// として扱うことをテストする（Req 1.4）。
+//
+// 通常、Go の http.Client は Location ヘッダがあれば 3xx を自動追跡するため、
+// 最終応答に 3xx が残るのは Location ヘッダ欠落等の限定ケース。本テストでは
+// Location なしの 302 を返してその挙動を再現する。
+func TestDetectFeedURL_HTTPError_3xxFinalResponse(t *testing.T) {
+	// Arrange: Location なしの 302
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Location ヘッダを設定せずに 302 を返す
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer server.Close()
+
+	guard := &mockSSRFGuard{}
+	d := NewFeedDetector(guard)
+
+	// Act
+	_, err := d.DetectFeedURL(context.Background(), server.URL+"/")
+
+	// Assert: 3xx 最終応答も HTTP エラーとして処理される
+	if err == nil {
+		t.Fatal("3xx 最終応答はエラーを返すべき")
+	}
+	apiErr, ok := err.(*model.APIError)
+	if !ok {
+		t.Fatalf("APIError型が期待されるが、%T が返された", err)
+	}
+	if apiErr.Code != model.ErrCodeFeedHTTPError {
+		t.Errorf("期待エラーコード: %s, 結果: %s", model.ErrCodeFeedHTTPError, apiErr.Code)
+	}
+}
+
+// TestDetectFeedURL_2xxStillWorks は 200 応答の既存の検出フローが本変更後も
+// 引き続き動作することを明示的にテストする（Req 3.1, NFR 1.1）。
+func TestDetectFeedURL_2xxStillWorks(t *testing.T) {
+	// Arrange
+	rssXML := `<?xml version="1.0"?><rss version="2.0"><channel><title>Test</title></channel></rss>`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, rssXML)
+	}))
+	defer server.Close()
+
+	guard := &mockSSRFGuard{}
+	d := NewFeedDetector(guard)
+
+	// Act
+	feedURL, err := d.DetectFeedURL(context.Background(), server.URL+"/feed.xml")
+
+	// Assert
+	if err != nil {
+		t.Fatalf("200 応答時はエラーを返してはならない: %v", err)
+	}
+	if feedURL != server.URL+"/feed.xml" {
+		t.Errorf("期待URL: %s/feed.xml, 結果: %s", server.URL, feedURL)
+	}
+}
+
 // --- HTTP クライアント再利用のテスト（Requirement 1 / 5 / 6） ---
 
 // TestFeedDetector_GetHTTPClient_ReusesSameInstanceWithGuard はSSRFガード有効時に

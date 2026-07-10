@@ -518,6 +518,68 @@ func TestUpsertItems_NewItem_Insert(t *testing.T) {
 	}
 }
 
+// TestUpsertItems_NewItem_UnsafeLinkSanitized は、フィード由来の link が javascript: 等の
+// 危険スキームのとき、保存される記事の Link が空に無害化されることを検証する（#176）。
+func TestUpsertItems_NewItem_UnsafeLinkSanitized(t *testing.T) {
+	repo := newMockItemRepo()
+	sanitizer := &mockSanitizer{}
+	svc := NewItemUpsertService(repo, sanitizer)
+
+	pubTime := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
+	// 同一性は GUID で判定させ、危険スキームの link を持たせる。
+	parsedItems := []model.ParsedItem{
+		{
+			GuidOrID:    "guid-xss",
+			Title:       "悪意あるリンクの記事",
+			Link:        "javascript:alert(document.cookie)",
+			Content:     "<p>本文</p>",
+			PublishedAt: &pubTime,
+		},
+	}
+
+	if _, _, err := svc.UpsertItems(context.Background(), "feed-1", parsedItems); err != nil {
+		t.Fatalf("UpsertItems returned error: %v", err)
+	}
+
+	created := repo.lastCreatedItem
+	if created == nil {
+		t.Fatal("lastCreatedItem should not be nil")
+	}
+	if created.Link != "" {
+		t.Errorf("created.Link = %q, want empty (javascript: must be sanitized)", created.Link)
+	}
+}
+
+// TestUpsertItems_NewItem_SafeLinkPreserved は http/https の link がそのまま保存される
+// ことを確認し、上の無害化テストとの差分等価を担保する（#176）。
+func TestUpsertItems_NewItem_SafeLinkPreserved(t *testing.T) {
+	repo := newMockItemRepo()
+	sanitizer := &mockSanitizer{}
+	svc := NewItemUpsertService(repo, sanitizer)
+
+	pubTime := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
+	parsedItems := []model.ParsedItem{
+		{
+			GuidOrID:    "guid-safe",
+			Title:       "通常記事",
+			Link:        "https://example.com/article",
+			PublishedAt: &pubTime,
+		},
+	}
+
+	if _, _, err := svc.UpsertItems(context.Background(), "feed-1", parsedItems); err != nil {
+		t.Fatalf("UpsertItems returned error: %v", err)
+	}
+
+	created := repo.lastCreatedItem
+	if created == nil {
+		t.Fatal("lastCreatedItem should not be nil")
+	}
+	if created.Link != "https://example.com/article" {
+		t.Errorf("created.Link = %q, want %q", created.Link, "https://example.com/article")
+	}
+}
+
 // TestUpsertItems_NewItem_PublishedAtMissing_UsesFetchedAt はpublished_at未設定時にfetched_atを代用することをテストする。
 func TestUpsertItems_NewItem_PublishedAtMissing_UsesFetchedAt(t *testing.T) {
 	repo := newMockItemRepo()

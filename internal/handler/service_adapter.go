@@ -2,8 +2,6 @@ package handler
 
 import (
 	"context"
-	"encoding/base64"
-	"fmt"
 	"time"
 
 	"github.com/hitoshi/feedman/internal/crossfeed"
@@ -107,6 +105,22 @@ func (a *UserServiceAdapter) Withdraw(ctx context.Context, userID string) error 
 	return a.svc.Withdraw(ctx, userID)
 }
 
+// GetCurrent は指定 userID の current user 情報をハンドラ用 DTO で返す。
+// user.Service.GetByID を呼び、*model.User から currentUserResponse に変換する。
+// avatar_url は v1 では DB 未拡張のため常に nil を返す（design.md「設計判断」/ Req 2.4）。
+func (a *UserServiceAdapter) GetCurrent(ctx context.Context, userID string) (*currentUserResponse, error) {
+	u, err := a.svc.GetByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return &currentUserResponse{
+		ID:        u.ID,
+		Email:     u.Email,
+		Name:      u.Name,
+		AvatarURL: nil,
+	}, nil
+}
+
 // ItemServiceAdapterFromDomain は item.ItemService を ItemServiceInterface に適合させるアダプタ。
 type ItemServiceAdapterFromDomain struct {
 	svc *item.ItemService
@@ -204,25 +218,28 @@ func (a *ItemServiceAdapterFromDomain) GetItem(ctx context.Context, userID, item
 			IsStarred:       detail.IsStarred,
 			HatebuCount:     detail.HatebuCount,
 		},
-		Content: detail.Content,
-		Summary: detail.Summary,
-		Author:  detail.Author,
+		Content:        detail.Content,
+		Summary:        detail.Summary,
+		Author:         detail.Author,
+		FeedTitle:      detail.FeedTitle,      // Req 3.1: service 層が populate した feed タイトルを転写
+		FeedFaviconURL: detail.FeedFaviconURL, // Req 3.2 / 3.4: *string なので nil で省略される
 	}, nil
 }
 
-// ItemStateServiceAdapterFromRepo は repository.ItemStateRepository を ItemStateServiceInterface に適合させるアダプタ。
-type ItemStateServiceAdapterFromRepo struct {
-	repo repository.ItemStateRepository
+// ItemStateServiceAdapterFromDomain は item.ItemStateService を ItemStateServiceInterface に適合させるアダプタ。
+type ItemStateServiceAdapterFromDomain struct {
+	svc *item.ItemStateService
 }
 
-// NewItemStateServiceAdapter は repository.ItemStateRepository から ItemStateServiceInterface を生成する。
-func NewItemStateServiceAdapter(repo repository.ItemStateRepository) ItemStateServiceInterface {
-	return &ItemStateServiceAdapterFromRepo{repo: repo}
+// NewItemStateServiceAdapter は item.ItemStateService から ItemStateServiceInterface を生成する。
+// 状態更新の認可（購読チェック）はサービス層（item.ItemStateService.UpdateState）が担う。
+func NewItemStateServiceAdapter(svc *item.ItemStateService) ItemStateServiceInterface {
+	return &ItemStateServiceAdapterFromDomain{svc: svc}
 }
 
 // UpdateState は記事の既読・スター状態を冪等に更新する。
-func (a *ItemStateServiceAdapterFromRepo) UpdateState(ctx context.Context, userID, itemID string, isRead *bool, isStarred *bool) (*model.ItemState, error) {
-	return a.repo.Upsert(ctx, userID, itemID, isRead, isStarred)
+func (a *ItemStateServiceAdapterFromDomain) UpdateState(ctx context.Context, userID, itemID string, isRead *bool, isStarred *bool) (*model.ItemState, error) {
+	return a.svc.UpdateState(ctx, userID, itemID, isRead, isStarred)
 }
 
 // SubscriptionDeleterAdapter はリポジトリ層を SubscriptionDeleter に適合させるアダプタ。
@@ -302,14 +319,11 @@ func (a *ItemSearchServiceAdapter) Search(
 			IsRead:          it.IsRead,
 			IsStarred:       it.IsStarred,
 			HatebuCount:     it.HatebuCount,
+			HatebuFetchedAt: it.HatebuFetchedAt,
 		}
-		// favicon の生バイト + MIME が揃っている場合のみ data URL を組み立てる。
-		// 既存 subscription.Service.ListSubscriptions と同じ流儀
-		// （`data:<mime>;base64,<base64>`）で整形し、欠落時は nil を保持する。
-		if len(it.FaviconData) > 0 && it.FaviconMime != "" {
-			dataURL := fmt.Sprintf("data:%s;base64,%s", it.FaviconMime, base64.StdEncoding.EncodeToString(it.FaviconData))
-			hit.FaviconURL = &dataURL
-		}
+		// favicon の生バイト + MIME が揃っている場合のみ data URL を組み立てる
+		// （欠落時は nil を保持）。整形ロジックは model.FaviconDataURL に集約。
+		hit.FaviconURL = model.FaviconDataURL(it.FaviconData, it.FaviconMime)
 		hits[i] = hit
 	}
 
@@ -384,7 +398,7 @@ func (a *CrossFeedServiceAdapter) TouchLastSeen(ctx context.Context, userID stri
 var _ SubscriptionServiceInterface = (*SubscriptionServiceAdapter)(nil)
 var _ UserServiceInterface = (*UserServiceAdapter)(nil)
 var _ ItemServiceInterface = (*ItemServiceAdapterFromDomain)(nil)
-var _ ItemStateServiceInterface = (*ItemStateServiceAdapterFromRepo)(nil)
+var _ ItemStateServiceInterface = (*ItemStateServiceAdapterFromDomain)(nil)
 var _ ItemSearchServiceInterface = (*ItemSearchServiceAdapter)(nil)
 var _ SubscriptionDeleter = (*SubscriptionDeleterAdapter)(nil)
 var _ CrossFeedServiceInterface = (*CrossFeedServiceAdapter)(nil)

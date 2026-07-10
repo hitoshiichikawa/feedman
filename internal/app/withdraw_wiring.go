@@ -77,6 +77,35 @@ func (a *txSessionDeleterAdapter) DeleteByUserIDTx(ctx context.Context, tx user.
 	return a.repo.DeleteByUserIDExec(ctx, q, userID)
 }
 
+// txAuthCodeDeleterAdapter は認可コードリポジトリを user.TxAuthCodeDeleter に
+// 適合させる（Issue #170 Req 1.1, 2.1）。
+type txAuthCodeDeleterAdapter struct {
+	repo *repository.PostgresAuthCodeRepo
+}
+
+func (a *txAuthCodeDeleterAdapter) DeleteByUserIDTx(ctx context.Context, tx user.Tx, userID string) error {
+	q, err := querierFromTx(tx)
+	if err != nil {
+		return err
+	}
+	return a.repo.DeleteByUserIDExec(ctx, q, userID)
+}
+
+// txRefreshTokenDeleterAdapter は refresh token リポジトリを
+// user.TxRefreshTokenDeleter に適合させる（Issue #170 Req 1.2, 2.1）。
+// family の DELETE 1 文で配下 tokens は FK CASCADE により連動削除される。
+type txRefreshTokenDeleterAdapter struct {
+	repo *repository.PostgresRefreshTokenRepo
+}
+
+func (a *txRefreshTokenDeleterAdapter) DeleteByUserIDTx(ctx context.Context, tx user.Tx, userID string) error {
+	q, err := querierFromTx(tx)
+	if err != nil {
+		return err
+	}
+	return a.repo.DeleteByUserIDExec(ctx, q, userID)
+}
+
 // txUserDeleterAdapter はユーザーリポジトリを user.TxUserDeleter に適合させる。
 type txUserDeleterAdapter struct {
 	repo *repository.PostgresUserRepo
@@ -95,12 +124,18 @@ func (a *txUserDeleterAdapter) DeleteByIDTx(ctx context.Context, tx user.Tx, id 
 }
 
 // newTxUserService はトランザクション対応の退会サービスを組み立てる。
+//
+// Issue #170: native auth deleter（auth_code / refresh_token）を末尾に追加し、
+// 退会トランザクションへ auth_codes / refresh_token_families の明示削除を
+// 統合する。
 func newTxUserService(
 	beginner *repository.SQLTxBeginner,
 	userRepo *repository.PostgresUserRepo,
 	sessionRepo *repository.PostgresSessionRepo,
 	subRepo *repository.PostgresSubscriptionRepo,
 	itemStateRepo *repository.PostgresItemStateRepo,
+	authCodeRepo *repository.PostgresAuthCodeRepo,
+	refreshTokenRepo *repository.PostgresRefreshTokenRepo,
 ) *user.Service {
 	return user.NewServiceWithTx(
 		&txBeginnerAdapter{beginner: beginner},
@@ -108,6 +143,8 @@ func newTxUserService(
 		&txSessionDeleterAdapter{repo: sessionRepo},
 		&txSubscriptionDeleterAdapter{repo: subRepo},
 		&txItemStateDeleterAdapter{repo: itemStateRepo},
+		&txAuthCodeDeleterAdapter{repo: authCodeRepo},
+		&txRefreshTokenDeleterAdapter{repo: refreshTokenRepo},
 	)
 }
 
@@ -118,4 +155,6 @@ var (
 	_ user.TxSubscriptionDeleter = (*txSubscriptionDeleterAdapter)(nil)
 	_ user.TxSessionDeleter      = (*txSessionDeleterAdapter)(nil)
 	_ user.TxUserDeleter         = (*txUserDeleterAdapter)(nil)
+	_ user.TxAuthCodeDeleter     = (*txAuthCodeDeleterAdapter)(nil)
+	_ user.TxRefreshTokenDeleter = (*txRefreshTokenDeleterAdapter)(nil)
 )

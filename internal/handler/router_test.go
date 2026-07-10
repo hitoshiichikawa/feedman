@@ -4,9 +4,15 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/time/rate"
+
+	"github.com/hitoshi/feedman/internal/auth"
+	"github.com/hitoshi/feedman/internal/middleware"
 	"github.com/hitoshi/feedman/internal/model"
 )
 
@@ -54,8 +60,8 @@ func TestSetupAuthRoutes_CallbackEndpoint(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	resp := w.Result()
-	if resp.StatusCode != http.StatusTemporaryRedirect {
-		t.Errorf("GET /auth/google/callback status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("GET /auth/google/callback status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
 	}
 }
 
@@ -77,8 +83,8 @@ func TestSetupAuthRoutes_LogoutEndpoint(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	resp := w.Result()
-	if resp.StatusCode != http.StatusTemporaryRedirect {
-		t.Errorf("POST /auth/logout status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("POST /auth/logout status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
 	}
 }
 
@@ -123,4 +129,656 @@ func TestSetupAuthRoutes_UnknownRoute_Returns404Or405(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("GET /auth/unknown status = %d, want 404 or 405", resp.StatusCode)
 	}
+}
+
+// --- Native Auth Token 交換ルーティング（Issue #166 / Req 1.5, 3.2） ---
+
+// alwaysSucceedExchangeService は service 層に到達したかを判定するための固定成功モック。
+// 200 応答が返れば handler に到達したことが確認できる。
+// RotateRefreshToken は Issue #167 で、RevokeRefreshToken は Issue #168 で interface に
+// 追加されたため本モックでも実装する。
+type alwaysSucceedExchangeService struct {
+	callCount   int
+	rotateCalls int
+	revokeCalls int
+}
+
+func (s *alwaysSucceedExchangeService) ExchangeAuthCode(ctx context.Context, authCode, codeVerifier string) (*auth.TokenPair, error) {
+	s.callCount++
+	return &auth.TokenPair{
+		AccessToken:  "ok-access",
+		RefreshToken: "ok-refresh",
+		ExpiresIn:    900,
+	}, nil
+}
+
+func (s *alwaysSucceedExchangeService) RotateRefreshToken(ctx context.Context, refreshToken string) (*auth.TokenPair, error) {
+	s.rotateCalls++
+	return &auth.TokenPair{
+		AccessToken:  "ok-rotated-access",
+		RefreshToken: "ok-rotated-refresh",
+		ExpiresIn:    900,
+	}, nil
+}
+
+func (s *alwaysSucceedExchangeService) RevokeRefreshToken(ctx context.Context, refreshToken string) error {
+	s.revokeCalls++
+	return nil
+}
+
+// newMinimalDepsForNativeAuth は Native Auth 関連ルートのみを検証するための最小 deps を返す。
+// 既存ルートは挙動を変えない前提で（NFR 2.1）、未使用 service は nil ヌル安全前提で省略する
+// と nil panic するため、空のモックを注入する。
+func newMinimalDepsForNativeAuth(nativeHandler *NativeAuthHandler) *RouterDeps {
+	return &RouterDeps{
+		SessionFinder:     &mockSessionFinderForRouter{sessions: map[string]*model.Session{}},
+		CORSAllowedOrigin: "http://localhost:3000",
+		RateLimiter:       middleware.NewRateLimiter(middleware.DefaultRateLimiterConfig()),
+		AuthService:       &mockAuthService{},
+		AuthConfig:        AuthHandlerConfig{BaseURL: "http://localhost:3000"},
+		NativeAuthHandler: nativeHandler,
+	}
+}
+
+// TestNewRouter_NativeAuthToken_RegisteredWhenHandlerInjected は NativeAuthHandler を
+// 注入したとき POST /api/auth/token がセッション無しで到達し、200 が返ることを検証する
+// （Req 1.5: Cookie / Bearer なしで呼び出し可能）。
+func TestNewRouter_NativeAuthToken_RegisteredWhenHandlerInjected(t *testing.T) {
+	// Arrange
+	svc := &alwaysSucceedExchangeService{}
+	nh := NewNativeAuthHandler(svc)
+	router := NewRouter(newMinimalDepsForNativeAuth(nh))
+
+	body := `{"auth_code":"plain-auth-code","code_verifier":"plain-verifier"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/token", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d (handler 到達 / Req 1.5)", resp.StatusCode, http.StatusOK)
+	}
+	if svc.callCount != 1 {
+		t.Errorf("service called %d times, want 1 (handler に到達していない可能性)", svc.callCount)
+	}
+}
+
+// TestNewRouter_NativeAuthToken_NotRegisteredWhenHandlerNil は NativeAuthHandler が
+// nil のとき POST /api/auth/token がルートとして登録されず 404 が返ることを検証する
+// （Req 3.2: 署名鍵未設定環境の fail-closed）。
+func TestNewRouter_NativeAuthToken_NotRegisteredWhenHandlerNil(t *testing.T) {
+	// Arrange: NativeAuthHandler nil
+	router := NewRouter(newMinimalDepsForNativeAuth(nil))
+
+	body := `{"auth_code":"a","code_verifier":"v"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/token", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: fail-closed として 404
+	if w.Result().StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want %d (NativeAuthHandler nil で fail-closed / Req 3.2)",
+			w.Result().StatusCode, http.StatusNotFound)
+	}
+}
+
+// TestNewRouter_NativeAuthToken_DoesNotRequireSession は注入時に Cookie 無しでも
+// 401 を返さず handler まで到達することを検証する（Req 1.5: Session middleware 通らない）。
+// 既存の認証必須ルートでは Cookie 無し = 401 になるため、同じ抜き打ちが本ルートでは起きない
+// ことを直接確認する。
+func TestNewRouter_NativeAuthToken_DoesNotRequireSession(t *testing.T) {
+	// Arrange
+	svc := &alwaysSucceedExchangeService{}
+	nh := NewNativeAuthHandler(svc)
+	router := NewRouter(newMinimalDepsForNativeAuth(nh))
+
+	body := `{"auth_code":"a","code_verifier":"v"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/token", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	// セッション Cookie 無し
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: 401 ではなく 200（Session middleware を経由していない）
+	resp := w.Result()
+	if resp.StatusCode == http.StatusUnauthorized {
+		t.Errorf("status = 401, want non-401 (Req 1.5: Cookie 無しで呼び出し可能)")
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
+// TestNewRouter_NativeAuthToken_WrongMethod_Returns405 は POST 以外の method で
+// 405 が返ることを確認する（chi の method routing 標準挙動の確認、handler 経由ではない）。
+func TestNewRouter_NativeAuthToken_WrongMethod_Returns405(t *testing.T) {
+	// Arrange
+	svc := &alwaysSucceedExchangeService{}
+	nh := NewNativeAuthHandler(svc)
+	router := NewRouter(newMinimalDepsForNativeAuth(nh))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/token", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert
+	if got := w.Result().StatusCode; got != http.StatusMethodNotAllowed && got != http.StatusNotFound {
+		t.Errorf("status = %d, want 405 or 404 (POST 以外は不可)", got)
+	}
+	if svc.callCount != 0 {
+		t.Errorf("service called %d times, want 0 (GET は handler に到達しない)", svc.callCount)
+	}
+}
+
+// --- Refresh ルーティング（Issue #167 / Req 1.5, NFR 2.2） ---
+
+// TestNewRouter_NativeAuthRefresh_RegisteredWhenHandlerInjected は NativeAuthHandler を
+// 注入したとき POST /api/auth/refresh がセッション無しで到達し、200 が返ることを検証する
+// （Req 1.5: Cookie / Bearer なしで呼び出し可能）。
+func TestNewRouter_NativeAuthRefresh_RegisteredWhenHandlerInjected(t *testing.T) {
+	// Arrange
+	svc := &alwaysSucceedExchangeService{}
+	nh := NewNativeAuthHandler(svc)
+	router := NewRouter(newMinimalDepsForNativeAuth(nh))
+
+	body := `{"refresh_token":"plain-refresh-token"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/refresh", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d (handler 到達 / Req 1.5)", resp.StatusCode, http.StatusOK)
+	}
+	if svc.rotateCalls != 1 {
+		t.Errorf("service.RotateRefreshToken called %d times, want 1 (handler に到達していない可能性)",
+			svc.rotateCalls)
+	}
+}
+
+// TestNewRouter_NativeAuthRefresh_NotRegisteredWhenHandlerNil は NativeAuthHandler が
+// nil のとき POST /api/auth/refresh がルートとして登録されず 404 が返ることを検証する
+// （NFR 2.2: 署名鍵未設定環境の fail-closed）。
+func TestNewRouter_NativeAuthRefresh_NotRegisteredWhenHandlerNil(t *testing.T) {
+	// Arrange: NativeAuthHandler nil
+	router := NewRouter(newMinimalDepsForNativeAuth(nil))
+
+	body := `{"refresh_token":"x"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/refresh", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: fail-closed として 404
+	if w.Result().StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want %d (NativeAuthHandler nil で fail-closed / NFR 2.2)",
+			w.Result().StatusCode, http.StatusNotFound)
+	}
+}
+
+// TestNewRouter_NativeAuthRefresh_DoesNotRequireSession は注入時に Cookie 無しでも
+// 401 を返さず handler まで到達することを検証する（Req 1.5: Session middleware 通らない）。
+func TestNewRouter_NativeAuthRefresh_DoesNotRequireSession(t *testing.T) {
+	// Arrange
+	svc := &alwaysSucceedExchangeService{}
+	nh := NewNativeAuthHandler(svc)
+	router := NewRouter(newMinimalDepsForNativeAuth(nh))
+
+	body := `{"refresh_token":"x"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/refresh", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	// セッション Cookie 無し
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: 401 ではなく 200（Session middleware を経由していない）
+	resp := w.Result()
+	if resp.StatusCode == http.StatusUnauthorized {
+		t.Errorf("status = 401, want non-401 (Req 1.5: Cookie 無しで呼び出し可能)")
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
+// --- Revoke ルーティング（Issue #168 / Req 2.4, NFR 2.2 / design.md Testing Strategy 9） ---
+
+// TestNewRouter_NativeAuthRevoke_RegisteredWhenHandlerInjected は NativeAuthHandler を
+// 注入したとき POST /api/auth/revoke がセッション無しで到達し、204 が返ることを検証する
+// （Req 2.4: Cookie / Bearer なしで呼び出し可能 = token 所持自体が失効権限）。
+func TestNewRouter_NativeAuthRevoke_RegisteredWhenHandlerInjected(t *testing.T) {
+	// Arrange
+	svc := &alwaysSucceedExchangeService{}
+	nh := NewNativeAuthHandler(svc)
+	router := NewRouter(newMinimalDepsForNativeAuth(nh))
+
+	body := `{"refresh_token":"plain-refresh-token"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/revoke", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	// セッション Cookie 無し
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: Cookie 無しで 204（Session middleware を経由していない）
+	resp := w.Result()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("status = %d, want %d (handler 到達 / Req 2.4)", resp.StatusCode, http.StatusNoContent)
+	}
+	if svc.revokeCalls != 1 {
+		t.Errorf("service.RevokeRefreshToken called %d times, want 1 (handler に到達していない可能性)",
+			svc.revokeCalls)
+	}
+}
+
+// TestNewRouter_NativeAuthRevoke_NotRegisteredWhenHandlerNil は NativeAuthHandler が
+// nil のとき POST /api/auth/revoke がルートとして登録されず 404 が返ることを検証する
+// （NFR 2.2: 署名鍵未設定環境の fail-closed）。
+func TestNewRouter_NativeAuthRevoke_NotRegisteredWhenHandlerNil(t *testing.T) {
+	// Arrange: NativeAuthHandler nil
+	router := NewRouter(newMinimalDepsForNativeAuth(nil))
+
+	body := `{"refresh_token":"x"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/revoke", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: fail-closed として 404
+	if w.Result().StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want %d (NativeAuthHandler nil で fail-closed / NFR 2.2)",
+			w.Result().StatusCode, http.StatusNotFound)
+	}
+}
+
+// --- Bearer-or-Session 認証ルーティング（Issue #169 / design.md Testing Strategy router 1〜4） ---
+
+// newBearerAuthDeps は認証必須ルート（/api/subscriptions）への Bearer / Cookie 認証を
+// 検証するための最小 deps を返す。verifier / sessions を差し替えて各ケースを構成する。
+func newBearerAuthDeps(verifier middleware.JWTVerifier, sessions map[string]*model.Session) *RouterDeps {
+	deps := newMinimalDepsForNativeAuth(nil)
+	deps.JWTVerifier = verifier
+	deps.SessionFinder = &mockSessionFinderForRouter{sessions: sessions}
+	deps.SubscriptionService = &mockSubscriptionService{
+		listSubscriptionsFn: func(ctx context.Context, userID string) ([]subscriptionResponse, error) {
+			return []subscriptionResponse{}, nil
+		},
+	}
+	return deps
+}
+
+// stubRouterJWTVerifier は router テスト用の固定結果 JWTVerifier スタブ。
+type stubRouterJWTVerifier struct {
+	userID string
+	err    error
+}
+
+func (s *stubRouterJWTVerifier) VerifyAccessToken(tokenString string) (string, error) {
+	return s.userID, s.err
+}
+
+// TestNewRouter_BearerAuth_ReachesAPIWithoutCookie は JWTVerifier 注入時に Cookie 無し +
+// Bearer で既存の認証必須ルートに到達できることを検証する（Testing Strategy router 1 /
+// Req 1.1, 1.2: 下流ルートは変更ゼロで透過動作）。
+func TestNewRouter_BearerAuth_ReachesAPIWithoutCookie(t *testing.T) {
+	// Arrange
+	deps := newBearerAuthDeps(&stubRouterJWTVerifier{userID: "user-test-1"}, map[string]*model.Session{})
+	router := NewRouter(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+	req.Header.Set("Authorization", "Bearer stub-valid-token")
+	// Cookie 無し
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: Bearer 認証で既存ルートに到達し 200
+	if w.Result().StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d (Bearer で認証必須ルート到達 / Req 1.1)",
+			w.Result().StatusCode, http.StatusOK)
+	}
+}
+
+// TestNewRouter_BearerAuth_NilVerifierKeepsLegacyBehavior は JWTVerifier nil のとき
+// 従来構成（Cookie セッション認証のみ）と同一挙動になることを検証する
+// （Testing Strategy router 2 / Req 4.2 / NFR 2.2）。
+func TestNewRouter_BearerAuth_NilVerifierKeepsLegacyBehavior(t *testing.T) {
+	sessions := map[string]*model.Session{
+		"valid-session": {
+			ID:        "valid-session",
+			UserID:    "user-test-1",
+			ExpiresAt: time.Now().Add(1 * time.Hour),
+		},
+	}
+
+	t.Run("有効 Cookie のとき従来どおり 200", func(t *testing.T) {
+		// Arrange
+		router := NewRouter(newBearerAuthDeps(nil, sessions))
+		req := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+		req.AddCookie(&http.Cookie{Name: "session_id", Value: "valid-session"})
+		w := httptest.NewRecorder()
+
+		// Act
+		router.ServeHTTP(w, req)
+
+		// Assert
+		if w.Result().StatusCode != http.StatusOK {
+			t.Errorf("status = %d, want %d (NFR 2.1: 既存 Cookie 認証は不変)", w.Result().StatusCode, http.StatusOK)
+		}
+	})
+
+	t.Run("Bearer 付き + Cookie 無しのとき従来どおり 401（token は評価されない）", func(t *testing.T) {
+		// Arrange
+		router := NewRouter(newBearerAuthDeps(nil, sessions))
+		req := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+		req.Header.Set("Authorization", "Bearer anything")
+		w := httptest.NewRecorder()
+
+		// Act
+		router.ServeHTTP(w, req)
+
+		// Assert: 導入前と同一の未認証応答（Req 4.3）
+		if w.Result().StatusCode != http.StatusUnauthorized {
+			t.Errorf("status = %d, want %d (Req 4.2 / 4.3)", w.Result().StatusCode, http.StatusUnauthorized)
+		}
+	})
+}
+
+// TestNewRouter_BearerAuth_IssuerVerifierRoundTrip は #166 auth.JWTIssuer で発行した
+// 実物 token を auth.JWTVerifier 注入済み NewRouter へ Bearer 提示し、Cookie 無しで
+// 既存 API ルートの認証が成立することを検証する（Testing Strategy router 3 /
+// Req 1.1, 4.1: 同一 secret での発行 ↔ 検証の通し）。
+func TestNewRouter_BearerAuth_IssuerVerifierRoundTrip(t *testing.T) {
+	// Arrange: 発行と検証で同一 secret を共有する実物ペア
+	secret := []byte("router-roundtrip-secret-32bytes-x")
+	issuer := auth.NewJWTIssuer(secret, "v1")
+	tokenString, err := issuer.IssueAccessToken("user-roundtrip-1")
+	if err != nil {
+		t.Fatalf("IssueAccessToken returned error: %v", err)
+	}
+	deps := newBearerAuthDeps(auth.NewJWTVerifier(secret), map[string]*model.Session{})
+	router := NewRouter(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenString)
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert
+	if w.Result().StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d (実物 issuer ↔ verifier の通し / Req 4.1)",
+			w.Result().StatusCode, http.StatusOK)
+	}
+}
+
+// TestNewRouter_BearerAuth_ExpiredTokenWithValidCookie_Returns401 は期限切れ token +
+// 有効 Cookie 併送で 401 になる（Cookie へ fallback しない）ことを router 通しで検証する
+// （Testing Strategy router 通し / Req 2.2, 2.4）。
+func TestNewRouter_BearerAuth_ExpiredTokenWithValidCookie_Returns401(t *testing.T) {
+	// Arrange: exp が過去の token を同一 secret で直接組み立てる
+	secret := []byte("router-roundtrip-secret-32bytes-x")
+	past := time.Now().Add(-1 * time.Hour)
+	expiredToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub":       "user-roundtrip-1",
+		"iat":       past.Add(-15 * time.Minute).Unix(),
+		"exp":       past.Unix(),
+		"token_use": "access",
+	})
+	tokenString, err := expiredToken.SignedString(secret)
+	if err != nil {
+		t.Fatalf("SignedString returned error: %v", err)
+	}
+
+	sessions := map[string]*model.Session{
+		"valid-session": {
+			ID:        "valid-session",
+			UserID:    "user-test-1",
+			ExpiresAt: time.Now().Add(1 * time.Hour),
+		},
+	}
+	router := NewRouter(newBearerAuthDeps(auth.NewJWTVerifier(secret), sessions))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenString)
+	req.AddCookie(&http.Cookie{Name: "session_id", Value: "valid-session"})
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: 有効 Cookie が併送されていても fallback せず 401（Req 2.4）
+	if w.Result().StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d (期限切れ Bearer は Cookie へ fallback しない / Req 2.2, 2.4)",
+			w.Result().StatusCode, http.StatusUnauthorized)
+	}
+}
+
+// --- native auth 3 ルートの IP 単位レート制限（Issue #171 / design.md Testing Strategy） ---
+
+// newNativeAuthRateLimitRouter は NativeAuthHandler + UnauthIPRateLimiter（指定 burst）を
+// 注入した router を構築する。burst=1 なら同一 IP の 2 回目で必ず 429 になる。
+func newNativeAuthRateLimitRouter(burst int) (http.Handler, *alwaysSucceedExchangeService, *middleware.IPRateLimiter) {
+	svc := &alwaysSucceedExchangeService{}
+	nh := NewNativeAuthHandler(svc)
+	deps := newMinimalDepsForNativeAuth(nh)
+	deps.UnauthIPRateLimiter = middleware.NewIPRateLimiter(middleware.IPRateLimiterConfig{
+		Rate:            rate.Limit(1),
+		Burst:           burst,
+		CleanupInterval: 1 * time.Minute,
+	})
+	return NewRouter(deps), svc, deps.UnauthIPRateLimiter
+}
+
+// nativeAuthRouteCases は 3 ルートの path / リクエストボディ / 通過時 status / service
+// 呼び出し回数の参照を共通化する table。
+type nativeAuthRouteCase struct {
+	name       string
+	path       string
+	body       string
+	wantStatus int
+	calls      func(svc *alwaysSucceedExchangeService) int
+}
+
+func nativeAuthRouteCases() []nativeAuthRouteCase {
+	return []nativeAuthRouteCase{
+		{
+			name:       "token",
+			path:       "/api/auth/token",
+			body:       `{"auth_code":"a","code_verifier":"v"}`,
+			wantStatus: http.StatusOK,
+			calls:      func(svc *alwaysSucceedExchangeService) int { return svc.callCount },
+		},
+		{
+			name:       "refresh",
+			path:       "/api/auth/refresh",
+			body:       `{"refresh_token":"x"}`,
+			wantStatus: http.StatusOK,
+			calls:      func(svc *alwaysSucceedExchangeService) int { return svc.rotateCalls },
+		},
+		{
+			name:       "revoke",
+			path:       "/api/auth/revoke",
+			body:       `{"refresh_token":"x"}`,
+			wantStatus: http.StatusNoContent,
+			calls:      func(svc *alwaysSucceedExchangeService) int { return svc.revokeCalls },
+		},
+	}
+}
+
+// doNativeAuthPost は指定 path へ JSON POST を送る（RemoteAddr 指定付き）。
+func doNativeAuthPost(router http.Handler, path, body, remoteAddr string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = remoteAddr
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	return w
+}
+
+// TestNewRouter_NativeAuthIPRateLimit_429OnExcess は同一 IP の閾値超過時に 3 ルートが
+// 429 + Retry-After で応答し、service（handler 以降）に到達しないことを検証する
+// （Testing Strategy 1〜3 / Req 1.1, 1.2, 1.3, 1.4, 1.5）。
+func TestNewRouter_NativeAuthIPRateLimit_429OnExcess(t *testing.T) {
+	for _, tc := range nativeAuthRouteCases() {
+		t.Run(tc.name+"で同一IP超過のとき429を返しserviceに到達しない", func(t *testing.T) {
+			// Arrange: burst=1（1 回目で枯渇）
+			router, svc, ipRL := newNativeAuthRateLimitRouter(1)
+			defer ipRL.Stop()
+
+			// Act 1: 1 回目は閾値以内なので通常応答（Req 1.4）
+			w1 := doNativeAuthPost(router, tc.path, tc.body, "203.0.113.10:50000")
+			if w1.Result().StatusCode != tc.wantStatus {
+				t.Fatalf("1st status = %d, want %d (閾値以内は通過 / Req 1.4)",
+					w1.Result().StatusCode, tc.wantStatus)
+			}
+			if got := tc.calls(svc); got != 1 {
+				t.Fatalf("1st service calls = %d, want 1", got)
+			}
+
+			// Act 2: 2 回目は超過 → 429
+			w2 := doNativeAuthPost(router, tc.path, tc.body, "203.0.113.10:50001")
+
+			// Assert: 429 + Retry-After、service 未到達（Req 1.1〜1.3, 1.5）
+			resp := w2.Result()
+			if resp.StatusCode != http.StatusTooManyRequests {
+				t.Fatalf("2nd status = %d, want %d (Req 1.1-1.3)", resp.StatusCode, http.StatusTooManyRequests)
+			}
+			if resp.Header.Get("Retry-After") == "" {
+				t.Error("Retry-After header is empty (Req 1.5)")
+			}
+			if got := tc.calls(svc); got != 1 {
+				t.Errorf("service calls after 429 = %d, want 1 (429 は handler 到達前に遮断)", got)
+			}
+		})
+	}
+}
+
+// TestNewRouter_NativeAuthIPRateLimit_IndependentPerIP は別 IP からの要求が超過 IP の
+// 影響を受けないことを検証する（Testing Strategy 4 / Req 1.6）。
+func TestNewRouter_NativeAuthIPRateLimit_IndependentPerIP(t *testing.T) {
+	// Arrange: burst=1 で IP A を枯渇させる
+	router, svc, ipRL := newNativeAuthRateLimitRouter(1)
+	defer ipRL.Stop()
+	body := `{"auth_code":"a","code_verifier":"v"}`
+
+	if w := doNativeAuthPost(router, "/api/auth/token", body, "203.0.113.10:50000"); w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("IP A 1st status = %d, want 200", w.Result().StatusCode)
+	}
+	if w := doNativeAuthPost(router, "/api/auth/token", body, "203.0.113.10:50001"); w.Result().StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("IP A 2nd status = %d, want 429", w.Result().StatusCode)
+	}
+
+	// Act: 別 IP B からの要求
+	w := doNativeAuthPost(router, "/api/auth/token", body, "198.51.100.20:50000")
+
+	// Assert: IP B は独立カウントのため通過する（Req 1.6）
+	if w.Result().StatusCode != http.StatusOK {
+		t.Errorf("IP B status = %d, want 200 (IP ごとに独立カウント / Req 1.6)", w.Result().StatusCode)
+	}
+	if svc.callCount != 2 {
+		t.Errorf("service calls = %d, want 2 (IP A 1回 + IP B 1回)", svc.callCount)
+	}
+}
+
+// TestNewRouter_NativeAuthIPRateLimit_SameShapeAsExistingRoutes は native auth ルートの
+// 429 応答（status / Retry-After / Content-Type / JSON ボディ）が既存未認証ルート
+// （/health）の 429 と同一形式であることを検証する（Testing Strategy 5 / Req 2.3）。
+func TestNewRouter_NativeAuthIPRateLimit_SameShapeAsExistingRoutes(t *testing.T) {
+	// Arrange: 基準となる /health の 429 応答を取得する
+	router, _, ipRL := newNativeAuthRateLimitRouter(1)
+	defer ipRL.Stop()
+	doRouterReq(router, http.MethodGet, "/health", "203.0.113.30:50000") // burst 消費
+	baseW := doRouterReq(router, http.MethodGet, "/health", "203.0.113.30:50001")
+	baseResp := baseW.Result()
+	if baseResp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("health 2nd status = %d, want 429", baseResp.StatusCode)
+	}
+
+	// Act: native auth ルートの 429 応答（別 IP で burst 消費 → 超過）
+	body := `{"auth_code":"a","code_verifier":"v"}`
+	doNativeAuthPost(router, "/api/auth/token", body, "203.0.113.40:50000")
+	w := doNativeAuthPost(router, "/api/auth/token", body, "203.0.113.40:50001")
+	resp := w.Result()
+
+	// Assert: status / Content-Type / ボディが /health の 429 と一致（Req 2.3）
+	if resp.StatusCode != baseResp.StatusCode {
+		t.Errorf("status = %d, want %d", resp.StatusCode, baseResp.StatusCode)
+	}
+	if got, want := resp.Header.Get("Content-Type"), baseResp.Header.Get("Content-Type"); got != want {
+		t.Errorf("Content-Type = %q, want %q", got, want)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Error("Retry-After header is empty")
+	}
+	if got, want := w.Body.String(), baseW.Body.String(); got != want {
+		t.Errorf("429 body = %q, want %q (既存未認証ルートと同一形式 / Req 2.3)", got, want)
+	}
+}
+
+// TestNewRouter_NativeAuthIPRateLimit_Degradations は縮退構成での後方互換を検証する
+// （Testing Strategy 6 / Req 2.4）。
+func TestNewRouter_NativeAuthIPRateLimit_Degradations(t *testing.T) {
+	t.Run("NativeAuthHandler nilのとき3ルートは404のまま（本変更はno-op）", func(t *testing.T) {
+		// Arrange: handler なし + limiter あり
+		deps := newMinimalDepsForNativeAuth(nil)
+		ipRL := middleware.NewIPRateLimiter(middleware.IPRateLimiterConfig{
+			Rate: rate.Limit(1), Burst: 1, CleanupInterval: 1 * time.Minute,
+		})
+		defer ipRL.Stop()
+		deps.UnauthIPRateLimiter = ipRL
+		router := NewRouter(deps)
+
+		// Act & Assert: 3 ルートとも 404（fail-closed のまま / Req 2.4）
+		for _, path := range []string{"/api/auth/token", "/api/auth/refresh", "/api/auth/revoke"} {
+			w := doNativeAuthPost(router, path, `{}`, "203.0.113.50:50000")
+			if w.Result().StatusCode != http.StatusNotFound {
+				t.Errorf("%s status = %d, want 404 (NativeAuthHandler nil / Req 2.4)", path, w.Result().StatusCode)
+			}
+		}
+	})
+
+	t.Run("UnauthIPRateLimiter nilのとき3ルートは制限なしで到達する", func(t *testing.T) {
+		// Arrange: handler あり + limiter なし（既存縮退規約: 素通し no-op）
+		svc := &alwaysSucceedExchangeService{}
+		deps := newMinimalDepsForNativeAuth(NewNativeAuthHandler(svc))
+		router := NewRouter(deps)
+		body := `{"auth_code":"a","code_verifier":"v"}`
+
+		// Act: 同一 IP から連続リクエスト
+		for i := 0; i < 5; i++ {
+			w := doNativeAuthPost(router, "/api/auth/token", body, "203.0.113.60:50000")
+			// Assert: すべて通過（制限なし）
+			if w.Result().StatusCode != http.StatusOK {
+				t.Fatalf("request %d status = %d, want 200 (limiter nil は素通し)", i+1, w.Result().StatusCode)
+			}
+		}
+		if svc.callCount != 5 {
+			t.Errorf("service calls = %d, want 5", svc.callCount)
+		}
+	})
 }

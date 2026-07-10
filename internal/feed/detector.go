@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
@@ -328,6 +329,19 @@ func (d *FeedDetector) DetectFeedURL(ctx context.Context, inputURL string) (stri
 		return "", model.NewFetchFailedError(err.Error())
 	}
 	defer resp.Body.Close()
+
+	// HTTP ステータスコードの判定（Issue #153 / Req 1.1〜1.5）。
+	// 非 2xx（3xx 最終応答 / 4xx / 5xx）はレスポンスボディを HTML/XML としてパースせず、
+	// 「フィード未検出」とは別の HTTP エラー由来エラーとして失敗を返す。
+	// Go の http.Client は既定でリダイレクトを最大 10 回追跡するため、最終応答に
+	// 3xx が残るのは Location ヘッダ欠落など限定ケース。それも本分岐で同様に扱う。
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		slog.Warn("フィード検出: HTTPステータス異常",
+			"url", inputURL,
+			"status", resp.StatusCode,
+		)
+		return "", model.NewFeedHTTPError(resp.StatusCode)
+	}
 
 	// レスポンスボディを読み込み（最大5MB）
 	body, err := io.ReadAll(io.LimitReader(resp.Body, detectorMaxResponseSize))

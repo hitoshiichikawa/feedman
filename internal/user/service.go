@@ -60,6 +60,18 @@ type TxItemStateDeleter interface {
 	DeleteByUserIDTx(ctx context.Context, tx Tx, userID string) error
 }
 
+// TxAuthCodeDeleter は共有トランザクション上で native auth 一時認可コードを
+// 一括削除するインターフェース（Issue #170 Req 1.1, 2.1）。
+type TxAuthCodeDeleter interface {
+	DeleteByUserIDTx(ctx context.Context, tx Tx, userID string) error
+}
+
+// TxRefreshTokenDeleter は共有トランザクション上で refresh token（family ごと）を
+// 一括削除するインターフェース（Issue #170 Req 1.2, 2.1）。
+type TxRefreshTokenDeleter interface {
+	DeleteByUserIDTx(ctx context.Context, tx Tx, userID string) error
+}
+
 // Service はユーザー管理のサービス層。
 // 退会処理のビジネスロジックを提供する。
 //
@@ -74,11 +86,13 @@ type Service struct {
 	stateDeleter ItemStateDeleter
 
 	// トランザクションパス用のフィールド（txBeginner != nil のとき使用）。
-	txBeginner       TxBeginner
-	txUserDeleter    TxUserDeleter
-	txSessionDeleter TxSessionDeleter
-	txSubDeleter     TxSubscriptionDeleter
-	txStateDeleter   TxItemStateDeleter
+	txBeginner            TxBeginner
+	txUserDeleter         TxUserDeleter
+	txSessionDeleter      TxSessionDeleter
+	txSubDeleter          TxSubscriptionDeleter
+	txStateDeleter        TxItemStateDeleter
+	txAuthCodeDeleter     TxAuthCodeDeleter     // Issue #170: native auth 認可コード削除
+	txRefreshTokenDeleter TxRefreshTokenDeleter // Issue #170: native auth refresh token 削除
 }
 
 // NewService は Service の新しいインスタンスを生成する（レガシー・非トランザクションパス）。
@@ -102,30 +116,75 @@ func NewService(
 // NewServiceWithTx はトランザクション対応の Service を生成する。
 //
 // 退会処理は txBeginner が開始する単一トランザクション上で
-// item_states → subscriptions → sessions → user の順に削除し、
-// 全成功時のみコミット、途中失敗時は全ロールバックする。
+// item_states → subscriptions → sessions → auth_codes → refresh_token_families →
+// user の順に削除し、全成功時のみコミット、途中失敗時は全ロールバックする
+// （Issue #170 で auth_codes / refresh_token_families の削除 2 段を sessions の
+// 直後・user の前に挿入）。
+//
+// authCodeDeleter / refreshTokenDeleter は nil でも構築でき、その場合は当該段は
+// スキップされる（既存 deleter 群と同じ nil ガード方針。本番 wiring では常に非 nil
+// を注入する）。
 func NewServiceWithTx(
 	txBeginner TxBeginner,
 	userDeleter TxUserDeleter,
 	sessionDeleter TxSessionDeleter,
 	subDeleter TxSubscriptionDeleter,
 	stateDeleter TxItemStateDeleter,
+	authCodeDeleter TxAuthCodeDeleter,
+	refreshTokenDeleter TxRefreshTokenDeleter,
 ) *Service {
 	return &Service{
-		txBeginner:       txBeginner,
-		txUserDeleter:    userDeleter,
-		txSessionDeleter: sessionDeleter,
-		txSubDeleter:     subDeleter,
-		txStateDeleter:   stateDeleter,
+		txBeginner:            txBeginner,
+		txUserDeleter:         userDeleter,
+		txSessionDeleter:      sessionDeleter,
+		txSubDeleter:          subDeleter,
+		txStateDeleter:        stateDeleter,
+		txAuthCodeDeleter:     authCodeDeleter,
+		txRefreshTokenDeleter: refreshTokenDeleter,
 	}
 }
 
+// GetByID は指定 userID の current user を取得する。
+//
+// 認可は呼び出し側（BearerOrSession middleware）が担保しており、本メソッドは
+// ビジネス認可を行わない（caller userID = lookup userID 前提）。userID が DB 上に
+// 存在しない場合は model.NewUserNotFoundError を返す（既存 Withdraw と同パターン）。
+//
+// txBeginner が設定されている場合は txUserDeleter.FindByID を、設定されていない
+// 場合は userRepo.FindByID を呼ぶ（既存 Withdraw の lookup と同一の選択ロジック）。
+func (s *Service) GetByID(ctx context.Context, userID string) (*model.User, error) {
+	var (
+		user *model.User
+		err  error
+	)
+	if s.txBeginner != nil {
+		user, err = s.txUserDeleter.FindByID(ctx, userID)
+	} else {
+		user, err = s.userRepo.FindByID(ctx, userID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("ユーザーの取得に失敗しました: %w", err)
+	}
+	if user == nil {
+		return nil, model.NewUserNotFoundError()
+	}
+	return user, nil
+}
+
 // Withdraw はユーザーの退会処理を実行する。
-// 削除順序: item_states → subscriptions → sessions → user（+ CASCADE: identities, user_settings）
+// 削除順序（トランザクションパス）: item_states → subscriptions → sessions →
+// auth_codes → refresh_token_families → user
+// （+ CASCADE: identities, user_settings, refresh_tokens）
 // feeds と items は共有キャッシュとして残す。
 //
+// Issue #170: native auth の認証状態（auth_codes / refresh_token_families）を
+// sessions の直後・user の前に挿入する。refresh_tokens は
+// refresh_token_families の DELETE に伴い FK ON DELETE CASCADE で削除される。
+//
 // txBeginner が設定されている場合は単一トランザクションで原子的に削除し、
-// 途中失敗時は全ロールバックする。設定されていない場合はレガシーの逐次削除を行う。
+// 途中失敗時は全ロールバックする。設定されていない場合はレガシーの逐次削除を行う
+// （レガシーパスでは native auth の明示削除を行わず、user 削除時の FK CASCADE
+// による DB 防衛線で 3 テーブルの行残存を防ぐ）。
 func (s *Service) Withdraw(ctx context.Context, userID string) error {
 	if s.txBeginner != nil {
 		return s.withdrawTx(ctx, userID)
@@ -181,7 +240,22 @@ func (s *Service) withdrawTx(ctx context.Context, userID string) error {
 		}
 	}
 
-	// 4. ユーザーを削除（identities, user_settings は CASCADE 削除）
+	// 4. native auth 認可コードを削除（Issue #170 Req 1.1, 2.1）
+	if s.txAuthCodeDeleter != nil {
+		if err := s.txAuthCodeDeleter.DeleteByUserIDTx(ctx, tx, userID); err != nil {
+			return fmt.Errorf("認可コードの削除に失敗しました: %w", err)
+		}
+	}
+
+	// 5. native auth refresh token（family ごと、配下 tokens は FK CASCADE）を削除
+	//    （Issue #170 Req 1.2, 2.1）
+	if s.txRefreshTokenDeleter != nil {
+		if err := s.txRefreshTokenDeleter.DeleteByUserIDTx(ctx, tx, userID); err != nil {
+			return fmt.Errorf("refresh token の削除に失敗しました: %w", err)
+		}
+	}
+
+	// 6. ユーザーを削除（identities, user_settings は CASCADE 削除）
 	if err := s.txUserDeleter.DeleteByIDTx(ctx, tx, userID); err != nil {
 		return fmt.Errorf("ユーザーの削除に失敗しました: %w", err)
 	}

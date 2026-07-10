@@ -1,11 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useRef } from "react";
-import { RotateCw, Star } from "lucide-react";
+import { RotateCw } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { formatRelativeDate } from "@/lib/date";
+import { safeFeedUrl } from "@/lib/url";
 import { useItems, useItemDetail } from "@/hooks/use-items";
 import { useMarkAsRead, useToggleStar } from "@/hooks/use-item-state";
 import { ItemDetail } from "@/components/item-detail";
+import { ItemMetaActions } from "@/components/item-meta-actions";
 import type {
   ItemDetail as ItemDetailType,
   ItemFilter,
@@ -161,6 +164,7 @@ export function ItemList({
                     item={item}
                     isExpanded={isExpanded}
                     onClick={() => onSelectItem(item.id)}
+                    onToggleStar={handleToggleStar}
                   />
                   {/* 選択記事行の直下に記事詳細を展開する（button の外側に兄弟要素として描画） */}
                   {isExpanded && (
@@ -252,6 +256,8 @@ interface ItemDetailAreaProps {
   onMarkAsRead: (itemId: string) => void;
   /** スター切替コールバック */
   onToggleStar: (itemId: string, isStarred: boolean) => void;
+  /** data-testid の接頭辞（既定 "item-detail"。検索結果など別系統で testid を分けるため） */
+  testIdPrefix?: string;
 }
 
 /**
@@ -271,12 +277,13 @@ export function ItemDetailArea({
   detailItemId,
   onMarkAsRead,
   onToggleStar,
+  testIdPrefix = "item-detail",
 }: ItemDetailAreaProps) {
   // 取得失敗時はエラー表示を提示する（AC 2.3）
   if (isError) {
     return (
       <div
-        data-testid="item-detail-error"
+        data-testid={`${testIdPrefix}-error`}
         className="border-t bg-background px-4 py-4 text-sm text-destructive"
       >
         記事の詳細を読み込めませんでした
@@ -289,7 +296,7 @@ export function ItemDetailArea({
   if (isLoading || detail === null || detail.id !== detailItemId) {
     return (
       <div
-        data-testid="item-detail-loading"
+        data-testid={`${testIdPrefix}-loading`}
         className="border-t bg-background px-4 py-4 text-sm text-muted-foreground"
       >
         読み込み中...
@@ -311,6 +318,14 @@ interface ItemRowProps {
   item: ItemSummary;
   isExpanded: boolean;
   onClick: () => void;
+  /**
+   * スター⭐️切替コールバック（Issue #154 / Task 5 で追加）。
+   *
+   * 一覧行右端の `ItemMetaActions` から発火し、`useToggleStar` mutation を呼び出す。
+   * クリックイベントは `ItemMetaActions` 側で `e.stopPropagation()` 済みのため、
+   * 行クリック展開（`onClick`）は発火しない（Req 2.3 / NFR 2.1）。
+   */
+  onToggleStar: (itemId: string, nextStarred: boolean) => void;
 }
 
 /**
@@ -321,10 +336,19 @@ interface ItemRowProps {
  *
  * 横断スター記事一覧 `StarredItemList` でも同じ行レイアウトを再利用するため、
  * 本コンポーネントを export する（既存挙動を変えない非破壊的変更 / Req 2.3）。
+ *
+ * Issue #154 / Task 5: タイトル行の右端に `ItemMetaActions`（はてブ数 + スター⭐️
+ * トグル）を配置し、従来の読み取り専用 `Star` アイコンを置き換える（Req 1.1〜1.7 /
+ * 2.3 / 4.1 / 4.2）。
  */
-export function ItemRow({ item, isExpanded, onClick }: ItemRowProps) {
+export function ItemRow({
+  item,
+  isExpanded,
+  onClick,
+  onToggleStar,
+}: ItemRowProps) {
   const date = new Date(item.published_at);
-  const formattedDate = formatDate(date);
+  const formattedDate = formatRelativeDate(date);
   const hasSummary = item.summary.trim().length > 0;
 
   return (
@@ -346,7 +370,7 @@ export function ItemRow({ item, isExpanded, onClick }: ItemRowProps) {
       >
         {/* タイトルリンク */}
         <a
-          href={item.link}
+          href={safeFeedUrl(item.link)}
           target="_blank"
           rel="noopener noreferrer"
           onClick={(e) => e.stopPropagation()}
@@ -372,13 +396,16 @@ export function ItemRow({ item, isExpanded, onClick }: ItemRowProps) {
           )}
         </span>
 
-        {/* スターアイコン */}
-        {item.is_starred && (
-          <Star
-            className="flex-shrink-0 w-4 h-4 fill-yellow-400 text-yellow-400"
-            data-testid={`star-${item.id}`}
-          />
-        )}
+        {/* 一覧行右端メタ表示: はてブ数 + スター⭐️トグル（Issue #154 / Req 1.1〜1.7 / 2.3）
+            日時表示の右隣に配置し、既存の読み取り専用 `Star` アイコンを置き換える。
+            クリック時の伝播抑止は `ItemMetaActions` 側で行うため、行クリック展開は発火しない。 */}
+        <ItemMetaActions
+          itemId={item.id}
+          isStarred={item.is_starred}
+          hatebuCount={item.hatebu_count}
+          hatebuFetchedAt={item.hatebu_fetched_at}
+          onToggleStar={onToggleStar}
+        />
       </div>
 
       {/* 概要（空のときは描画しない。最大2行で省略） */}
@@ -392,22 +419,4 @@ export function ItemRow({ item, isExpanded, onClick }: ItemRowProps) {
       )}
     </button>
   );
-}
-
-/** 日付をフォーマットする */
-function formatDate(date: Date): string {
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
-  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-
-  if (diffHours < 1) return "1時間以内";
-  if (diffHours < 24) return `${diffHours}時間前`;
-  if (diffDays < 7) return `${diffDays}日前`;
-
-  return date.toLocaleDateString("ja-JP", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
 }

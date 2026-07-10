@@ -176,6 +176,131 @@ Feedman は Go バックエンド（`api` / `worker`）と Next.js フロント�
 
 ---
 
+## アーキテクチャと機能追加ガイド（コードと概念を散らかさないために）
+
+> このセクションは「新しい機能を足すとき、どこに何を置き、何を再利用し、何を避けるか」を
+> 定めた**実装配置の指針**です。要件・設計の手順（EARS / Kiro / idd-claude）は前述の各ルールが
+> 担い、本セクションは**コードの一貫性と凝集**を守ることに専念します。レビュワーは新規 PR が
+> 本ガイドの配置・再利用・セキュリティ既定に沿っているかを確認してください。
+
+### 1. レイヤリングと依存方向（一方向に保つ）
+
+Backend は **handler → service → repository → model** の一方向依存とし、逆流・スキップを禁止します。
+
+| レイヤ | 置き場所 | 責務 | やってはいけないこと |
+|---|---|---|---|
+| handler | `internal/handler/` | HTTP I/O のみ（decode → validate → サービス呼び出し → respond） | SQL 直書き / ビジネスロジック / 認可判断の実装 |
+| adapter | `internal/handler/service_adapter.go` | ドメイン型 ↔ HTTP レスポンス型の**変換のみ** | 認可・ビジネスロジックを持たせる（→ service へ） |
+| service | `internal/<domain>/` | ビジネスロジック・**認可（user_id スコープ）**・整形 | SQL 直書き（必ず repository 経由） |
+| repository | `internal/repository/` | SQL の実行とドメイン型へのスキャン | SQL 文字列・`*sql.Rows` 等の DB 詳細を上位へ漏らす |
+| model | `internal/model/` | ドメイン型・エラー型・**純粋ヘルパー** | I/O・DB・HTTP への依存 |
+
+- **認可はサービス層に集約**する。「記事の取得・更新」のようなリソースアクセスは、`user_id` で
+  購読・所有を確認してから操作する（例: `ItemService.GetItem` / `ItemStateService.UpdateState` が
+  `SubscriptionChecker.FindByUserAndFeed` で購読を確認する）。handler / adapter に認可を書かない
+- **データ分離は全クエリで強制**: ユーザーデータに触れる SELECT / UPDATE / DELETE は必ず
+  `user_id`（または購読 JOIN）で絞る。一覧だけでなく**詳細・更新も同じ境界**を守る
+
+### 2. パッケージ／ファイル配置マップ（どこに何を置くか）
+
+```
+internal/
+├── handler/        # HTTP ハンドラ・router・adapter（HTTP 境界のみ）
+├── middleware/     # 横断的 HTTP 処理（CORS / session / ratelimit / body 上限 / CIDR / security headers）
+├── <domain>/       # ドメインサービス: feed / item / subscription / user / itemsearch / crossfeed / auth
+├── repository/     # PostgreSQL アクセス層（1 テーブル群 = 1 repo、scan ヘルパーを共有）
+├── model/          # ドメイン型・エラー型・純粋ヘルパー（FaviconDataURL 等）
+├── security/       # セキュリティ純粋ロジック（SSRF guard / sanitizer / URL scheme guard）
+├── worker/         # バックグラウンドジョブ（fetch / cleanup / hatebu）
+├── config/         # 環境変数設定
+└── app/            # 依存配線（wiring）・CLI・起動
+
+web/src/
+├── app/            # App Router ページ
+├── components/     # React コンポーネント（ui/ は shadcn）
+├── hooks/          # データ取得・mutation・UI ロジックの共有フック（use-*.ts）
+├── contexts/       # AppState 等の UI 協調状態（サーバ状態は置かない）
+├── lib/            # 純粋ユーティリティ（api クライアント / date / url / sanitize / csp）
+└── types/          # TypeScript 型定義（バックエンドのレスポンス型と対応）
+```
+
+新しいドメインを足すときは `internal/<新ドメイン>/` を切り、既存ドメイン（例 `item`）と
+**同じ内部構成パターン**（service + 必要なら別ファイルの sub-service）を踏襲します。
+
+### 3. 新しい API エンドポイントを追加する手順（標準フロー）
+
+1. spec を確定（`docs/specs/<番号>-<slug>/` の requirements → 必要なら design / tasks）
+2. `internal/model/` にドメイン型・エラー型を追加（必要時）
+3. `internal/repository/` にクエリを追加（**`scanItem` / `scanFeed` 等の既存 scan ヘルパーと
+   `itemSelectColumns` を再利用**。新規スキャンを毎回インライン展開しない）
+4. `internal/<domain>/` の service にビジネスロジック + **認可（user_id スコープ）**を実装
+5. `internal/handler/` に handler を追加し、`service_adapter.go` で型変換、`router.go` に登録
+   （認証必須ルートは認証グループ配下に置く。ボディ上限・session・ratelimit は既に適用済み）
+6. `internal/app/app.go` の wiring に依存を追加
+7. テストを**対象コードの近傍**に追加（service はモック、repository は DB 結合テスト）
+
+### 4. 共有ロジックの置き場所（重複を作らない）
+
+機能追加時、**まず既存ヘルパーの再利用を検討**し、無ければ適切な共有レイヤに新設します。
+コピペ由来の重複（同一スキャン・同一整形・同一フォーマッタ）を増やさないこと。
+
+| 共有したいもの | 置き場所 | 既存例 |
+|---|---|---|
+| ドメインの純粋整形・変換 | `internal/model/` | `model.FaviconDataURL` |
+| セキュリティ純粋ロジック | `internal/security/` | `security.SafeExternalURL` / sanitizer / SSRF guard |
+| HTTP 横断処理 | `internal/middleware/` | body 上限 / CIDR 制限 / session |
+| repository 内の行スキャン | 同 repo 内の `scan*` + `*SelectColumns` | `scanItem` / `itemSelectColumns` |
+| Go テストの共有 fixture/helper | 同一パッケージ内の共有 `*_test.go` に集約 | repository テストの insert ヘルパー |
+| web の純粋ユーティリティ | `web/src/lib/` | `lib/date.ts` の `formatRelativeDate` / `lib/url.ts` の `safeFeedUrl` |
+| web のデータ取得・mutation | `web/src/hooks/` の共有フック | `useItems` / `useItemState` |
+| web の共有 UI | `web/src/components/`（必要なら prop で差分吸収） | `ItemDetailArea`（`testIdPrefix` で差分吸収して再利用） |
+
+### 5. 依存は「狭いインターフェース」で受ける
+
+サービスが他レイヤを必要とするときは、**必要なメソッドだけを宣言した最小インターフェース**を
+受け取り（interface segregation）、具体実装（`repository.*Repo`）に直接依存しないこと。
+
+- 例: `item.SubscriptionChecker` は `FindByUserAndFeed` 1 メソッドのみを宣言し、
+  `repository.SubscriptionRepository` が構造的にこれを充足する。テストでも 1 メソッドの
+  モックで済み、結合が緩む
+
+### 6. セキュリティ既定（機能追加時に必ず守る）
+
+- **データ分離**: ユーザーデータに触れる全クエリを `user_id` / 購読 JOIN でスコープ（§1 参照）
+- **外向き取得**: 外部 URL の取得は必ず `security` の SSRF guard 経由 + **サイズ上限**（`io.LimitReader`）
+  + timeout。フィード取得・favicon・はてブ等、新しい outbound はすべて同じ guard を通す
+- **フィード由来データの信頼しない扱い**: 本文 HTML は sanitize（bluemonday / DOMPurify）、
+  URL（`item.link` 等）は **http/https の scheme allowlist**（`security.SafeExternalURL` /
+  `lib/url.ts` の `safeFeedUrl`）を取り込み時と描画時の両方で適用
+- **入力上限**: JSON ボディは `MaxBytesReader`（`/api/*` で適用済み）。新ルートも同グループ配下に置く
+- **secrets / token**: ログ・エラーメッセージ・レスポンスに**生値を出さない**。DB には
+  ハッシュで保存（`auth_codes` / `refresh_tokens` の `*_hash` を踏襲）。token 比較は
+  `crypto/subtle.ConstantTimeCompare`
+- **エラー応答**: 内部詳細（SQL / スタック / 内部 URL）をクライアントに返さない。独自 Error で
+  wrap し、運用ログにのみ詳細を残す
+
+### 7. アンチパターン（レビューで差し戻す対象）
+
+- 同一のスキャン・整形・フォーマッタを**コピペ**して増やす（→ §4 の共有レイヤへ抽出）
+- handler / adapter に **SQL・ビジネスロジック・認可**を書く（→ service / repository へ）
+- 「後方互換のため残す」dead code を**放置**する（→ 即 cleanup するか Issue 化し、PR では増やさない）
+- 1 関数に複数責務を詰め込み肥大化させる（→ 段階ごとに小関数へ分割）
+- 投機的な抽象化（将来のためだけの interface / 汎用化）を先に作る（YAGNI）
+
+### 8. 機能追加チェックリスト（PR 提出前に自己確認）
+
+- [ ] レイヤリング（handler → service → repository → model）を守り、handler に SQL / 認可が無い
+- [ ] ユーザーデータの全クエリが `user_id` / 購読でスコープされている
+- [ ] 既存の共有ヘルパー（`scanItem` / `model.FaviconDataURL` / `security.SafeExternalURL` /
+      `lib/date` / `lib/url` / 共有フック）を再利用し、コピペ重複を増やしていない
+- [ ] 新しい外向き取得は SSRF guard + サイズ上限 + timeout を通している
+- [ ] フィード由来 HTML / URL を sanitize / scheme 検証している
+- [ ] secrets / token をログ・エラー・レスポンスに出していない
+- [ ] テストを対象コードの近傍に置き、正常系 + 異常系 + 境界値を含む
+- [ ] dead code / 暫定エイリアスを残していない（残すなら cleanup Issue を起票）
+
+---
+
 ## ブランチ・コミット規約
 
 - ブランチ名: `claude/issue-<番号>-<slug>` を原則とする

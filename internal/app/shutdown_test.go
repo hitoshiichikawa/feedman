@@ -4,21 +4,56 @@ import (
 	"context"
 	"net/http"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/hitoshi/feedman/internal/middleware"
 )
 
-// waitGoroutineCount は goroutine 数が target 以下に収束するのを最大 timeout 待つ。
-// goroutine の停止は非同期に行われるため、即時比較ではなくポーリングで収束を待つ。
-func waitGoroutineCount(target int, timeout time.Duration) int {
+// cleanup goroutine の関数名（goroutine スタックダンプ上の表記）。
+// `middleware.(*` まで含めることで RateLimiter / IPRateLimiter が substring 衝突しない。
+const (
+	rateLimiterCleanupFn   = "middleware.(*RateLimiter).cleanupLoop"
+	ipRateLimiterCleanupFn = "middleware.(*IPRateLimiter).cleanupLoop"
+)
+
+// countGoroutinesContaining は全 goroutine のスタックダンプから、関数名 fn を含む
+// goroutine 数を数える。
+//
+// runtime.NumGoroutine() のグローバル総数比較は、同一テストバイナリ内の先行テストが
+// 残した goroutine の起動・終了とレースして flaky になる（CI で before=after の偽陰性を
+// 2 度観測）。対象 goroutine の関数名を直接数えることで、無関係な goroutine の増減に
+// 影響されず決定論的に判定する。
+func countGoroutinesContaining(fn string) int {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	return strings.Count(string(buf[:n]), fn)
+}
+
+// waitGoroutineRunning は fn を含む goroutine が現れるのを最大 timeout 待ち、最終観測数を返す。
+// go 文によるgoroutine 起動は非同期のため、起動直後の即時観測ではなくポーリングで待つ。
+func waitGoroutineRunning(fn string, timeout time.Duration) int {
 	deadline := time.Now().Add(timeout)
 	for {
 		runtime.Gosched()
-		n := runtime.NumGoroutine()
-		if n <= target || time.Now().After(deadline) {
-			return n
+		c := countGoroutinesContaining(fn)
+		if c > 0 || time.Now().After(deadline) {
+			return c
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// waitGoroutineGone は fn を含む goroutine が消えるのを最大 timeout 待ち、最終観測数を返す。
+// goroutine の停止は非同期に行われるため、ポーリングで収束を待つ。
+func waitGoroutineGone(fn string, timeout time.Duration) int {
+	deadline := time.Now().Add(timeout)
+	for {
+		runtime.Gosched()
+		c := countGoroutinesContaining(fn)
+		if c == 0 || time.Now().After(deadline) {
+			return c
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -38,14 +73,11 @@ func newTestRateLimiter() *middleware.RateLimiter {
 // RateLimiter のクリーンアップ goroutine が停止し、リークしないことを検証する（NFR 1.1, AC 1.3）。
 func TestShutdownCoordinator_StopsRateLimiterCleanupGoroutine(t *testing.T) {
 	// Arrange: クリーンアップ goroutine を起動した RateLimiter と即時 Shutdown 可能なサーバー
-	before := runtime.NumGoroutine()
-
 	rl := newTestRateLimiter()
 
-	// goroutine が起動したことを確認
-	afterStart := runtime.NumGoroutine()
-	if afterStart <= before {
-		t.Fatalf("expected goroutine count to increase after NewRateLimiter, before=%d after=%d", before, afterStart)
+	// goroutine が起動したことを確認（スケジュール完了をポーリングで待つ）
+	if c := waitGoroutineRunning(rateLimiterCleanupFn, 2*time.Second); c == 0 {
+		t.Fatal("expected RateLimiter cleanup goroutine to start after NewRateLimiter")
 	}
 
 	sc := newShutdownCoordinator(&http.Server{Addr: ":0"}, rl, nil)
@@ -55,10 +87,9 @@ func TestShutdownCoordinator_StopsRateLimiterCleanupGoroutine(t *testing.T) {
 		t.Fatalf("shutdown returned error: %v", err)
 	}
 
-	// Assert: goroutine 数が起動前の水準に戻る（クリーンアップ goroutine が残存しない）
-	after := waitGoroutineCount(before, 2*time.Second)
-	if after > before {
-		t.Errorf("goroutine leaked: before=%d after=%d (cleanup goroutine not stopped)", before, after)
+	// Assert: クリーンアップ goroutine が残存しない
+	if c := waitGoroutineGone(rateLimiterCleanupFn, 2*time.Second); c > 0 {
+		t.Errorf("cleanup goroutine leaked: %d goroutine(s) still running after shutdown", c)
 	}
 }
 
@@ -66,13 +97,11 @@ func TestShutdownCoordinator_StopsRateLimiterCleanupGoroutine(t *testing.T) {
 // IPRateLimiter のクリーンアップ goroutine も停止し、リークしないことを検証する（NFR 3.1）。
 func TestShutdownCoordinator_StopsIPRateLimiterCleanupGoroutine(t *testing.T) {
 	// Arrange: クリーンアップ goroutine を起動した IPRateLimiter（userID 側は nil）。
-	before := runtime.NumGoroutine()
-
 	ipRL := middleware.NewIPRateLimiter(middleware.DefaultIPRateLimiterConfig(30))
 
-	afterStart := runtime.NumGoroutine()
-	if afterStart <= before {
-		t.Fatalf("expected goroutine count to increase after NewIPRateLimiter, before=%d after=%d", before, afterStart)
+	// goroutine が起動したことを確認（スケジュール完了をポーリングで待つ）
+	if c := waitGoroutineRunning(ipRateLimiterCleanupFn, 2*time.Second); c == 0 {
+		t.Fatal("expected IPRateLimiter cleanup goroutine to start after NewIPRateLimiter")
 	}
 
 	sc := newShutdownCoordinator(&http.Server{Addr: ":0"}, nil, ipRL)
@@ -82,10 +111,9 @@ func TestShutdownCoordinator_StopsIPRateLimiterCleanupGoroutine(t *testing.T) {
 		t.Fatalf("shutdown returned error: %v", err)
 	}
 
-	// Assert: goroutine 数が起動前の水準に戻る。
-	after := waitGoroutineCount(before, 2*time.Second)
-	if after > before {
-		t.Errorf("goroutine leaked: before=%d after=%d (IP cleanup goroutine not stopped)", before, after)
+	// Assert: クリーンアップ goroutine が残存しない
+	if c := waitGoroutineGone(ipRateLimiterCleanupFn, 2*time.Second); c > 0 {
+		t.Errorf("IP cleanup goroutine leaked: %d goroutine(s) still running after shutdown", c)
 	}
 }
 
@@ -93,7 +121,6 @@ func TestShutdownCoordinator_StopsIPRateLimiterCleanupGoroutine(t *testing.T) {
 // 二重 close panic が起きず goroutine が収束することを検証する。
 func TestShutdownCoordinator_StopsBothLimiters(t *testing.T) {
 	// Arrange
-	before := runtime.NumGoroutine()
 	rl := newTestRateLimiter()
 	ipRL := middleware.NewIPRateLimiter(middleware.DefaultIPRateLimiterConfig(30))
 	sc := newShutdownCoordinator(&http.Server{Addr: ":0"}, rl, ipRL)
@@ -106,10 +133,12 @@ func TestShutdownCoordinator_StopsBothLimiters(t *testing.T) {
 		t.Fatalf("second shutdown returned error: %v", err)
 	}
 
-	// Assert
-	after := waitGoroutineCount(before, 2*time.Second)
-	if after > before {
-		t.Errorf("goroutine leaked: before=%d after=%d", before, after)
+	// Assert: 両リミッターのクリーンアップ goroutine が残存しない
+	if c := waitGoroutineGone(rateLimiterCleanupFn, 2*time.Second); c > 0 {
+		t.Errorf("RateLimiter cleanup goroutine leaked: %d goroutine(s) still running", c)
+	}
+	if c := waitGoroutineGone(ipRateLimiterCleanupFn, 2*time.Second); c > 0 {
+		t.Errorf("IPRateLimiter cleanup goroutine leaked: %d goroutine(s) still running", c)
 	}
 }
 
@@ -132,7 +161,6 @@ func TestShutdownCoordinator_DoesNotPanic(t *testing.T) {
 // 2 回呼んでも二重 close panic を起こさない。
 func TestShutdownCoordinator_DoubleInvocationDoesNotPanic(t *testing.T) {
 	// Arrange
-	before := runtime.NumGoroutine()
 	rl := newTestRateLimiter()
 	sc := newShutdownCoordinator(&http.Server{Addr: ":0"}, rl, nil)
 
@@ -144,9 +172,8 @@ func TestShutdownCoordinator_DoubleInvocationDoesNotPanic(t *testing.T) {
 		t.Fatalf("second shutdown returned error: %v", err)
 	}
 
-	// Assert: panic せず、goroutine も収束する
-	after := waitGoroutineCount(before, 2*time.Second)
-	if after > before {
-		t.Errorf("goroutine leaked: before=%d after=%d", before, after)
+	// Assert: panic せず、クリーンアップ goroutine も収束する
+	if c := waitGoroutineGone(rateLimiterCleanupFn, 2*time.Second); c > 0 {
+		t.Errorf("cleanup goroutine leaked: %d goroutine(s) still running", c)
 	}
 }

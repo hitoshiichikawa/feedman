@@ -98,6 +98,10 @@ type ItemSearchSummary struct {
 	IsRead          bool
 	IsStarred       bool
 	HatebuCount     int
+	// HatebuFetchedAt は items.hatebu_fetched_at の値を pass-through で保持する。
+	// NULL（未取得）の場合は nil、取得済みの場合は時刻のポインタ。
+	// Adapter 層は本値をそのまま itemSearchHitResponse.HatebuFetchedAt にコピーする。
+	HatebuFetchedAt *time.Time
 }
 
 // Search は当該ユーザーが購読中のフィードに属する記事から、キーワードに部分一致する
@@ -188,6 +192,7 @@ func (s *SearchService) Search(
 			IsRead:          h.IsRead,
 			IsStarred:       h.IsStarred,
 			HatebuCount:     h.HatebuCount,
+			HatebuFetchedAt: h.HatebuFetchedAt,
 		}
 	}
 

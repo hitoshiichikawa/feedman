@@ -274,6 +274,13 @@ func mapAPIErrorToHTTPStatus(apiErr *model.APIError) int {
 		return http.StatusForbidden
 	case model.ErrCodeFetchFailed:
 		return http.StatusBadGateway
+	case model.ErrCodeFeedHTTPError:
+		// 検出対象 URL から非 2xx HTTP 応答を受信した場合（Issue #153）。
+		// 上流サイトが応答を返したがエラー応答（4xx/5xx 等）だったため、
+		// プロキシ的に上流エラーを通知する 502 Bad Gateway にマップする。
+		// FETCH_FAILED（レスポンス取得前の失敗）と同じ 502 だが、エラーコードと
+		// メッセージは別系統で UI 側がユーザー向けに区別表示できる。
+		return http.StatusBadGateway
 	case model.ErrCodeParseFailed:
 		return http.StatusUnprocessableEntity
 	case model.ErrCodeSubscriptionLimit:

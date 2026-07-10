@@ -196,6 +196,11 @@ docker compose --env-file .env.production exec api /feedman migrate
   `web`（:3000）へルーティング**する。`api`（:8080）はブラウザに公開せず内部ネットワークに留める
 - `POSTGRES_PASSWORD` は必須化済みで、弱い既知のデフォルト（`feedman`）は廃止された。未設定だと
   起動できないため、上記のとおり `openssl rand -base64 32` で生成した値を設定する
+- **`api` のホスト公開はデフォルトで `127.0.0.1` バインド**。`api`（:8080）はブラウザ非公開で
+  内部ネットワークに留める設計のため、ホストへの publish はローカル開発のデバッグ用途に限定し、
+  既定で localhost のみに束ねる（LAN・公開 IF への露出を防ぐ）。別ホストから直接到達させる必要が
+  ある場合のみ `API_PUBLISH_HOST=0.0.0.0` を明示する。本番はリバースプロキシ前段で `web` だけを
+  公開するため、通常 `api` をホスト公開する必要はない
 - DB ポートはデフォルトで非公開。開発時に直接接続が必要な場合のみ `DB_PORT=5432` を設定する
 - **DB 接続の TLS（`sslmode`）設定**:
   - コンテナ内 DB（`db` ホスト）を利用する場合のみ `sslmode=disable` が許容される（コンテナ間の
@@ -227,10 +232,14 @@ Docker Compose は 2 つのネットワークを定義:
 
 | メソッド | パス | 説明 |
 |---------|------|------|
-| GET | `/auth/google/login` | OAuth フロー開始 |
+| GET | `/auth/google/login` | OAuth フロー開始（Web Cookie / Native PKCE 両対応） |
 | GET | `/auth/google/callback` | OAuth コールバック |
 | POST | `/auth/logout` | ログアウト |
-| GET | `/auth/me` | 現在のユーザー情報 |
+| GET | `/auth/me` | 現在のユーザー情報（Web Cookie 専用） |
+| POST | `/api/auth/token` | Native auth: auth_code 交換による access token / refresh token 発行 |
+| POST | `/api/auth/refresh` | Native auth: refresh token rotation による新規 access token 発行 |
+| POST | `/api/auth/revoke` | Native auth: refresh token 無効化 |
+
 ### フィード管理（認証必須）
 
 | メソッド | パス | 説明 |
@@ -240,13 +249,16 @@ Docker Compose は 2 つのネットワークを定義:
 | PATCH | `/api/feeds/{id}` | フィード URL 変更 |
 | DELETE | `/api/feeds/{id}` | フィード削除 |
 | GET | `/api/feeds/{id}/items` | 記事一覧（カーソルページネーション） |
+| GET | `/api/feeds/starred/items` | 全フィード横断のスター記事一覧 |
 
 ### 記事管理（認証必須）
 
 | メソッド | パス | 説明 |
 |---------|------|------|
-| GET | `/api/items/{id}` | 記事詳細 |
+| GET | `/api/items/{id}` | 記事詳細（`feed_title` / `feed_favicon_url` を含む） |
 | PUT | `/api/items/{id}/state` | 既読/スター状態更新 |
+| GET | `/api/items/search` | 記事検索（全購読横断 / フィード内検索） |
+| GET | `/api/items/cross-feed` | 横断新着記事一覧 |
 
 ### 購読管理（認証必須）
 
@@ -256,12 +268,20 @@ Docker Compose は 2 つのネットワークを定義:
 | DELETE | `/api/subscriptions/{id}` | 購読解除 |
 | PUT | `/api/subscriptions/{id}/settings` | フェッチ間隔設定 |
 | POST | `/api/subscriptions/{id}/resume` | 停止フィードの再開 |
+| POST | `/api/subscriptions/{id}/fetch` | 手動フェッチ（10 分クールダウン） |
 
 ### ユーザー管理（認証必須）
 
 | メソッド | パス | 説明 |
 |---------|------|------|
+| GET | `/api/users/me` | 現在のユーザー情報（モバイル / Web 共通。Bearer または Cookie で認証） |
 | DELETE | `/api/users/me` | 退会（アカウント削除） |
+| PUT | `/api/users/me/cross-feed-last-seen` | 横断新着一覧の最終閲覧時刻を更新 |
+
+> **モバイル API 契約**: v1 モバイルクライアント（iOS / Android）が依存する API の詳細契約
+> （URL / 認証方式 / 要求・応答 JSON 形状 / エラー応答）は
+> [`docs/specs/207--mobile-api-v1-api/mobile-api-contract.md`](docs/specs/207--mobile-api-v1-api/mobile-api-contract.md)
+> を参照すること。
 
 ### 監視
 
@@ -336,7 +356,27 @@ CORSMiddleware → SessionMiddleware → RateLimitMiddleware(General)
 ### バックエンドのテスト
 
 ```bash
-go test ./...
+# CI と同じ並列度抑制ポリシー（パッケージ間並列度を 1 に固定）で実行する。
+# `internal/database` / `internal/repository` の DB 結合テストが同一テスト用 DB を
+# 共有しているため、パッケージ間並列実行で `pq: relation "users" already exists` 等の
+# flaky 失敗が発生する（Issue #158）。`-p 1` で直列化することでレースを根本回避する。
+# パッケージ **内部** の `t.Parallel()` は引き続き有効（パッケージ間並列のみ抑制）。
+go test -p 1 ./...
+```
+
+DB 結合テスト（`internal/database` / `internal/repository`）を実際に走らせるには、
+ローカルで PostgreSQL を起動し `TEST_DATABASE_URL` を設定するか、default 接続先
+（`postgres://feedman:feedman@localhost:5432/feedman_test?sslmode=disable`）が到達可能な
+状態にしておく必要がある。未到達の場合、DB 結合テストは従来通り `t.Skipf` で skip される。
+
+```bash
+# 例: ローカルで docker run を使ってテスト用 DB を起動する
+docker run -d --rm --name feedman-test-db \
+  -e POSTGRES_USER=feedman -e POSTGRES_PASSWORD=feedman -e POSTGRES_DB=feedman_test \
+  -p 5432:5432 postgres:16
+
+export TEST_DATABASE_URL='postgres://feedman:feedman@localhost:5432/feedman_test?sslmode=disable'
+go test -p 1 ./...
 ```
 
 ### フロントエンドのテスト

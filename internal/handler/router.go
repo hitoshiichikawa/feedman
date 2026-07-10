@@ -61,12 +61,25 @@ type RouterDeps struct {
 	// nil の場合は登録せず、既存ルーティングを完全に不変に保つ（後方互換）。
 	MetricsHandler http.Handler
 	// MetricsMiddleware は /metrics の前段に重ねるミドルウェア（信頼 CIDR 制限など）。
-	// nil の場合は素通し（制限なし）として扱う。MetricsHandler が nil のときは参照しない。
+	// MetricsHandler が非 nil でも MetricsMiddleware が nil の場合は、無防備な公開を
+	// 避けるため /metrics を登録しない（fail-closed）。MetricsHandler が nil のときは参照しない。
 	MetricsMiddleware func(http.Handler) http.Handler
 
 	// 認証
 	AuthService AuthServiceInterface
 	AuthConfig  AuthHandlerConfig
+
+	// Native Auth トークン交換（Issue #166）
+	// NativeAuthHandler が非 nil のときのみ認証不要グループに POST /api/auth/token を
+	// 登録する。nil の場合は登録せず 404 で応答する（NATIVE_AUTH_JWT_SECRET 未設定環境の
+	// fail-closed パターン。/metrics と同じ後方互換指針）。
+	NativeAuthHandler *NativeAuthHandler
+
+	// JWTVerifier は Bearer access token の検証器（任意 / Issue #169）。
+	// nil の場合、認証必須グループは従来どおり Cookie セッション認証のみで動作する
+	// （NATIVE_AUTH_JWT_SECRET 未設定環境の後方互換。NewBearerOrSessionMiddleware が
+	// nil 縮退で既存 SessionMiddleware をそのまま返す）。
+	JWTVerifier middleware.JWTVerifier
 
 	// フィード
 	FeedService         FeedServiceInterface
@@ -181,24 +194,51 @@ func NewRouter(deps *RouterDeps) http.Handler {
 		})
 
 		// メトリクス公開エンドポイント（任意）。
-		// MetricsHandler が非 nil のときのみ登録し、前段に MetricsMiddleware（信頼 CIDR 制限）を
-		// 重ねる。MetricsHandler が nil の場合は登録せず既存ルーティングを完全に不変に保つ（後方互換）。
+		// MetricsHandler が非 nil かつ MetricsMiddleware も非 nil のときのみ登録し、前段に
+		// MetricsMiddleware（信頼 CIDR 制限）を重ねる。MetricsMiddleware が nil の場合は
+		// 無防備な公開を避けるため登録しない（fail-closed）。MetricsHandler が nil の場合も
+		// 登録せず既存ルーティングを完全に不変に保つ（後方互換）。
 		if deps.MetricsHandler != nil {
-			mw := deps.MetricsMiddleware
-			if mw == nil {
-				// ミドルウェア未指定時は素通しとして扱い、chi の With(nil) panic を避ける。
-				mw = func(next http.Handler) http.Handler { return next }
+			if deps.MetricsMiddleware != nil {
+				r.With(deps.MetricsMiddleware).Handle("/metrics", deps.MetricsHandler)
+			} else {
+				logger.Warn("MetricsHandler is set but MetricsMiddleware is nil; /metrics is not registered to avoid unprotected exposure")
 			}
-			r.With(mw).Handle("/metrics", deps.MetricsHandler)
+		}
+
+		// Native Auth トークン交換エンドポイント（Issue #166）・refresh ローテーション
+		// エンドポイント（Issue #167）・revoke エンドポイント（Issue #168）。
+		// NATIVE_AUTH_JWT_SECRET 未設定のデプロイは NativeAuthHandler が nil となり、全ルートを
+		// 登録しない（404 / fail-closed / NFR 2.2）。Session / Bearer middleware は通らない
+		// （Req 1.5 / #168 Req 2.4: revoke は token 所持自体を失効権限とみなす）。
+		// 巨大ボディ DoS 防止のためボディ上限ミドルウェア（DefaultMaxBodyBytes）を重ねる。
+		// 未認証で公開される token 系入口のため、既存未認証 3 ルートと同じ IP 単位
+		// レート制限（unauthIPMW）を route チェーン最外に重ねる（Issue #171 / SERVER.md §1.7。
+		// 閾値超過時はボディ上限 wrap・JSON decode・永続化層参照に到達せず 429 で遮断）。
+		if deps.NativeAuthHandler != nil {
+			r.With(unauthIPMW, middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
+				Post("/api/auth/token", deps.NativeAuthHandler.Token)
+			r.With(unauthIPMW, middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
+				Post("/api/auth/refresh", deps.NativeAuthHandler.Refresh)
+			r.With(unauthIPMW, middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
+				Post("/api/auth/revoke", deps.NativeAuthHandler.Revoke)
 		}
 	})
 
 	// --- 認証が必要なルート ---
-	// ミドルウェアスタック: Session → RateLimit(General) → Logging
-	// Logging を Session の後ろに置くことで user_id をログに含める。
+	// ミドルウェアスタック: BearerOrSession → RateLimit(General) → Logging
+	// Logging を認証 middleware の後ろに置くことで user_id をログに含める。
+	// BearerOrSession（Issue #169）は Authorization: Bearer があれば JWT 検証で認証し、
+	// 無ければ既存 SessionMiddleware に委譲する。deps.JWTVerifier が nil
+	// （NATIVE_AUTH_JWT_SECRET 未設定）の場合は SessionMiddleware そのものが返るため、
+	// 構成は本機能導入前と完全に同一（NFR 2.2）。RateLimit / MaxBodyBytes / Logging の
+	// 順序・位置・適用範囲は不変（NFR 2.1）。
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.NewSessionMiddleware(deps.SessionFinder))
+		r.Use(middleware.NewBearerOrSessionMiddleware(deps.JWTVerifier, deps.SessionFinder))
 		r.Use(deps.RateLimiter.GeneralMiddleware())
+		// リクエストボディ上限を適用し、巨大ボディによるメモリ枯渇 DoS を防ぐ。
+		// 上限超過時は各ハンドラの json.Decode がエラーを返し 400 応答となる。
+		r.Use(middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes))
 		r.Use(logging)
 
 		// フィード管理
@@ -257,6 +297,10 @@ func NewRouter(deps *RouterDeps) http.Handler {
 
 		// ユーザー管理
 		r.Route("/api/users", func(r chi.Router) {
+			// GET /api/users/me - モバイル / Web 共通の current user 取得（Issue #207）。
+			// BearerOrSession middleware を通過した後に実行されるため、Bearer / Cookie の
+			// いずれの経路でも同じ handler で current user 情報を返す（Req 2.1 / 2.2）。
+			r.Get("/me", userHandler.GetCurrent)
 			r.Delete("/me", userHandler.Withdraw)
 			// PUT /api/users/me/cross-feed-last-seen - 横断一覧の最終閲覧時刻更新（Issue #121）
 			// CrossFeedService が未配線の deps では登録しない（後方互換）。

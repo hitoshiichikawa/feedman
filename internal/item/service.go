@@ -3,26 +3,53 @@ package item
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/hitoshi/feedman/internal/model"
 	"github.com/hitoshi/feedman/internal/repository"
 )
 
+// SubscriptionChecker は記事アクセスの認可に必要な購読確認の最小インターフェース。
+// repository.SubscriptionRepository がこれを満たす（インターフェース分離のため
+// 全 SubscriptionRepository ではなく必要メソッドのみに依存する）。
+type SubscriptionChecker interface {
+	// FindByUserAndFeed はユーザーとフィードの購読を返す。未購読なら nil を返す。
+	FindByUserAndFeed(ctx context.Context, userID, feedID string) (*model.Subscription, error)
+}
+
+// FeedMetaProvider は記事詳細応答にフィード表示メタデータを付与するための最小インターフェース。
+// repository.FeedRepository がこれを満たす（インターフェース分離のため、全 FeedRepository
+// ではなく FindByID のみに依存する。既存 SubscriptionChecker と同パターン）。
+type FeedMetaProvider interface {
+	// FindByID は指定 ID のフィードを返す。見つからない場合は nil を返す。
+	FindByID(ctx context.Context, id string) (*model.Feed, error)
+}
+
 // ItemService は記事取得・フィルタリングのサービス。
 type ItemService struct {
 	itemRepo      repository.ItemRepository
 	itemStateRepo repository.ItemStateRepository
+	subChecker    SubscriptionChecker
+	feedRepo      FeedMetaProvider
 }
 
 // NewItemService はItemServiceの新しいインスタンスを生成する。
+// subChecker は記事詳細取得時に呼び出しユーザーが当該フィードを購読しているかを
+// 確認するために使用する（購読外フィードの記事本文への越境アクセスを防ぐ）。
+// feedRepo は GetItem で記事所属フィードの表示メタデータ（タイトル / favicon）を
+// 取得するために使用する（Issue #207 / Req 3.1, 3.2）。
 func NewItemService(
 	itemRepo repository.ItemRepository,
 	itemStateRepo repository.ItemStateRepository,
+	subChecker SubscriptionChecker,
+	feedRepo FeedMetaProvider,
 ) *ItemService {
 	return &ItemService{
 		itemRepo:      itemRepo,
 		itemStateRepo: itemStateRepo,
+		subChecker:    subChecker,
+		feedRepo:      feedRepo,
 	}
 }
 
@@ -236,6 +263,17 @@ func (s *ItemService) GetItem(
 		return nil, model.NewItemNotFoundError(itemID)
 	}
 
+	// 認可: 呼び出しユーザーが当該記事のフィードを購読していることを確認する。
+	// 一覧系は subscriptions JOIN で user_id を強制しているため、詳細取得でも同じ
+	// 購読境界を守る。未購読なら存在を秘匿するため ITEM_NOT_FOUND を返す。
+	sub, err := s.subChecker.FindByUserAndFeed(ctx, userID, item.FeedID)
+	if err != nil {
+		return nil, err
+	}
+	if sub == nil {
+		return nil, model.NewItemNotFoundError(itemID)
+	}
+
 	// ユーザーの記事状態を取得
 	state, err := s.itemStateRepo.FindByUserAndItem(ctx, userID, itemID)
 	if err != nil {
@@ -254,6 +292,20 @@ func (s *ItemService) GetItem(
 		pubAt = *item.PublishedAt
 	}
 
+	// 記事所属フィードの表示メタデータ（タイトル / favicon）を取得して詳細応答に併記する。
+	// 認可は上記の SubscriptionChecker で済んでおり、本 lookup は表示用情報の付与のみ。
+	// items.feed_id は FK 制約により孤立しないため実運用では nil は発生しないが、内部
+	// 不整合の検出のため nil なら error として上位に伝播する（fail-fast。Issue #207 設計判断
+	// により ItemNotFoundError ではなく汎用 error として伝播し、上位 handleServiceError で 500
+	// に集約させる。購読外フィードの存在秘匿は SubscriptionChecker で既に担保済み）。
+	feed, err := s.feedRepo.FindByID(ctx, item.FeedID)
+	if err != nil {
+		return nil, err
+	}
+	if feed == nil {
+		return nil, fmt.Errorf("記事所属フィードの取得に失敗しました: feed_id=%s が見つかりません", item.FeedID)
+	}
+
 	return &ItemDetail{
 		ItemSummary: ItemSummary{
 			ID:              item.ID,
@@ -266,16 +318,23 @@ func (s *ItemService) GetItem(
 			IsStarred:       isStarred,
 			HatebuCount:     item.HatebuCount,
 		},
-		Content: item.Content,
-		Summary: item.Summary,
-		Author:  item.Author,
+		Content:        item.Content,
+		Summary:        item.Summary,
+		Author:         item.Author,
+		FeedTitle:      feed.Title,
+		FeedFaviconURL: model.FaviconDataURL(feed.FaviconData, feed.FaviconMime),
 	}, nil
 }
 
 // ItemDetail は記事詳細情報。
+// FeedTitle / FeedFaviconURL は当該記事が所属するフィードの表示用メタデータ
+// （Issue #207 / Req 3.1, 3.2）。FeedFaviconURL は favicon 未登録のとき nil
+// （Req 3.4。`*string` 採用により上位 handler 層で `omitempty` による省略を実現）。
 type ItemDetail struct {
 	ItemSummary
-	Content string
-	Summary string
-	Author  string
+	Content        string
+	Summary        string
+	Author         string
+	FeedTitle      string
+	FeedFaviconURL *string
 }

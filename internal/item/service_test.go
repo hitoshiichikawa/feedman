@@ -2,6 +2,8 @@ package item
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -96,6 +98,54 @@ func (m *mockItemStateRepoForService) DeleteByUserID(_ context.Context, _ string
 	return nil
 }
 
+// mockSubCheckerForService は購読確認の最小インターフェース（SubscriptionChecker）の
+// テスト用モック。findFn 未設定時は subscribed フラグに従って購読有無を返す。
+type mockSubCheckerForService struct {
+	subscribed bool
+	findFn     func(ctx context.Context, userID, feedID string) (*model.Subscription, error)
+}
+
+func (m *mockSubCheckerForService) FindByUserAndFeed(ctx context.Context, userID, feedID string) (*model.Subscription, error) {
+	if m.findFn != nil {
+		return m.findFn(ctx, userID, feedID)
+	}
+	if m.subscribed {
+		return &model.Subscription{UserID: userID, FeedID: feedID}, nil
+	}
+	return nil, nil
+}
+
+// subscribedChecker は「購読済み」を返す checker を生成するテストヘルパー。
+func subscribedChecker() *mockSubCheckerForService {
+	return &mockSubCheckerForService{subscribed: true}
+}
+
+// unsubscribedChecker は「未購読」を返す checker を生成するテストヘルパー。
+func unsubscribedChecker() *mockSubCheckerForService {
+	return &mockSubCheckerForService{subscribed: false}
+}
+
+// mockFeedMetaProviderForService は FeedMetaProvider のテスト用モック。
+// findByIDFn 未設定時はゼロ値の Feed（タイトル空 / favicon 空）を返し、既存テストが
+// GetItem の feed メタ取得追加（Issue #207 / Req 3.1, 3.2）の影響を受けないようにする。
+type mockFeedMetaProviderForService struct {
+	findByIDFn func(ctx context.Context, id string) (*model.Feed, error)
+}
+
+func (m *mockFeedMetaProviderForService) FindByID(ctx context.Context, id string) (*model.Feed, error) {
+	if m.findByIDFn != nil {
+		return m.findByIDFn(ctx, id)
+	}
+	// 既存テスト互換: feed 取得は成功するがメタは空（FeedTitle="" / FeedFaviconURL=nil）。
+	return &model.Feed{ID: id}, nil
+}
+
+// defaultFeedProvider は既存テスト互換用の最小 FeedMetaProvider モック。
+// 既存テストは FeedTitle / FeedFaviconURL を検査しないため、空 feed を返すデフォルトで十分。
+func defaultFeedProvider() *mockFeedMetaProviderForService {
+	return &mockFeedMetaProviderForService{}
+}
+
 // --- ItemService ListItems テスト ---
 
 // TestItemService_ListItems_ReturnsItems はフィードの記事一覧がpublished_at降順で返されることをテストする。
@@ -132,7 +182,7 @@ func TestItemService_ListItems_ReturnsItems(t *testing.T) {
 		}, nil
 	}
 
-	svc := NewItemService(repo, newMockItemStateRepoForService())
+	svc := NewItemService(repo, newMockItemStateRepoForService(), subscribedChecker(), defaultFeedProvider())
 	result, err := svc.ListItems(context.Background(), "user-123", "feed-1", model.ItemFilterAll, "", 50)
 	if err != nil {
 		t.Fatalf("ListItems returned error: %v", err)
@@ -186,7 +236,7 @@ func TestItemService_ListItems_IncludesSummary(t *testing.T) {
 					},
 				}, nil
 			}
-			svc := NewItemService(repo, newMockItemStateRepoForService())
+			svc := NewItemService(repo, newMockItemStateRepoForService(), subscribedChecker(), defaultFeedProvider())
 
 			// Act
 			result, err := svc.ListItems(context.Background(), "user-123", "feed-1", model.ItemFilterAll, "", 50)
@@ -229,7 +279,7 @@ func TestItemService_SummaryConsistentBetweenListAndDetail(t *testing.T) {
 		itemCopy := srcItem
 		return &itemCopy, nil
 	}
-	svc := NewItemService(repo, newMockItemStateRepoForService())
+	svc := NewItemService(repo, newMockItemStateRepoForService(), subscribedChecker(), defaultFeedProvider())
 
 	listResult, err := svc.ListItems(context.Background(), "user-123", "feed-1", model.ItemFilterAll, "", 50)
 	if err != nil {
@@ -275,7 +325,7 @@ func TestItemService_ListItems_HasMore(t *testing.T) {
 		return items, nil
 	}
 
-	svc := NewItemService(repo, newMockItemStateRepoForService())
+	svc := NewItemService(repo, newMockItemStateRepoForService(), subscribedChecker(), defaultFeedProvider())
 	result, err := svc.ListItems(context.Background(), "user-123", "feed-1", model.ItemFilterAll, "", 50)
 	if err != nil {
 		t.Fatalf("ListItems returned error: %v", err)
@@ -298,7 +348,7 @@ func TestItemService_ListItems_HasMore(t *testing.T) {
 // TestItemService_ListItems_InvalidFilter は無効なフィルタでエラーが返されることをテストする。
 func TestItemService_ListItems_InvalidFilter(t *testing.T) {
 	repo := newMockItemRepoForService()
-	svc := NewItemService(repo, newMockItemStateRepoForService())
+	svc := NewItemService(repo, newMockItemStateRepoForService(), subscribedChecker(), defaultFeedProvider())
 
 	_, err := svc.ListItems(context.Background(), "user-123", "feed-1", model.ItemFilter("invalid"), "", 50)
 	if err == nil {
@@ -323,7 +373,7 @@ func TestItemService_ListItems_CursorParsing(t *testing.T) {
 		return nil, nil
 	}
 
-	svc := NewItemService(repo, newMockItemStateRepoForService())
+	svc := NewItemService(repo, newMockItemStateRepoForService(), subscribedChecker(), defaultFeedProvider())
 	cursorStr := "2026-02-27T10:00:00Z"
 	_, err := svc.ListItems(context.Background(), "user-123", "feed-1", model.ItemFilterAll, cursorStr, 50)
 	if err != nil {
@@ -345,7 +395,7 @@ func TestItemService_ListItems_EmptyCursor(t *testing.T) {
 		return nil, nil
 	}
 
-	svc := NewItemService(repo, newMockItemStateRepoForService())
+	svc := NewItemService(repo, newMockItemStateRepoForService(), subscribedChecker(), defaultFeedProvider())
 	_, err := svc.ListItems(context.Background(), "user-123", "feed-1", model.ItemFilterAll, "", 50)
 	if err != nil {
 		t.Fatalf("ListItems returned error: %v", err)
@@ -365,7 +415,7 @@ func TestItemService_ListItems_UnreadFilter(t *testing.T) {
 		return nil, nil
 	}
 
-	svc := NewItemService(repo, newMockItemStateRepoForService())
+	svc := NewItemService(repo, newMockItemStateRepoForService(), subscribedChecker(), defaultFeedProvider())
 	_, err := svc.ListItems(context.Background(), "user-123", "feed-1", model.ItemFilterUnread, "", 50)
 	if err != nil {
 		t.Fatalf("ListItems returned error: %v", err)
@@ -385,7 +435,7 @@ func TestItemService_ListItems_StarredFilter(t *testing.T) {
 		return nil, nil
 	}
 
-	svc := NewItemService(repo, newMockItemStateRepoForService())
+	svc := NewItemService(repo, newMockItemStateRepoForService(), subscribedChecker(), defaultFeedProvider())
 	_, err := svc.ListItems(context.Background(), "user-123", "feed-1", model.ItemFilterStarred, "", 50)
 	if err != nil {
 		t.Fatalf("ListItems returned error: %v", err)
@@ -435,7 +485,7 @@ func TestItemService_ListStarredItems_EmptyCursor(t *testing.T) {
 			makeStarredRow("item-1", "feed-1", "Feed A", now),
 		}, nil
 	}
-	svc := NewItemService(repo, newMockItemStateRepoForService())
+	svc := NewItemService(repo, newMockItemStateRepoForService(), subscribedChecker(), defaultFeedProvider())
 
 	// Act
 	result, err := svc.ListStarredItems(context.Background(), "user-123", "", 50)
@@ -481,7 +531,7 @@ func TestItemService_ListStarredItems_InvalidCursor(t *testing.T) {
 		repoCalled = true
 		return nil, nil
 	}
-	svc := NewItemService(repo, newMockItemStateRepoForService())
+	svc := NewItemService(repo, newMockItemStateRepoForService(), subscribedChecker(), defaultFeedProvider())
 
 	// Act
 	_, err := svc.ListStarredItems(context.Background(), "user-123", "not-a-timestamp", 50)
@@ -524,7 +574,7 @@ func TestItemService_ListStarredItems_HasMoreTrue(t *testing.T) {
 		}
 		return rows, nil
 	}
-	svc := NewItemService(repo, newMockItemStateRepoForService())
+	svc := NewItemService(repo, newMockItemStateRepoForService(), subscribedChecker(), defaultFeedProvider())
 
 	// Act
 	result, err := svc.ListStarredItems(context.Background(), "user-123", "", 50)
@@ -566,7 +616,7 @@ func TestItemService_ListStarredItems_HasMoreFalse(t *testing.T) {
 			makeStarredRow("item-2", "feed-2", "Feed B", now.Add(-time.Hour)),
 		}, nil
 	}
-	svc := NewItemService(repo, newMockItemStateRepoForService())
+	svc := NewItemService(repo, newMockItemStateRepoForService(), subscribedChecker(), defaultFeedProvider())
 
 	// Act
 	result, err := svc.ListStarredItems(context.Background(), "user-123", "", 50)
@@ -617,7 +667,7 @@ func TestItemService_ListStarredItems_NextCursorRFC3339NanoFormat(t *testing.T) 
 		rows[outerLimit] = makeStarredRow("item-overflow", "feed-1", "Feed A", tailTime.Add(-time.Hour))
 		return rows, nil
 	}
-	svc := NewItemService(repo, newMockItemStateRepoForService())
+	svc := NewItemService(repo, newMockItemStateRepoForService(), subscribedChecker(), defaultFeedProvider())
 
 	// Act
 	result, err := svc.ListStarredItems(context.Background(), "user-123", "", outerLimit)
@@ -654,7 +704,7 @@ func TestItemService_ListStarredItems_CursorPassedToRepo(t *testing.T) {
 		receivedCursor = cursor
 		return nil, nil
 	}
-	svc := NewItemService(repo, newMockItemStateRepoForService())
+	svc := NewItemService(repo, newMockItemStateRepoForService(), subscribedChecker(), defaultFeedProvider())
 	cursorStr := "2026-02-27T10:00:00Z"
 
 	// Act
@@ -702,7 +752,7 @@ func TestItemService_GetItem_ReturnsDetail(t *testing.T) {
 		IsStarred: true,
 	}
 
-	svc := NewItemService(repo, stateRepo)
+	svc := NewItemService(repo, stateRepo, subscribedChecker(), defaultFeedProvider())
 	detail, err := svc.GetItem(context.Background(), "user-123", "item-1")
 	if err != nil {
 		t.Fatalf("GetItem returned error: %v", err)
@@ -731,6 +781,48 @@ func TestItemService_GetItem_ReturnsDetail(t *testing.T) {
 	}
 }
 
+// TestItemService_GetItem_Unsubscribed_ReturnsNotFound は、記事が存在しても
+// 呼び出しユーザーが当該フィードを未購読の場合に ITEM_NOT_FOUND を返し、本文を
+// 漏えいしないことを検証する（#175 IDOR 対策）。
+func TestItemService_GetItem_Unsubscribed_ReturnsNotFound(t *testing.T) {
+	// Arrange: 記事は存在する（他ユーザー専用フィードの記事を想定）
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := newMockItemRepoForService()
+	repo.findByIDFn = func(ctx context.Context, id string) (*model.Item, error) {
+		return &model.Item{
+			ID:          "item-1",
+			FeedID:      "feed-foreign",
+			Title:       "他人のフィードの記事",
+			Content:     "<p>秘密の本文</p>",
+			PublishedAt: &now,
+		}, nil
+	}
+	// 購読チェックは「未購読」を返す。FeedID が渡ることも確認する。
+	checker := unsubscribedChecker()
+	checker.findFn = func(_ context.Context, userID, feedID string) (*model.Subscription, error) {
+		if feedID != "feed-foreign" {
+			t.Errorf("feedID = %q, want %q", feedID, "feed-foreign")
+		}
+		return nil, nil
+	}
+
+	// Act
+	svc := NewItemService(repo, newMockItemStateRepoForService(), checker, defaultFeedProvider())
+	detail, err := svc.GetItem(context.Background(), "user-123", "item-1")
+
+	// Assert: 存在を秘匿して ITEM_NOT_FOUND、本文は返さない
+	if detail != nil {
+		t.Errorf("expected nil detail for unsubscribed access, got %+v", detail)
+	}
+	apiErr, ok := err.(*model.APIError)
+	if !ok {
+		t.Fatalf("expected *model.APIError, got %T (%v)", err, err)
+	}
+	if apiErr.Code != model.ErrCodeItemNotFound {
+		t.Errorf("error code = %q, want %q", apiErr.Code, model.ErrCodeItemNotFound)
+	}
+}
+
 // TestItemService_GetItem_NotFound は存在しない記事でエラーが返されることをテストする。
 func TestItemService_GetItem_NotFound(t *testing.T) {
 	repo := newMockItemRepoForService()
@@ -738,7 +830,7 @@ func TestItemService_GetItem_NotFound(t *testing.T) {
 		return nil, nil
 	}
 
-	svc := NewItemService(repo, newMockItemStateRepoForService())
+	svc := NewItemService(repo, newMockItemStateRepoForService(), subscribedChecker(), defaultFeedProvider())
 	_, err := svc.GetItem(context.Background(), "user-123", "nonexistent")
 	if err == nil {
 		t.Fatal("expected error for non-existent item")
@@ -767,7 +859,7 @@ func TestItemService_GetItem_NoState(t *testing.T) {
 	}
 
 	// item_statesにレコードなし
-	svc := NewItemService(repo, newMockItemStateRepoForService())
+	svc := NewItemService(repo, newMockItemStateRepoForService(), subscribedChecker(), defaultFeedProvider())
 	detail, err := svc.GetItem(context.Background(), "user-123", "item-1")
 	if err != nil {
 		t.Fatalf("GetItem returned error: %v", err)
@@ -779,6 +871,148 @@ func TestItemService_GetItem_NoState(t *testing.T) {
 	}
 	if detail.IsStarred {
 		t.Error("expected detail.IsStarred to be false (no state)")
+	}
+}
+
+// TestItemService_GetItem_PopulatesFeedMetadata は、mock FeedMetaProvider が feed を返した際に
+// ItemDetail.FeedTitle / FeedFaviconURL が正しく populate されることを検証する。
+// 対応 AC: Req 3.1（feed_title）、Req 3.2（feed_favicon_url）。
+// FeedMetaProvider に渡される id が item.FeedID と一致することも併せて契約として確認する。
+func TestItemService_GetItem_PopulatesFeedMetadata(t *testing.T) {
+	// Arrange
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := newMockItemRepoForService()
+	repo.findByIDFn = func(_ context.Context, _ string) (*model.Item, error) {
+		return &model.Item{
+			ID:          "item-1",
+			FeedID:      "feed-1",
+			Title:       "記事タイトル",
+			Link:        "https://example.com/article",
+			Content:     "<p>本文</p>",
+			PublishedAt: &now,
+		}, nil
+	}
+	feedProv := &mockFeedMetaProviderForService{
+		findByIDFn: func(_ context.Context, id string) (*model.Feed, error) {
+			// 認可フローの後に呼ばれる前提で id が item.FeedID と一致することを検証
+			if id != "feed-1" {
+				t.Errorf("FeedMetaProvider.FindByID id = %q, want %q", id, "feed-1")
+			}
+			return &model.Feed{
+				ID:          "feed-1",
+				Title:       "テストフィード",
+				FaviconData: []byte("abc"),
+				FaviconMime: "image/png",
+			}, nil
+		},
+	}
+
+	// Act
+	svc := NewItemService(repo, newMockItemStateRepoForService(), subscribedChecker(), feedProv)
+	detail, err := svc.GetItem(context.Background(), "user-123", "item-1")
+
+	// Assert
+	if err != nil {
+		t.Fatalf("GetItem returned error: %v", err)
+	}
+	if detail == nil {
+		t.Fatal("expected non-nil detail")
+	}
+	if detail.FeedTitle != "テストフィード" {
+		t.Errorf("detail.FeedTitle = %q, want %q", detail.FeedTitle, "テストフィード")
+	}
+	if detail.FeedFaviconURL == nil {
+		t.Fatal("expected non-nil FeedFaviconURL when feed has favicon")
+	}
+	// model.FaviconDataURL の出力フォーマットと一致することを確認（data:<mime>;base64,<data>）。
+	wantFavicon := "data:image/png;base64,YWJj" // base64("abc")
+	if *detail.FeedFaviconURL != wantFavicon {
+		t.Errorf("FeedFaviconURL = %q, want %q", *detail.FeedFaviconURL, wantFavicon)
+	}
+}
+
+// TestItemService_GetItem_NullFaviconWhenFeedHasNone は、FaviconData / FaviconMime が空の feed が
+// 返ったときに FeedFaviconURL が nil となり、FeedTitle は populate されることを検証する。
+// 対応 AC: Req 3.4（favicon 未登録時に null / 省略）。
+func TestItemService_GetItem_NullFaviconWhenFeedHasNone(t *testing.T) {
+	// Arrange
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := newMockItemRepoForService()
+	repo.findByIDFn = func(_ context.Context, _ string) (*model.Item, error) {
+		return &model.Item{
+			ID:          "item-1",
+			FeedID:      "feed-1",
+			Title:       "記事",
+			PublishedAt: &now,
+		}, nil
+	}
+	feedProv := &mockFeedMetaProviderForService{
+		findByIDFn: func(_ context.Context, _ string) (*model.Feed, error) {
+			// favicon 情報が無い feed
+			return &model.Feed{
+				ID:          "feed-1",
+				Title:       "favicon なしフィード",
+				FaviconData: nil,
+				FaviconMime: "",
+			}, nil
+		},
+	}
+
+	// Act
+	svc := NewItemService(repo, newMockItemStateRepoForService(), subscribedChecker(), feedProv)
+	detail, err := svc.GetItem(context.Background(), "user-123", "item-1")
+
+	// Assert
+	if err != nil {
+		t.Fatalf("GetItem returned error: %v", err)
+	}
+	if detail == nil {
+		t.Fatal("expected non-nil detail")
+	}
+	if detail.FeedTitle != "favicon なしフィード" {
+		t.Errorf("detail.FeedTitle = %q, want %q", detail.FeedTitle, "favicon なしフィード")
+	}
+	if detail.FeedFaviconURL != nil {
+		t.Errorf("expected FeedFaviconURL to be nil when feed has no favicon, got %q", *detail.FeedFaviconURL)
+	}
+}
+
+// TestItemService_GetItem_FeedRepoError_PropagatesError は、mock FeedMetaProvider が error を返したとき
+// その error が上位に伝播し ItemDetail が nil で返されることを検証する。
+// 対応 AC: 設計判断 fail-fast（feed lookup 失敗時は部分応答を生成せず 500 系として上位に返す）。
+func TestItemService_GetItem_FeedRepoError_PropagatesError(t *testing.T) {
+	// Arrange
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := newMockItemRepoForService()
+	repo.findByIDFn = func(_ context.Context, _ string) (*model.Item, error) {
+		return &model.Item{
+			ID:          "item-1",
+			FeedID:      "feed-1",
+			Title:       "記事",
+			PublishedAt: &now,
+		}, nil
+	}
+	wantErr := fmt.Errorf("simulated feed DB error")
+	feedProv := &mockFeedMetaProviderForService{
+		findByIDFn: func(_ context.Context, _ string) (*model.Feed, error) {
+			return nil, wantErr
+		},
+	}
+
+	// Act
+	svc := NewItemService(repo, newMockItemStateRepoForService(), subscribedChecker(), feedProv)
+	detail, err := svc.GetItem(context.Background(), "user-123", "item-1")
+
+	// Assert
+	if detail != nil {
+		t.Errorf("expected nil detail when feed lookup fails, got %+v", detail)
+	}
+	if err == nil {
+		t.Fatal("expected error to propagate from FeedMetaProvider")
+	}
+	if !errors.Is(err, wantErr) && err.Error() != wantErr.Error() {
+		// 上位伝播時は wrap せず原 error をそのまま返す（既存 itemRepo / itemStateRepo の error と同型）
+		t.Errorf("expected propagated error = %v, got %v", wantErr, err)
 	}
 }
 
@@ -813,7 +1047,7 @@ func TestItemStateService_UpdateState_SetRead(t *testing.T) {
 		return &model.Item{ID: "item-1"}, nil
 	}
 
-	svc := NewItemStateService(itemRepo, stateRepo)
+	svc := NewItemStateService(itemRepo, stateRepo, subscribedChecker())
 	isRead := true
 	state, err := svc.UpdateState(context.Background(), "user-123", "item-1", &isRead, nil)
 	if err != nil {
@@ -845,7 +1079,7 @@ func TestItemStateService_UpdateState_SetStarred(t *testing.T) {
 		return &model.Item{ID: "item-1"}, nil
 	}
 
-	svc := NewItemStateService(itemRepo, stateRepo)
+	svc := NewItemStateService(itemRepo, stateRepo, subscribedChecker())
 	isStarred := true
 	state, err := svc.UpdateState(context.Background(), "user-123", "item-1", nil, &isStarred)
 	if err != nil {
@@ -882,7 +1116,7 @@ func TestItemStateService_UpdateState_NilFieldsNotChanged(t *testing.T) {
 		return &model.Item{ID: "item-1"}, nil
 	}
 
-	svc := NewItemStateService(itemRepo, stateRepo)
+	svc := NewItemStateService(itemRepo, stateRepo, subscribedChecker())
 	isRead := false
 	state, err := svc.UpdateState(context.Background(), "user-123", "item-1", &isRead, nil)
 	if err != nil {
@@ -904,7 +1138,7 @@ func TestItemStateService_UpdateState_ItemNotFound(t *testing.T) {
 		return nil, nil // 記事が存在しない
 	}
 
-	svc := NewItemStateService(itemRepo, newMockItemStateRepoForService())
+	svc := NewItemStateService(itemRepo, newMockItemStateRepoForService(), subscribedChecker())
 	isRead := true
 	_, err := svc.UpdateState(context.Background(), "user-123", "nonexistent", &isRead, nil)
 	if err == nil {
@@ -914,6 +1148,40 @@ func TestItemStateService_UpdateState_ItemNotFound(t *testing.T) {
 	apiErr, ok := err.(*model.APIError)
 	if !ok {
 		t.Fatalf("expected *model.APIError, got %T", err)
+	}
+	if apiErr.Code != model.ErrCodeItemNotFound {
+		t.Errorf("error code = %q, want %q", apiErr.Code, model.ErrCodeItemNotFound)
+	}
+}
+
+// TestItemStateService_UpdateState_Unsubscribed_ReturnsNotFound は、記事が存在しても
+// 呼び出しユーザーが当該フィードを未購読の場合に ITEM_NOT_FOUND を返し、状態の
+// 書き込み（Upsert）を行わないことを検証する（#175 越境書き込み対策）。
+func TestItemStateService_UpdateState_Unsubscribed_ReturnsNotFound(t *testing.T) {
+	// Arrange: 記事は存在する
+	itemRepo := newMockItemRepoForService()
+	itemRepo.findByIDFn = func(ctx context.Context, id string) (*model.Item, error) {
+		return &model.Item{ID: "item-1", FeedID: "feed-foreign"}, nil
+	}
+	// Upsert が呼ばれたら失敗（越境書き込みが起きていないことを保証）
+	stateRepo := newMockItemStateRepoForService()
+	stateRepo.upsertFn = func(_ context.Context, _, _ string, _, _ *bool) (*model.ItemState, error) {
+		t.Fatal("Upsert must not be called for unsubscribed access")
+		return nil, nil
+	}
+
+	// Act: 未購読
+	svc := NewItemStateService(itemRepo, stateRepo, unsubscribedChecker())
+	isRead := true
+	state, err := svc.UpdateState(context.Background(), "user-123", "item-1", &isRead, nil)
+
+	// Assert
+	if state != nil {
+		t.Errorf("expected nil state for unsubscribed access, got %+v", state)
+	}
+	apiErr, ok := err.(*model.APIError)
+	if !ok {
+		t.Fatalf("expected *model.APIError, got %T (%v)", err, err)
 	}
 	if apiErr.Code != model.ErrCodeItemNotFound {
 		t.Errorf("error code = %q, want %q", apiErr.Code, model.ErrCodeItemNotFound)
@@ -939,7 +1207,7 @@ func TestItemStateService_UpdateState_UserDataIsolation(t *testing.T) {
 		return &model.Item{ID: "item-1"}, nil
 	}
 
-	svc := NewItemStateService(itemRepo, stateRepo)
+	svc := NewItemStateService(itemRepo, stateRepo, subscribedChecker())
 	isRead := true
 	_, err := svc.UpdateState(context.Background(), "user-456", "item-1", &isRead, nil)
 	if err != nil {

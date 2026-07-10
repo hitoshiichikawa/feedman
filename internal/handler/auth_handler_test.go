@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -14,10 +15,11 @@ import (
 // --- モック定義 ---
 
 type mockAuthService struct {
-	getLoginURLFn    func(state string) string
-	handleCallbackFn func(ctx context.Context, code string) (*model.Session, error)
-	logoutFn         func(ctx context.Context, sessionID string) error
-	getCurrentUserFn func(ctx context.Context, sessionID string) (*model.User, error)
+	getLoginURLFn          func(state string) string
+	handleCallbackFn       func(ctx context.Context, code string) (*model.Session, error)
+	handleNativeCallbackFn func(ctx context.Context, code, pkceChallenge string) (string, error)
+	logoutFn               func(ctx context.Context, sessionID string) error
+	getCurrentUserFn       func(ctx context.Context, sessionID string) (*model.User, error)
 }
 
 func (m *mockAuthService) GetLoginURL(state string) string {
@@ -32,6 +34,13 @@ func (m *mockAuthService) HandleCallback(ctx context.Context, code string) (*mod
 		return m.handleCallbackFn(ctx, code)
 	}
 	return nil, nil
+}
+
+func (m *mockAuthService) HandleNativeCallback(ctx context.Context, code, pkceChallenge string) (string, error) {
+	if m.handleNativeCallbackFn != nil {
+		return m.handleNativeCallbackFn(ctx, code, pkceChallenge)
+	}
+	return "", nil
 }
 
 func (m *mockAuthService) Logout(ctx context.Context, sessionID string) error {
@@ -108,9 +117,9 @@ func TestAuthHandler_Callback_Success_SetsCookieAndRedirects(t *testing.T) {
 
 	resp := w.Result()
 
-	// リダイレクトされること
-	if resp.StatusCode != http.StatusTemporaryRedirect {
-		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	// リダイレクトされること（POST/GET アクション後の 303 See Other）
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
 	}
 
 	// BaseURLにリダイレクトされること
@@ -247,8 +256,8 @@ func TestAuthHandler_Callback_NoOldSessionCookie_DoesNotRevokeAndCompletes(t *te
 		t.Error("Logout should not be called when no old session_id cookie exists")
 	}
 	resp := w.Result()
-	if resp.StatusCode != http.StatusTemporaryRedirect {
-		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
 	}
 	var sessionCookie *http.Cookie
 	for _, c := range resp.Cookies() {
@@ -286,8 +295,8 @@ func TestAuthHandler_Callback_RevokeFails_StillCompletesLogin(t *testing.T) {
 
 	// Assert: AC R3.3 旧セッション無効化失敗でもログインはエラーにならず完了すること
 	resp := w.Result()
-	if resp.StatusCode != http.StatusTemporaryRedirect {
-		t.Errorf("status = %d, want %d (login must not fail on revoke error)", resp.StatusCode, http.StatusTemporaryRedirect)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("status = %d, want %d (login must not fail on revoke error)", resp.StatusCode, http.StatusSeeOther)
 	}
 	var sessionCookie *http.Cookie
 	for _, c := range resp.Cookies() {
@@ -430,9 +439,9 @@ func TestAuthHandler_Logout_Success_ClearsCookieAndRedirects(t *testing.T) {
 
 	resp := w.Result()
 
-	// リダイレクトされること
-	if resp.StatusCode != http.StatusTemporaryRedirect {
-		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	// リダイレクトされること（POST ログアウト後の 303 See Other）
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
 	}
 
 	// セッションCookieがクリアされること
@@ -464,8 +473,8 @@ func TestAuthHandler_Logout_NoSession_StillRedirects(t *testing.T) {
 	h.Logout(w, req)
 
 	resp := w.Result()
-	if resp.StatusCode != http.StatusTemporaryRedirect {
-		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
 	}
 }
 
@@ -524,4 +533,418 @@ func containsStr(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// --- flow=native（#165）のテスト ---
+
+// nativeTestChallenge は S256 challenge 形式（base64url no-pad 43 文字）の有効なテスト値。
+const nativeTestChallenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+
+// newNativeTestHandler は native テスト用の AuthHandler を生成する。
+func newNativeTestHandler(svc *mockAuthService) *AuthHandler {
+	return NewAuthHandler(svc, AuthHandlerConfig{
+		BaseURL:       "http://localhost:3000",
+		CookieDomain:  "",
+		CookieSecure:  false,
+		SessionMaxAge: 86400,
+	})
+}
+
+// findCookie は response の Set-Cookie から名前一致の Cookie を返す。
+func findCookie(resp *http.Response, name string) *http.Cookie {
+	for _, c := range resp.Cookies() {
+		if c.Name == name {
+			return c
+		}
+	}
+	return nil
+}
+
+// TestAuthHandler_Login_Native_SetsChallengeCookieAndRedirects は flow=native + 有効な PKCE で
+// state / native challenge 両 Cookie が設定され OAuth リダイレクトすることを検証する（Req 1.1）。
+func TestAuthHandler_Login_Native_SetsChallengeCookieAndRedirects(t *testing.T) {
+	// Arrange
+	svc := &mockAuthService{
+		getLoginURLFn: func(state string) string {
+			return "https://accounts.google.com/o/oauth2/auth?state=" + state
+		},
+	}
+	h := newNativeTestHandler(svc)
+	req := httptest.NewRequest(http.MethodGet,
+		"/auth/google/login?flow=native&code_challenge="+nativeTestChallenge+"&code_challenge_method=S256", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Login(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	}
+	if !containsStr(resp.Header.Get("Location"), "accounts.google.com") {
+		t.Errorf("Location = %q, should contain google oauth URL", resp.Header.Get("Location"))
+	}
+	stateCookie := findCookie(resp, "oauth_state")
+	if stateCookie == nil || stateCookie.Value == "" {
+		t.Error("oauth_state cookie should be set")
+	}
+	nativeCookie := findCookie(resp, "oauth_native_challenge")
+	if nativeCookie == nil {
+		t.Fatal("oauth_native_challenge cookie should be set")
+	}
+	if nativeCookie.Value != nativeTestChallenge {
+		t.Errorf("native cookie value = %q, want %q", nativeCookie.Value, nativeTestChallenge)
+	}
+	if !nativeCookie.HttpOnly {
+		t.Error("native cookie should be HttpOnly")
+	}
+}
+
+// TestAuthHandler_Login_Native_InvalidPKCE_Rejects は PKCE 欠落・不正時に 400 を返し
+// Cookie 設定もリダイレクトも行わないことを検証する（Req 1.2, 1.3, 1.4 / NFR 1.2）。
+func TestAuthHandler_Login_Native_InvalidPKCE_Rejects(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{name: "challenge 欠落のとき 400", query: "flow=native&code_challenge_method=S256"},
+		{name: "method 欠落のとき 400", query: "flow=native&code_challenge=" + nativeTestChallenge},
+		{name: "method=plain のとき 400", query: "flow=native&code_challenge=" + nativeTestChallenge + "&code_challenge_method=plain"},
+		{name: "challenge 形式不正のとき 400", query: "flow=native&code_challenge=short&code_challenge_method=S256"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			h := newNativeTestHandler(&mockAuthService{})
+			req := httptest.NewRequest(http.MethodGet, "/auth/google/login?"+tc.query, nil)
+			w := httptest.NewRecorder()
+
+			// Act
+			h.Login(w, req)
+
+			// Assert
+			resp := w.Result()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+			}
+			if len(resp.Cookies()) != 0 {
+				t.Errorf("no cookies should be set on rejection, got %d", len(resp.Cookies()))
+			}
+			if resp.Header.Get("Location") != "" {
+				t.Error("no redirect should happen on rejection")
+			}
+		})
+	}
+}
+
+// TestAuthHandler_Login_Web_ClearsStaleNativeCookie は flow=native なしの Web ログインで
+// 残存する native flow 文脈が破棄されることを検証する（Req 1.6）。
+func TestAuthHandler_Login_Web_ClearsStaleNativeCookie(t *testing.T) {
+	// Arrange: 過去の native flow 文脈（cookie）が残存している
+	svc := &mockAuthService{
+		getLoginURLFn: func(state string) string { return "https://accounts.google.com/o/oauth2/auth" },
+	}
+	h := newNativeTestHandler(svc)
+	req := httptest.NewRequest(http.MethodGet, "/auth/google/login", nil)
+	req.AddCookie(&http.Cookie{Name: "oauth_native_challenge", Value: nativeTestChallenge})
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Login(w, req)
+
+	// Assert: 削除 Set-Cookie（MaxAge < 0）が発行される
+	resp := w.Result()
+	nativeCookie := findCookie(resp, "oauth_native_challenge")
+	if nativeCookie == nil {
+		t.Fatal("expected deletion Set-Cookie for oauth_native_challenge")
+	}
+	if nativeCookie.MaxAge >= 0 {
+		t.Errorf("native cookie MaxAge = %d, want negative (deletion)", nativeCookie.MaxAge)
+	}
+}
+
+// TestAuthHandler_Login_Web_NoNativeCookie_HeadersUnchanged は残存 native 文脈が無い
+// Web ログインで native cookie の Set-Cookie が発行されない（応答不変）ことを検証する（NFR 2.1）。
+func TestAuthHandler_Login_Web_NoNativeCookie_HeadersUnchanged(t *testing.T) {
+	// Arrange
+	svc := &mockAuthService{
+		getLoginURLFn: func(state string) string { return "https://accounts.google.com/o/oauth2/auth" },
+	}
+	h := newNativeTestHandler(svc)
+	req := httptest.NewRequest(http.MethodGet, "/auth/google/login", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Login(w, req)
+
+	// Assert: oauth_state のみが設定され、native cookie のヘッダは存在しない
+	resp := w.Result()
+	if findCookie(resp, "oauth_native_challenge") != nil {
+		t.Error("oauth_native_challenge Set-Cookie must not be sent for plain web login")
+	}
+	if findCookie(resp, "oauth_state") == nil {
+		t.Error("oauth_state cookie should still be set")
+	}
+}
+
+// TestAuthHandler_Callback_Native_RedirectsToAppSchemeWithoutSession は native callback 成功時に
+// アプリスキームへ auth_code 付きで 303 し、セッション Cookie を発行しないことを検証する
+// （Req 2.1, 2.3, 3.3）。
+func TestAuthHandler_Callback_Native_RedirectsToAppSchemeWithoutSession(t *testing.T) {
+	// Arrange
+	handleCallbackCalled := false
+	svc := &mockAuthService{
+		handleCallbackFn: func(ctx context.Context, code string) (*model.Session, error) {
+			handleCallbackCalled = true
+			return &model.Session{ID: "should-not-be-issued"}, nil
+		},
+		handleNativeCallbackFn: func(ctx context.Context, code, pkceChallenge string) (string, error) {
+			if code != "test-code" {
+				t.Errorf("code = %q, want %q", code, "test-code")
+			}
+			if pkceChallenge != nativeTestChallenge {
+				t.Errorf("pkceChallenge = %q, want %q", pkceChallenge, nativeTestChallenge)
+			}
+			return "plain-auth-code-123", nil
+		},
+	}
+	h := newNativeTestHandler(svc)
+	req := httptest.NewRequest(http.MethodGet, "/auth/google/callback?code=test-code&state=test-state", nil)
+	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "test-state"})
+	req.AddCookie(&http.Cookie{Name: "oauth_native_challenge", Value: nativeTestChallenge})
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Callback(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
+	}
+	location := resp.Header.Get("Location")
+	wantPrefix := "feedman://auth/callback?auth_code="
+	if !containsStr(location, wantPrefix) {
+		t.Errorf("Location = %q, want prefix %q", location, wantPrefix)
+	}
+	if !containsStr(location, "plain-auth-code-123") {
+		t.Errorf("Location = %q, should contain issued auth code", location)
+	}
+	if findCookie(resp, "session_id") != nil {
+		t.Error("session_id cookie must not be set for native flow")
+	}
+	nativeCookie := findCookie(resp, "oauth_native_challenge")
+	if nativeCookie == nil || nativeCookie.MaxAge >= 0 {
+		t.Error("oauth_native_challenge cookie should be deleted after native callback")
+	}
+	if handleCallbackCalled {
+		t.Error("web HandleCallback must not be called for native flow")
+	}
+}
+
+// TestAuthHandler_Callback_Native_ServiceError_Returns500 は native callback の処理失敗時に
+// 500 を返し auth_code リダイレクトを行わないことを検証する（Req 3.4）。
+func TestAuthHandler_Callback_Native_ServiceError_Returns500(t *testing.T) {
+	// Arrange
+	svc := &mockAuthService{
+		handleNativeCallbackFn: func(ctx context.Context, code, pkceChallenge string) (string, error) {
+			return "", context.DeadlineExceeded
+		},
+	}
+	h := newNativeTestHandler(svc)
+	req := httptest.NewRequest(http.MethodGet, "/auth/google/callback?code=test-code&state=test-state", nil)
+	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "test-state"})
+	req.AddCookie(&http.Cookie{Name: "oauth_native_challenge", Value: nativeTestChallenge})
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Callback(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusInternalServerError)
+	}
+	if containsStr(resp.Header.Get("Location"), "feedman://") {
+		t.Error("must not redirect to app scheme on failure")
+	}
+}
+
+// TestAuthHandler_Callback_Native_InvalidState_RejectsWithoutIssuingCode は native 文脈があっても
+// state 検証失敗時は 400 で拒否し auth_code を発行しないことを検証する（Req 3.1）。
+func TestAuthHandler_Callback_Native_InvalidState_RejectsWithoutIssuingCode(t *testing.T) {
+	// Arrange
+	nativeCalled := false
+	svc := &mockAuthService{
+		handleNativeCallbackFn: func(ctx context.Context, code, pkceChallenge string) (string, error) {
+			nativeCalled = true
+			return "should-not-be-issued", nil
+		},
+	}
+	h := newNativeTestHandler(svc)
+	req := httptest.NewRequest(http.MethodGet, "/auth/google/callback?code=test-code&state=evil-state", nil)
+	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "expected-state"})
+	req.AddCookie(&http.Cookie{Name: "oauth_native_challenge", Value: nativeTestChallenge})
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Callback(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+	if nativeCalled {
+		t.Error("HandleNativeCallback must not be called when state validation fails")
+	}
+}
+
+// TestAuthHandler_Callback_Native_TamperedChallenge_Rejects は native cookie の challenge が
+// 改ざんされた（S256 形式でない）場合に 400 で拒否することを検証する（Req 1.4 defensive）。
+func TestAuthHandler_Callback_Native_TamperedChallenge_Rejects(t *testing.T) {
+	// Arrange
+	nativeCalled := false
+	svc := &mockAuthService{
+		handleNativeCallbackFn: func(ctx context.Context, code, pkceChallenge string) (string, error) {
+			nativeCalled = true
+			return "", nil
+		},
+	}
+	h := newNativeTestHandler(svc)
+	req := httptest.NewRequest(http.MethodGet, "/auth/google/callback?code=test-code&state=test-state", nil)
+	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "test-state"})
+	req.AddCookie(&http.Cookie{Name: "oauth_native_challenge", Value: "tampered"})
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Callback(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+	if nativeCalled {
+		t.Error("HandleNativeCallback must not be called with tampered challenge")
+	}
+}
+
+// TestAuthHandler_Me_CookiePathUnchanged は /auth/me の Cookie 経路応答が本 spec（#207）
+// 導入で変化していないことを保護する non-regression テスト（Req 2.6 / 4.3 / NFR 1.1）。
+//
+// 既存 TestAuthHandler_Me_Authenticated_ReturnsUserJSON は status と Content-Type のみを
+// 検査するが、本テストは応答 JSON 本文のキー集合まで踏み込み:
+//
+//   - サブテスト Cookie_Present_ReturnsExistingShape:
+//     応答 200 / Content-Type: application/json / JSON のキー集合が **厳密に**
+//     {id, email, name} のみであること（avatar_url / session_id / refresh_token 等の
+//     新フィールド・secret は含まれない）と、各フィールドの値が mock の返り値と一致
+//     することを集合演算的に assert する。
+//   - サブテスト NoCookie_ReturnsUnauthorized:
+//     Cookie 不在で 401 を返す既存挙動が変化していないことを保護する。
+//
+// 本 task は実装変更を伴わない。`/api/users/me`（#207 で新設）と `/auth/me`（既存 Web Cookie 経路）の
+// 棲み分けを維持し、後者に新フィールドが漏れて返らないことを将来の変更で機械的に検出する gate。
+func TestAuthHandler_Me_CookiePathUnchanged(t *testing.T) {
+	t.Run("Cookie_Present_ReturnsExistingShape", func(t *testing.T) {
+		// Arrange: 既存 mockAuthService パターンで getCurrentUser を注入。
+		// model.User には ID/Email/Name のみ存在し、AvatarURL フィールドは無い
+		// （avatar_url が応答に漏れないことの構造的保証は handler 側の map literal にも依存）。
+		wantUser := &model.User{
+			ID:    "user-id-cookie",
+			Email: "cookie@example.com",
+			Name:  "Cookie User",
+		}
+		svc := &mockAuthService{
+			getCurrentUserFn: func(ctx context.Context, sessionID string) (*model.User, error) {
+				if sessionID != "valid-session" {
+					t.Errorf("sessionID = %q, want %q", sessionID, "valid-session")
+				}
+				return wantUser, nil
+			},
+		}
+		h := NewAuthHandler(svc, AuthHandlerConfig{
+			BaseURL: "http://localhost:3000",
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+		req.AddCookie(&http.Cookie{Name: "session_id", Value: "valid-session"})
+		w := httptest.NewRecorder()
+
+		// Act
+		h.Me(w, req)
+
+		// Assert: status / Content-Type は既存仕様通り
+		resp := w.Result()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+		}
+		if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+			t.Errorf("Content-Type = %q, want %q", ct, "application/json")
+		}
+
+		// JSON 本文を decode してキー集合と値を検査
+		var body map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+
+		// 1. 必須キー {id, email, name} が全て存在し、値が一致する
+		if got, ok := body["id"].(string); !ok || got != wantUser.ID {
+			t.Errorf("id = %v (ok=%v), want %q", body["id"], ok, wantUser.ID)
+		}
+		if got, ok := body["email"].(string); !ok || got != wantUser.Email {
+			t.Errorf("email = %v (ok=%v), want %q", body["email"], ok, wantUser.Email)
+		}
+		if got, ok := body["name"].(string); !ok || got != wantUser.Name {
+			t.Errorf("name = %v (ok=%v), want %q", body["name"], ok, wantUser.Name)
+		}
+
+		// 2. キー集合は **厳密に** {id, email, name} のみであること
+		//    （avatar_url や将来追加されるフィールドが /auth/me から漏れないことを保護）
+		allowed := map[string]bool{
+			"id":    true,
+			"email": true,
+			"name":  true,
+		}
+		if len(body) != len(allowed) {
+			t.Errorf("response key count = %d, want %d (keys=%v)", len(body), len(allowed), keysOf(body))
+		}
+		for k := range body {
+			if !allowed[k] {
+				t.Errorf("response contains forbidden key %q (shape regression: /auth/me should keep {id, email, name})", k)
+			}
+		}
+
+		// 3. 明示的に新フィールド / secret キーが含まれないことを assert（regression net の二重化）
+		//    grep でも検出可能にするため individual key check を残す
+		forbidden := []string{"avatar_url", "session_id", "refresh_token", "password", "password_hash", "access_token"}
+		for _, k := range forbidden {
+			if _, ok := body[k]; ok {
+				t.Errorf("response leaks forbidden key %q from /auth/me (non-regression violation)", k)
+			}
+		}
+	})
+
+	t.Run("NoCookie_ReturnsUnauthorized", func(t *testing.T) {
+		// Arrange: session_id Cookie 不在
+		h := NewAuthHandler(&mockAuthService{}, AuthHandlerConfig{
+			BaseURL: "http://localhost:3000",
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+		w := httptest.NewRecorder()
+
+		// Act
+		h.Me(w, req)
+
+		// Assert: 既存仕様通り 401 を返す
+		resp := w.Result()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+		}
+	})
 }
