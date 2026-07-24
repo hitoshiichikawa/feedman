@@ -211,7 +211,7 @@
   - _Boundary: PasskeyHandler, AASAHandler, Router_
   - _Depends: 4, 5_
 
-- [ ] 7. Config 拡張と app.go wiring（fail-closed 縮退の完成）
+- [x] 7. Config 拡張と app.go wiring（fail-closed 縮退の完成）
   - `internal/config/config.go` を拡張:
     - `Config` に `WebAuthnRPID string` / `WebAuthnRPDisplayName string` /
       `WebAuthnOrigins []string` / `WebAuthnIOSAppID string` /
