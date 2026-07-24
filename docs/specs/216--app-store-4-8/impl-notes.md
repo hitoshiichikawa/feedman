@@ -309,3 +309,95 @@
     challengeStore, passkeyCredentialRepo, userRepo, authCodeRepo, nil)` の順で組み、
     `authCodeRepo` は既存 native auth の wiring と共用する（tasks.md L237-238）。now=nil で
     time.Now が既定採用される。
+
+### Task 6
+
+- **採用方針**: `internal/handler/passkey_handler.go` に `PasskeyHandler`（6 endpoint:
+  RegistrationBegin/Finish, RegistrationAddBegin/Finish, AuthenticationBegin/Finish）を、
+  `internal/handler/aasa_handler.go` に `AASAHandler`（`/.well-known/apple-app-site-association`）
+  を新規追加し、`internal/handler/router.go` の `RouterDeps` に両 handler フィールドを
+  追加。認証不要グループに AASA + Passkey 未認証 4 route（既存 `unauthIPMW` +
+  `NewMaxBodyBytesMiddleware(DefaultMaxBodyBytes)` を通過）、認証必須グループに
+  Passkey 追加登録 2 route を登録。既存 `NativeAuthHandler` / `MetricsHandler` と
+  同じ fail-closed nil 縮退パターンを踏襲した（NFR 2.2）。エラー APIError 生成関数
+  4 種（`NewInvalidUsernameError` / `NewUsernameTakenError` / `NewRegistrationFailedError`
+  / `NewAuthenticationFailedError`）を `internal/model/errors.go` に追加し、既存
+  `NewFeedNotFoundError` 系の書式に厳密に揃えた。
+- **重要な判断**:
+  - **サービス依存の受け方（interface segregation / CLAUDE.md §5）**: `PasskeyHandler` は
+    `PasskeyRegistrationService`（4 method）/ `PasskeyAuthenticationService`（2 method）
+    という **handler 内 unexported ではなく exported な最小 interface** を宣言する形で
+    service に依存する。`*passkey.RegistrationService` / `*passkey.AuthenticationService`
+    は構造的にこれを充足し、wiring 時にそのまま渡せる。テストでは stub を差し込み外部
+    ネットワーク非依存で検証（NFR 4.1）。`NativeAuthHandler` の `TokenExchangeService`
+    と同型のパターンで、handler 側の adapter は不要と判断した（後述 PasskeyServiceAdapter
+    スキップ理由を参照）。
+  - **PasskeyServiceAdapter を作らなかった理由（tasks.md L189-190 との差分 / 実装判断）**:
+    tasks.md は `service_adapter.go` に `PasskeyServiceAdapter` を追加するよう指示するが、
+    「必要最小の変換のみ」という但し書きに従うと、passkey service は既に primitive 値
+    （string / []byte）を返すため、handler 側で追加の domain→DTO 変換は不要（options は
+    `json.RawMessage` として pass-through、challenge_id / user_id / auth_code は string の
+    ままレスポンス DTO に詰めるだけ）。既存 `NativeAuthHandler` も同型のパターンで
+    adapter を持たない（`TokenExchangeService` interface + `*auth.TokenService` を直接渡す）。
+    投機的抽象化（CLAUDE.md §7 のアンチパターン）を避けるため、adapter は作成せず interface
+    直渡しとした。design.md L189-190 との軽微な差分だが、機能等価。task 7 の wiring では
+    `handler.NewPasskeyHandler(registrationSvc, authenticationSvc)` として直接注入すればよい。
+  - **リクエスト DTO 設計**: begin 系レスポンスは `passkeyBeginResponse{ChallengeID,
+    Options json.RawMessage}` に統一し、service が生成した options JSON をそのまま透過
+    （navigator.credentials.create / .get に渡せる形式）。finish 系リクエストは
+    `registrationFinishRequest{ChallengeID, Credential json.RawMessage}` に統一し、
+    credential 部を `[]byte` として service に転送（parse は WebAuthnAdapter 側）。
+    `RegistrationFinish` / `RegistrationAddFinish` / `AuthenticationFinish` の 3 endpoint は
+    request 構造が同一のため DTO を共有（DRY）。
+  - **RegistrationAddBegin の空 body 許容**: design.md L709 の API 契約は `{}` を想定するが、
+    Content-Length 0 で送られる可能性を考慮し `decodeOptionalEmpty` helper を導入。
+    `io.EOF` は正常として扱い、非空なら DisallowUnknownFields で unknown フィールドを
+    拒否する。他 5 endpoint は `decodeRequest`（body 必須の厳格 decode）で処理し、既存
+    `NativeAuthHandler` の流儀と揃えた。
+  - **認証必須 endpoint の 401 二段防衛**: 追加登録 2 endpoint は BearerOrSession middleware
+    が 401 を返す前提だが、context 経由の userID 取得失敗時にも handler 側で 401 を返す
+    防衛層を設けた（`middleware.UserIDFromContext` が error を返した場合は
+    `http.Error(w, "unauthorized", 401)` で応答。既存 SessionMiddleware / BearerOrSession
+    と同一メッセージ）。router 統合テストで middleware 側の 401（Cookie 無し）と handler
+    単体テストで context 無しの 401 の双方を検証。
+  - **エラーマッピングの uniform 化（Req 1.7 / 2.5 / 2.6 / 3.6 / 3.7 / NFR 1.3）**:
+    `passkey.ErrRegistrationFailed` は 400 REGISTRATION_FAILED、`ErrAuthenticationFailed`
+    は 400 AUTHENTICATION_FAILED に固定射影し、判別可能な情報を返さない（Req 2.6 の
+    存在有無非開示に整合）。DB 障害等の infra エラーは `WriteInternalServerError` の 500
+    INTERNAL_ERROR に合流し、`err.Error()` は slog のみに載せてクライアントに反射しない。
+    `passkey_handler_test.go` の `TestPasskeyHandler_AuthenticationFinish_UniformRejection`
+    で「異なる拒否理由でも応答本文が完全一致する」ことをテーブル駆動で検証。
+  - **AASAHandler の pre-marshal / immutable body**: 生成時に一度だけ `json.Marshal` を
+    実行し、以降は同一 byte 列を書き出す。`TestAASAHandler_Serve_ImmutableBody` で
+    複数リクエスト間の body 一致を検証。iOS App ID 空なら `NewAASAHandler` が nil を
+    返し、router 側で nil handler を検出して route 登録を skip（fail-closed / NFR 2.2）。
+    Passkey Handler と AASA Handler は独立に nil 判定されるため、`WEBAUTHN_IOS_APP_ID`
+    だけ未設定の環境でも Passkey の 6 endpoint は動作する（
+    `TestNewRouter_Passkey_AASA_IndependentFailClose` で網羅）。
+  - **共通 helper 名の衝突回避**: `internal/handler` package には既存の
+    `invalidRequestError`（`NativeAuthHandler` 専用の action 文言）があるため、passkey 系
+    は `passkeyInvalidRequestError` として新規定義した（action 文言を汎用化）。同様に
+    `decodeRequest` / `decodeOptionalEmpty` / `writeJSON` / `writeRegistrationError` /
+    `writeAuthenticationError` の 5 helper を passkey_handler.go 内に追加。package
+    内の既存 helper とは名前衝突しない。
+  - **既存テストへの影響**: 既存 router / handler の統合テストは全て pass（既存
+    `SessionFinder` / `AuthService` / 他 mock を流用した `newPasskeyRouterDeps` により、
+    passkey 追加後も既存 route 挙動が変わらないことが router_test.go の全 subtest で
+    暗黙的に担保される）。既存 `TestNewRouter_UnauthIPRateLimit_*` / `TestNewRouter_
+    NativeAuthIPRateLimit_*` は無変更。
+- **残存課題（task 7 / 8 への申し送り）**:
+  - **wiring（task 7）**: `handler.NewPasskeyHandler(registrationSvc, authenticationSvc)`
+    と `handler.NewAASAHandler(cfg.WebAuthnIOSAppID)` を `deps.PasskeyHandler` /
+    `deps.AASAHandler` に代入する。`NewAASAHandler` は空文字なら nil を返すため空判定は不要。
+    `WEBAUTHN_RP_ID` / `WEBAUTHN_ORIGINS` のいずれかが未設定なら Passkey 関連 handler を
+    生成せず `deps.PasskeyHandler = nil` のままにする（fail-closed / NFR 2.2）。
+  - **RouterDeps 追加フィールド**: `PasskeyHandler *PasskeyHandler` /
+    `AASAHandler *AASAHandler`（2 フィールド追加のみ、既存フィールド順序は不変）。
+  - **APIError 追加関数**: `model.NewInvalidUsernameError()` /
+    `model.NewUsernameTakenError()` / `model.NewRegistrationFailedError()` /
+    `model.NewAuthenticationFailedError()` の 4 関数を追加（他 domain と同じ Category
+    分類: validation / auth）。エラーコード定数も同 file に追加（`ErrCodeInvalidUsername`
+    等 4 種）。
+  - **task 8（退会 tx cleanup）に影響なし**: 本 task は handler / router 層に閉じており、
+    `internal/user/service.go` の `withdrawTx` や `internal/app/withdraw_wiring.go` に
+    触れていない。task 8 は tasks.md L253-263 の順序通り拡張すればよい。
