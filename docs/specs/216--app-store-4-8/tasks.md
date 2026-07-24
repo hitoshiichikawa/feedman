@@ -88,7 +88,7 @@
   - _Boundary: WebAuthnAdapter, ChallengeStore_
   - _Depends: 2_
 
-- [ ] 4. RegistrationService の実装（新規登録 + 追加登録）
+- [x] 4. RegistrationService の実装（新規登録 + 追加登録）
   - `internal/passkey/registration_service.go` を新規作成
     - `RegistrationService` struct（依存: `WebAuthnAdapter` / `ChallengeStore` /
       `UserWriter`（最小 IF）/ `PasskeyCredentialWriter`（最小 IF）/ `now func() time.Time`）
