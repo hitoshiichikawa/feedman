@@ -59,7 +59,7 @@
   - _Boundary: PasskeyCredentialRepository, PasskeyChallengeRepository, UserRepository_
   - _Depends: 1_
 
-- [ ] 3. ChallengeStore と WebAuthnAdapter の実装
+- [x] 3. ChallengeStore と WebAuthnAdapter の実装
   - `internal/passkey/errors.go` を新規作成し `ErrInvalidUsername` / `ErrUsernameTaken` /
     `ErrRegistrationFailed` / `ErrAuthenticationFailed` / `ErrChallengeNotUsable` sentinel を集約
   - `go.mod` に `github.com/go-webauthn/webauthn` を追加（`go get github.com/go-webauthn/webauthn@latest`）
