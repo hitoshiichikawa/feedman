@@ -162,7 +162,7 @@
   - _Boundary: AuthenticationService_
   - _Depends: 3, 4_
 
-- [ ] 6. HTTP handlers + router 配線 + IP rate limit
+- [x] 6. HTTP handlers + router 配線 + IP rate limit
   - `internal/handler/passkey_handler.go` を新規作成
     - `PasskeyHandler` struct（依存: `PasskeyRegistrationService` / `PasskeyAuthenticationService`
       の最小 IF）
