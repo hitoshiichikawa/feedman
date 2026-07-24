@@ -83,6 +83,30 @@ type Config struct {
 	// NATIVE_AUTH_JWT_KID から読み込み、未設定時は "v1" を採用する（Req 3.5）。
 	// 将来の鍵ローテーションに備えて識別子を含めるためだけのもので、ローテーション実装は別 Issue。
 	NativeAuthJWTKid string
+
+	// Passkey / WebAuthn (Issue #216)
+	// WebAuthnRPID は WebAuthn Relying Party ID（scheme / port を含まないドメイン、例: "example.com"）。
+	// WEBAUTHN_RP_ID から読み込む。空文字の場合、WEBAUTHN_ORIGINS の設定有無に関わらず passkey
+	// handler は生成されず、`/api/passkey/*` 系ルートは登録されない（fail-closed / NFR 2.2 / Req 8.2）。
+	WebAuthnRPID string
+	// WebAuthnRPDisplayName はユーザーの authenticator 同意画面等に表示される RP 名。
+	// WEBAUTHN_RP_DISPLAY_NAME から読み込む。未設定時は "Feedman" を採用する。
+	WebAuthnRPDisplayName string
+	// WebAuthnOrigins は WebAuthn ceremony が許容する origin リスト
+	// （scheme + host [+ port] の完全形。例: "https://example.com,feedman://"）。
+	// WEBAUTHN_ORIGINS からカンマ区切りで読み込む（既存 parseCommaSeparated を再利用）。
+	// 空スライスの場合、WebAuthnRPID の設定有無に関わらず passkey handler は生成されない（fail-closed）。
+	WebAuthnOrigins []string
+	// WebAuthnIOSAppID は AASA の `webcredentials.apps` に載せる iOS App ID
+	// （`TEAM_ID.com.example.feedman` 形式を想定するが、config 層では形式検証を行わない）。
+	// WEBAUTHN_IOS_APP_ID から読み込む。空文字の場合は AASA handler が生成されず
+	// `/.well-known/apple-app-site-association` は 404 になる（fail-closed / Req 5.1〜5.4）。
+	// PasskeyHandler の nil 判定とは独立に決まる（iOS 連携を切り分けて無効化可能）。
+	WebAuthnIOSAppID string
+	// PasskeyChallengeTTL は WebAuthn challenge の有効期限（issue から consume までの上限）。
+	// PASSKEY_CHALLENGE_TTL_SECONDS（秒単位の整数）から読み込む。未設定・不正値時は
+	// 既定値 300 秒（5 分）にフォールバックする（Req 4.4 / 8.4）。
+	PasskeyChallengeTTL time.Duration
 }
 
 // Load は環境変数からConfigを読み込む。
@@ -152,6 +176,16 @@ func Load() (*Config, error) {
 	// Native Auth (Issue #166): いずれも任意。未設定なら token 交換が無効になるだけで起動継続。
 	cfg.NativeAuthJWTSecret = os.Getenv("NATIVE_AUTH_JWT_SECRET")
 	cfg.NativeAuthJWTKid = getEnvString("NATIVE_AUTH_JWT_KID", "v1")
+
+	// Passkey / WebAuthn (Issue #216): 全 env 任意。いずれも未設定なら本機能は完全に無効化され、
+	// 既存挙動と等価（NFR 2.2）。fail-closed 縮退判定は wiring 層（app.go の runServe）が担う。
+	cfg.WebAuthnRPID = os.Getenv("WEBAUTHN_RP_ID")
+	cfg.WebAuthnRPDisplayName = getEnvString("WEBAUTHN_RP_DISPLAY_NAME", "Feedman")
+	cfg.WebAuthnOrigins = parseCommaSeparated(os.Getenv("WEBAUTHN_ORIGINS"))
+	cfg.WebAuthnIOSAppID = os.Getenv("WEBAUTHN_IOS_APP_ID")
+	// PASSKEY_CHALLENGE_TTL_SECONDS は秒単位の整数として扱い、time.Duration に昇格させる。
+	// getEnvInt が不正値時に既定値（300）にフォールバックし Warn ログを 1 件出す挙動を踏襲する。
+	cfg.PasskeyChallengeTTL = time.Duration(getEnvInt("PASSKEY_CHALLENGE_TTL_SECONDS", 300)) * time.Second
 
 	return cfg, nil
 }

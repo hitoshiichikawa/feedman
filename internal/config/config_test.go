@@ -179,6 +179,24 @@ func TestLoad_DefaultValues(t *testing.T) {
 	if len(cfg.TrustedCIDRs) != 0 {
 		t.Errorf("TrustedCIDRs = %v, want empty (default)", cfg.TrustedCIDRs)
 	}
+
+	// Passkey / WebAuthn defaults (Issue #216 / Req 8.2 / NFR 2.2):
+	// 全 env 未設定でも起動継続し、RP display name と challenge TTL は既定値を採用する。
+	if cfg.WebAuthnRPID != "" {
+		t.Errorf("WebAuthnRPID = %q, want empty (default)", cfg.WebAuthnRPID)
+	}
+	if cfg.WebAuthnRPDisplayName != "Feedman" {
+		t.Errorf("WebAuthnRPDisplayName = %q, want %q (default)", cfg.WebAuthnRPDisplayName, "Feedman")
+	}
+	if len(cfg.WebAuthnOrigins) != 0 {
+		t.Errorf("WebAuthnOrigins = %v, want empty (default)", cfg.WebAuthnOrigins)
+	}
+	if cfg.WebAuthnIOSAppID != "" {
+		t.Errorf("WebAuthnIOSAppID = %q, want empty (default)", cfg.WebAuthnIOSAppID)
+	}
+	if cfg.PasskeyChallengeTTL != 300*time.Second {
+		t.Errorf("PasskeyChallengeTTL = %v, want %v (default)", cfg.PasskeyChallengeTTL, 300*time.Second)
+	}
 }
 
 // TestLoad_MetricsTrustedCIDRs は METRICS_TRUSTED_CIDRS のカンマ区切りパースを検証する。
@@ -386,6 +404,236 @@ func TestLoad_NativeAuthJWT(t *testing.T) {
 		}
 		if cfg.NativeAuthJWTKid != "v1" {
 			t.Errorf("NativeAuthJWTKid = %q, want %q (default)", cfg.NativeAuthJWTKid, "v1")
+		}
+	})
+}
+
+// TestLoad_Passkey は WEBAUTHN_* / PASSKEY_CHALLENGE_TTL_SECONDS 環境変数の読み込みと
+// 未設定時の挙動を検証する（Issue #216 / Req 5.1, 5.2, 5.3, 5.4, 8.1, 8.2, 8.3, 8.4, 8.5,
+// NFR 2.1, NFR 2.2）。
+//
+// 全 env は任意で、未設定時は起動を継続する（fail-closed 縮退は wiring 層の責務）。
+// RP display name は未設定時 "Feedman"、challenge TTL は未設定・不正値時に既定値 300s。
+func TestLoad_Passkey(t *testing.T) {
+	t.Run("WEBAUTHN_RP_IDが設定されているとき値を採用する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("WEBAUTHN_RP_ID", "example.com")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if cfg.WebAuthnRPID != "example.com" {
+			t.Errorf("WebAuthnRPID = %q, want %q", cfg.WebAuthnRPID, "example.com")
+		}
+	})
+
+	t.Run("WEBAUTHN_RP_IDが未設定のとき空文字を保持し起動を継続する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("WEBAUTHN_RP_ID", "")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert: fail-closed 判定は wiring 側の責務。config 層では起動を継続する（NFR 2.2）
+		if err != nil {
+			t.Fatalf("expected no error (RPID 未設定でも起動継続), got %v", err)
+		}
+		if cfg.WebAuthnRPID != "" {
+			t.Errorf("WebAuthnRPID = %q, want empty", cfg.WebAuthnRPID)
+		}
+	})
+
+	t.Run("WEBAUTHN_RP_DISPLAY_NAMEが設定されているとき値を採用する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("WEBAUTHN_RP_DISPLAY_NAME", "Feedman Staging")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if cfg.WebAuthnRPDisplayName != "Feedman Staging" {
+			t.Errorf("WebAuthnRPDisplayName = %q, want %q", cfg.WebAuthnRPDisplayName, "Feedman Staging")
+		}
+	})
+
+	t.Run("WEBAUTHN_RP_DISPLAY_NAMEが未設定のとき既定値Feedmanを採用する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("WEBAUTHN_RP_DISPLAY_NAME", "")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if cfg.WebAuthnRPDisplayName != "Feedman" {
+			t.Errorf("WebAuthnRPDisplayName = %q, want %q (default)", cfg.WebAuthnRPDisplayName, "Feedman")
+		}
+	})
+
+	t.Run("WEBAUTHN_ORIGINSがカンマ区切りのとき要素ごとに分割される", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("WEBAUTHN_ORIGINS", "https://example.com,https://staging.example.com,feedman://")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		want := []string{"https://example.com", "https://staging.example.com", "feedman://"}
+		if len(cfg.WebAuthnOrigins) != len(want) {
+			t.Fatalf("WebAuthnOrigins length = %d (%v), want %d (%v)",
+				len(cfg.WebAuthnOrigins), cfg.WebAuthnOrigins, len(want), want)
+		}
+		for i, w := range want {
+			if cfg.WebAuthnOrigins[i] != w {
+				t.Errorf("WebAuthnOrigins[%d] = %q, want %q", i, cfg.WebAuthnOrigins[i], w)
+			}
+		}
+	})
+
+	t.Run("WEBAUTHN_ORIGINSが要素前後に空白を含むときトリムされる", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("WEBAUTHN_ORIGINS", " https://example.com , https://staging.example.com ")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		want := []string{"https://example.com", "https://staging.example.com"}
+		if len(cfg.WebAuthnOrigins) != len(want) {
+			t.Fatalf("WebAuthnOrigins length = %d (%v), want %d",
+				len(cfg.WebAuthnOrigins), cfg.WebAuthnOrigins, len(want))
+		}
+		for i, w := range want {
+			if cfg.WebAuthnOrigins[i] != w {
+				t.Errorf("WebAuthnOrigins[%d] = %q, want %q", i, cfg.WebAuthnOrigins[i], w)
+			}
+		}
+	})
+
+	t.Run("WEBAUTHN_ORIGINSが未設定のとき空スライスを保持する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("WEBAUTHN_ORIGINS", "")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if len(cfg.WebAuthnOrigins) != 0 {
+			t.Errorf("WebAuthnOrigins = %v, want empty", cfg.WebAuthnOrigins)
+		}
+	})
+
+	t.Run("WEBAUTHN_IOS_APP_IDが設定されているとき値を採用する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("WEBAUTHN_IOS_APP_ID", "ABCD1234.com.example.feedman")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if cfg.WebAuthnIOSAppID != "ABCD1234.com.example.feedman" {
+			t.Errorf("WebAuthnIOSAppID = %q, want %q",
+				cfg.WebAuthnIOSAppID, "ABCD1234.com.example.feedman")
+		}
+	})
+
+	t.Run("WEBAUTHN_IOS_APP_IDが未設定のとき空文字を保持する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("WEBAUTHN_IOS_APP_ID", "")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert: AASA は wiring 側で fail-closed 縮退（handler 非生成 → 404）。config 層では継続。
+		if err != nil {
+			t.Fatalf("expected no error (IOS_APP_ID 未設定でも起動継続), got %v", err)
+		}
+		if cfg.WebAuthnIOSAppID != "" {
+			t.Errorf("WebAuthnIOSAppID = %q, want empty", cfg.WebAuthnIOSAppID)
+		}
+	})
+
+	t.Run("PASSKEY_CHALLENGE_TTL_SECONDSが設定されているとき値を秒単位で採用する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("PASSKEY_CHALLENGE_TTL_SECONDS", "600")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if cfg.PasskeyChallengeTTL != 600*time.Second {
+			t.Errorf("PasskeyChallengeTTL = %v, want %v",
+				cfg.PasskeyChallengeTTL, 600*time.Second)
+		}
+	})
+
+	t.Run("PASSKEY_CHALLENGE_TTL_SECONDSが未設定のとき既定値300秒を採用する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("PASSKEY_CHALLENGE_TTL_SECONDS", "")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if cfg.PasskeyChallengeTTL != 300*time.Second {
+			t.Errorf("PasskeyChallengeTTL = %v, want %v (default)",
+				cfg.PasskeyChallengeTTL, 300*time.Second)
+		}
+	})
+
+	t.Run("PASSKEY_CHALLENGE_TTL_SECONDSが不正値のとき既定値300秒にフォールバックし起動を継続する", func(t *testing.T) {
+		// Arrange
+		setRequiredEnvVars(t)
+		t.Setenv("PASSKEY_CHALLENGE_TTL_SECONDS", "not-a-number")
+
+		// Act
+		cfg, err := Load()
+
+		// Assert: getEnvInt が不正値時に Warn を出して既定値にフォールバックする既存挙動を踏襲
+		if err != nil {
+			t.Fatalf("expected no error (should continue startup with default), got %v", err)
+		}
+		if cfg.PasskeyChallengeTTL != 300*time.Second {
+			t.Errorf("PasskeyChallengeTTL = %v, want %v (default for invalid value)",
+				cfg.PasskeyChallengeTTL, 300*time.Second)
 		}
 	})
 }

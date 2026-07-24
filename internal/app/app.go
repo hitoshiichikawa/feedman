@@ -25,6 +25,7 @@ import (
 	"github.com/hitoshi/feedman/internal/logger"
 	"github.com/hitoshi/feedman/internal/metrics"
 	"github.com/hitoshi/feedman/internal/middleware"
+	"github.com/hitoshi/feedman/internal/passkey"
 	"github.com/hitoshi/feedman/internal/repository"
 	"github.com/hitoshi/feedman/internal/security"
 	"github.com/hitoshi/feedman/internal/subscription"
@@ -236,6 +237,57 @@ func runServe(cfg *config.Config) error {
 		slog.Warn("NATIVE_AUTH_JWT_SECRET is not set; POST /api/auth/token and Bearer auth are disabled")
 	}
 
+	// Passkey / AASA wiring（Issue #216）: fail-closed 縮退。
+	//   - WEBAUTHN_RP_ID と WEBAUTHN_ORIGINS の両方が設定されている場合のみ passkey handler を組む
+	//     （どちらか欠けたら Warn を 1 回出し passkeyHandler は nil のまま / NFR 2.2）。
+	//   - AASA は WEBAUTHN_IOS_APP_ID が設定されている場合のみ組む
+	//     （passkey handler の nil 判定とは独立 / Req 5.1〜5.4）。
+	//   - env が未設定なら本機能は完全に無効化され、既存挙動と等価（Req 8.1〜8.5 / NFR 2.1 / NFR 2.2）。
+	//
+	// NewGoWebAuthnAdapter は空 origins 等の library 側検証で error を返し得るため、初期化失敗時は
+	// serve 起動を中断して運用者に構成不備を早期通知する（fail-closed の一環）。
+	//
+	// PasskeyChallengeRepo と PasskeyCredentialRepo は passkey handler の依存として本ブロック内で
+	// のみ生成する。task 8（退会 tx cleanup 統合）で PasskeyCredentialRepo は env 未設定でも
+	// 常時作成が必要となるため、当該 task で本ブロック外へ再配置される予定。
+	var passkeyHandler *handler.PasskeyHandler
+	var aasaHandler *handler.AASAHandler
+	if cfg.WebAuthnRPID != "" && len(cfg.WebAuthnOrigins) > 0 {
+		passkeyCredentialRepo := repository.NewPostgresPasskeyCredentialRepo(db)
+		passkeyChallengeRepo := repository.NewPostgresPasskeyChallengeRepo(db)
+		webAuthnAdapter, err := passkey.NewGoWebAuthnAdapter(
+			cfg.WebAuthnRPID, cfg.WebAuthnRPDisplayName, cfg.WebAuthnOrigins,
+		)
+		if err != nil {
+			// NFR 1.2: RPID / origins 生値をメッセージに含めない（wrap のみ）。
+			return fmt.Errorf("failed to construct WebAuthn adapter: %w", err)
+		}
+		challengeStore := passkey.NewChallengeStore(passkeyChallengeRepo, cfg.PasskeyChallengeTTL)
+		// now=nil で time.Now を既定採用（Task 5 impl-notes 参照）。
+		registrationSvc := passkey.NewRegistrationService(
+			webAuthnAdapter, challengeStore, userRepo, passkeyCredentialRepo, nil,
+		)
+		authenticationSvc := passkey.NewAuthenticationService(
+			webAuthnAdapter, challengeStore, passkeyCredentialRepo, userRepo, authCodeRepo, nil,
+		)
+		passkeyHandler = handler.NewPasskeyHandler(registrationSvc, authenticationSvc)
+		slog.Info("passkey handlers enabled",
+			slog.String("rp_id", cfg.WebAuthnRPID),
+			slog.Int("origins", len(cfg.WebAuthnOrigins)),
+			slog.Duration("challenge_ttl", cfg.PasskeyChallengeTTL),
+		)
+	} else {
+		slog.Warn("passkey is disabled (WEBAUTHN_RP_ID or WEBAUTHN_ORIGINS not set)")
+	}
+
+	if cfg.WebAuthnIOSAppID != "" {
+		// NewAASAHandler は空文字なら nil を返す契約だが、fail-closed の意図を明示するため
+		// wiring 側でも空判定を先に行う（既存 NativeAuthHandler と同じ縮退パターン）。
+		aasaHandler = handler.NewAASAHandler(cfg.WebAuthnIOSAppID)
+	} else {
+		slog.Warn("AASA is disabled (WEBAUTHN_IOS_APP_ID not set)")
+	}
+
 	deps := &handler.RouterDeps{
 		HealthChecker:       db,
 		SessionFinder:       sessionRepo,
@@ -259,6 +311,13 @@ func runServe(cfg *config.Config) error {
 		// Native Auth (Issue #166 / #169)
 		NativeAuthHandler: nativeAuthHandler,
 		JWTVerifier:       jwtVerifier,
+
+		// Passkey / AASA (Issue #216)
+		// いずれも env 未設定時は nil のまま。router 側で個別に fail-closed 判定される
+		// （PasskeyHandler nil → /api/passkey/* 404 / AASAHandler nil →
+		// /.well-known/apple-app-site-association 404 / NFR 2.2）。
+		PasskeyHandler: passkeyHandler,
+		AASAHandler:    aasaHandler,
 
 		FeedService:         feedService,
 		SubscriptionDeleter: subDeleterAdapter,
