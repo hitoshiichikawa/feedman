@@ -468,3 +468,80 @@
   - **本 task では `_ = passkeyHandler` 等のリンター警告は出ない**: 両 handler は
     `deps.PasskeyHandler` / `deps.AASAHandler` に代入されるため未使用にならない。
     `go vet ./internal/app/...` 全 pass を確認済み。
+
+### Task 8
+
+- **採用方針**: `internal/user/service.go` に `TxPasskeyCredentialDeleter` interface を
+  既存 `TxAuthCodeDeleter` / `TxRefreshTokenDeleter` と同型で追加し、`withdrawTx` の
+  削除順序を item_states → subscriptions → sessions → **passkey_credentials** →
+  auth_codes → refresh_token_families → user に更新した（Req 7.1〜7.5）。wiring 側では
+  `passkeyCredentialRepo` を passkey handler wiring ブロックの**外側**（native auth wiring
+  と同じ階層）に引き上げ、passkey handler 用途と退会 cleanup 用途で **同一インスタンスを
+  共有** することで、env 未設定（passkey handler nil）環境でも退会 cleanup が動作する
+  形にした（NFR 2.2）。E2E 契約テスト 1 件（`internal/handler/passkey_e2e_db_test.go`）を
+  synthetic authenticator（virtualwebauthn v1.0.5）で追加し、登録 → 認証 → 既存 token
+  交換 → Bearer で保護 API 到達までの通し動線を real service / real repo で検証する（NFR 4.1）。
+- **重要な判断**:
+  - **削除順序の位置**: passkey_credentials 削除段は sessions 削除の直後・auth_codes
+    削除の直前に挿入した（tasks.md L258-259 の指示に厳密準拠）。schema 側では
+    `passkey_credentials.user_id` が `ON DELETE CASCADE` を持つため user 削除だけでも
+    行残存は防げるが、明示削除により (1) tx 内での失敗時 rollback 契約の一貫性、
+    (2) 削除順序の可視化、(3) sessions と auth_codes の間に置くことで「認証状態
+    削除段」を意味的にまとめる、の 3 点を担保した。
+  - **`passkeyCredentialRepo` の常時作成への引き上げ**: task 7 impl-notes の申し送りに従い、
+    `repository.NewPostgresPasskeyCredentialRepo(db)` を passkey wiring ブロックの
+    **外側**（`refreshTokenRepo` の直後、native auth wiring と同階層）に引き上げ、
+    passkey wiring ブロック内の再宣言を除去した。これにより env 未設定（passkey handler
+    は nil）でも同じインスタンスが `newTxUserService` に渡り、退会 cleanup 段が有効に
+    動作する（NFR 2.2 と Req 7.2 の両立）。
+  - **nil ガードの二重防衛**: `NewServiceWithTx` の `passkeyCredentialDeleter` パラメータと
+    `newTxUserService` の `passkeyCredentialRepo` 引数の両方で nil を受け入れる形にした。
+    運用上は wiring 経由で常に非 nil を注入するが、`user.Service` 層の単体テストや将来
+    passkey 機能を運用停止する経路のために nil-safe を保つ。typed-nil を避けるため、
+    wiring 側で `if passkeyCredentialRepo != nil` を判定して interface に nil を渡す
+    形にしている（既存 `jwtVerifier` の typed-nil 回避パターンと同型）。
+  - **E2E テストの構成判断**: passkey handler と native auth handler を同一 router に
+    載せて 1 動線を通す形とした（`newPasskeyE2ERouter`）。fake OAuth provider 経由の
+    既存 `TestE2E_NativeAuthFullFlow_DBBacked` と対照的に、passkey は自己完結で
+    ユーザーを作成 → 認証 → auth_code を得る → 既存 token 交換に合流という
+    Req 2.4 の合流形態そのものを検証する。virtualwebauthn の cred.Counter を認証前に
+    `++` して stored SignCount より進めることで CloneWarning 判定を回避する
+    （task 3 の webauthn_adapter_test.go と同じパターン）。
+  - **既存テスト更新の粒度**: `internal/user/service_test.go` の既存 12 テスト
+    （newTxService callsite）はシグネチャ変更に追随するため 1 引数追加のみ行い、
+    テスト意図・アサーション本体には触れていない（NFR 1.1 / 2.1 の後方互換保持）。
+    `TestService_Withdraw_Tx_CommitsOnSuccess` のみ「passkey_credentials を含む
+    新順序を検証する」意図追加のため expected order を更新した。
+  - **DB 結合テストの拡張**: `postgres_withdraw_integration_db_test.go` に
+    `TestWithdrawIntegration_PasskeyCredentialCleanup`（退会後 0 件 / 他 user 影響なし
+    = Req 7.1, 7.4）と `TestWithdrawIntegration_UsernameReusableAfterWithdraw`
+    （username_normalized の UNIQUE 制約解放 = Req 7.5）を追加。既存の
+    `TestWithdrawIntegration_NativeAuthCleanup` の setup helper（
+    `seedNativeAuthDataForWithdraw` / `insertTestUserForWithdraw` / `countByUserID`）
+    を再利用し、新規 `seedPasskeyCredentialForWithdraw` のみ追加した。
+  - **既存契約 regression 検証**: `docs/specs/172-native-auth-contract-tests/contract-notes.md`
+    は本 task で一切書き換えていない。`go test ./...` 全 pass を確認済み。
+    `TestContract_*` / `TestE2E_NativeAuthFullFlow_DBBacked` は既存挙動のまま動作する
+    （NFR 2.3）。
+  - **検証コマンド結果**: `gofmt -l internal/user/ internal/app/ internal/repository/
+    internal/handler/passkey_e2e_db_test.go` clean、`go vet ./...` clean、`go build ./...`
+    OK、`go test ./...` 全 package pass（DB 依存テストは本環境で PostgreSQL 未起動のため
+    skip 経路。CI では実行される想定）。
+- **残存課題**:
+  - **umbrella Issue の cleanup 申し送り**: 本 task 完了により Issue #216 の全 8 task が
+    完了し、パスキー + ユーザー名の自社認証（サーバ側）実装は一段落する。iOS クライアント
+    側の実装、Sign in with Apple、パスワード認証、Web フロントの UI 等は本 spec の
+    Out of Scope（requirements.md L242-256）に列挙済みで、必要に応じて別 Issue で
+    起票する。
+  - **既存 gofmt 違反 11 件（task 1 impl-notes 確認事項）**: 本 task 導入前から
+    `develop` 由来で残っている `internal/crossfeed/service_test.go` 等 11 ファイルの
+    gofmt 違反は本 task では触れていない。tasks.md Verify ブロックの
+    `gofmt -l internal/ | (! grep .)` は本違反により fail 状態のままだが、boundary 外の
+    修正は行わなかった。cleanup Issue 起票判断は人間運用者に委ねる。
+  - **DB 結合テスト（本 spec 追加分）の実行環境**: 追加した 2 test（
+    `TestWithdrawIntegration_PasskeyCredentialCleanup` /
+    `TestWithdrawIntegration_UsernameReusableAfterWithdraw`）と E2E テスト
+    `TestE2E_PasskeyFullFlow_DBBacked` は `TEST_DATABASE_URL` の PostgreSQL 接続を
+    前提とする。本ローカル環境では PostgreSQL 未起動のため実行時 skip 経路を通り、
+    実 DB での動作確認は CI（postgres service container 上）で行う。既存流儀に
+    整合しており、単体テスト・DB 非依存テストは全 pass を確認済み。
