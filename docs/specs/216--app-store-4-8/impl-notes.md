@@ -37,6 +37,24 @@
   紐付ける設計を tasks.md L135-152 が担うため、新規登録から auth_code 発行までの一連の
   合流は認証フロー側で完結する（新規登録 finish 直後に別途 `/api/passkey/authentication/*`
   を叩く前提）。design/tasks 上の軽微な不整合であり実装は tasks.md に従った。
+- **task 5 の BeginAuthentication codeChallenge 引数（design.md L655-656 と tasks.md L135 の差分 / 実装判断）**:
+  design.md L655-656 の Go シグネチャは `BeginAuthentication(ctx context.Context) (challengeID
+  string, options []byte, err error)` で codeChallenge 引数を持たないが、tasks.md L135-139 は
+  「既存 `auth.ValidatePKCES256(codeChallenge, "S256")` を呼び validation → ... session_data には
+  codeChallenge を含める」ことを求めており、同 design.md L674 以降の「設計判断: PKCE 相互作用と
+  合流方式」節（採用案）は begin リクエストで `code_challenge` を受け取り challenge に紐付けて
+  保存する契約を確定している。task 4 の `BeginRegistrationNew` で tasks.md 優先の判断
+  （codeChallenge 引数を追加）を採用したのと **同じ判断**を踏襲し、`BeginAuthentication` に
+  `codeChallenge string` 引数を追加した。
+- **task 5 の authentication kind session_data 封筒化（実装判断）**: `model.PasskeyChallenge`
+  （task 1 で確定・変更不可）は PKCE 用フィールドを持たず、`SessionData` は go-webauthn.SessionData
+  の JSON marshaled バイト列という契約になっている。PKCE codeChallenge を finish 段階まで運ぶ
+  経路が他に無いため、authentication kind の SessionData のみを `authnSession` 封筒
+  （`{"webauthn_session": <inner>, "code_challenge": <pkce>}`）で包む方式を採用した。
+  ChallengeStore はバイト列を opaque に扱うため封筒でも意味的な差分は生じず、inner の webauthn
+  session はそのまま無改変で FinishLogin に渡せる。registration kind の SessionData は task 4 で
+  素の go-webauthn.SessionData として保存しており、本 task の封筒化は authentication kind のみに
+  局所化される（互換性影響なし / NFR 2.1）。
 - **design.md File Structure Plan の表記ゆれ（実装は tasks.md に準拠）**: design.md L254 の
   ディレクトリ tree では passkey ドメイン型を `internal/passkey/model.go` と記載しているが、
   同 design.md の Modified Files（L267）・コード内コメント（L390 / L413 の
@@ -227,3 +245,67 @@
     `displayNameFor(u)`（Username → Name → Email → users.id の順で fallback）で確定。
     task 5 の WebAuthnUser 組み立ても同 helper を再利用するか、独自の short helper を
     切るかは task 5 の判断。表示名は認証判定には関わらないため、非空であればよい。
+
+### Task 5
+
+- **採用方針**: `internal/passkey/authentication_service.go` に `AuthenticationService` を追加
+  し、`BeginAuthentication(ctx, codeChallenge)` / `FinishAuthentication(ctx, requestBody,
+  challengeID)` の 2 メソッドで discoverable ログイン ceremony を担う。成功時は既存 native auth
+  の `GenerateAuthCode` / `HashNativeSecret` / `NativeAuthCodeTTL` / `AuthCodeCreator` を流用して
+  auth_code を発行し、既存 token 交換 endpoint に合流する（NFR 2.1）。依存はすべて最小
+  interface（`WebAuthnAdapter` 既存 / `challengeStore` 既存 unexported / `PasskeyCredentialReader`
+  新規 2 メソッド / `UserReader` 新規 1 メソッド / `auth.AuthCodeCreator` 既存流用）で受ける
+  （CLAUDE.md §5）。テストは全依存 stub 化の table-driven 15 subtests。
+- **重要な判断**:
+  - **PKCE 継承のための authnSession 封筒方式**: `model.PasskeyChallenge` と `WebAuthnAdapter` は
+    task 1〜3 で確定・変更不可のため、authentication kind の `SessionData` のみを
+    `{"webauthn_session": <inner bytes>, "code_challenge": <pkce>}` の JSON 封筒で包む方式を
+    採用（上記「確認事項」参照）。inner の webauthn.SessionData はそのまま無改変で `FinishLogin`
+    に渡せ、`ChallengeStore` はバイト列を opaque に扱うため契約破壊なし。registration kind
+    （task 4）は素の SessionData を保存しており本封筒化は authentication kind に局所化される。
+  - **`generateAuthCode` → `GenerateAuthCode` の rename**: passkey パッケージから参照するため
+    exported にした（tasks.md L159-160）。既存 usage は `HandleNativeCallback` の 1 箇所のみで、
+    実装内容・生成規則は不変（NFR 2.1）。auth.GenerateAuthCode / HashNativeSecret /
+    NativeAuthCodeTTL / AuthCodeCreator を流用することで、パスキー由来 auth_code は既存
+    `POST /api/auth/token` で無変更に受理される（Req 2.4 の合流を達成）。
+  - **authnUser の SignCount 反映（NFR 1.4）**: credentialLookup が組み立てる WebAuthnUser の
+    `WebAuthnCredentials()` に `webauthn.Credential{ Authenticator: webauthn.Authenticator{
+    SignCount: cred.SignCount } }` を含める必要がある。これは task 4 の `registrationUser` が
+    creds に SignCount を詰めていない（登録段階では counter が未確定）のと対照的で、library の
+    `ValidateDiscoverableLogin` が assertion Counter と stored SignCount を比較して CloneWarning
+    を判定するため authentication では必須。authentication 専用の `authnUser` 型を別途用意し、
+    display name は既存 `displayNameFor` helper を再利用した。
+  - **credentialLookup 内で解決した credential をキャプチャ**: `FinishLogin` 成功後に
+    `UpdateSignCount(ctx, cred.ID, updatedSignCount, s.now())` を呼ぶ必要があるため、lookup
+    クロージャで解決した `*model.PasskeyCredential` を外側変数にキャプチャする（adapter 側の
+    resolvedUser キャプチャと同型パターン）。cred.ID（PK / UUID）を UpdateSignCount の対象に
+    することで cred.CredentialID（raw bytes）に依存しない更新経路が組める。
+  - **拒否の uniform 化と infra エラーの区別**: PKCE 検証失敗 / challenge 期限切れ / credential
+    未検出 / user 未検出 / assertion 不正 / counter 後退はすべて `ErrAuthenticationFailed` に
+    uniform 化（Req 2.5 / 2.6）。一方、ChallengeStore.Consume の DB 障害 / adapter.BeginLogin の
+    library 内部エラー / AuthCodeCreator.Create の DB 障害 / UpdateSignCount の infra エラーは
+    `fmt.Errorf("...: %w", err)` で wrap して伝播（handler で 500）。テストで `errors.Is` に
+    よる区別を担保した。
+  - **ログ衛生（NFR 1.2 / 3.2）**: 拒否ログは `slog.Warn` + `challenge_id_prefix`（`shortID` の
+    先頭 8 文字。registration_service.go の package-level helper を再利用）のみ。成功ログは
+    `slog.Info` + `user_id` + `auth_code_hash` 先頭 8 文字（既存 `HandleNativeCallback` と同流儀）。
+    平文 assertion / requestBody / challenge / auth_code は一切ログに出さない。
+- **残存課題（task 6 への申し送り）**:
+  - **HTTP handler 側の endpoint 命名**: task 6 では `POST /api/passkey/authentication/begin`
+    が JSON body に `code_challenge`（S256 base64url 43 文字）を要求する契約になる。
+    `PasskeyHandler` は `dec.DisallowUnknownFields()`（既存 NativeAuthHandler 流儀）で
+    受け取り `AuthenticationService.BeginAuthentication(ctx, codeChallenge)` に渡す。
+    `POST /api/passkey/authentication/finish` は `challenge_id` と `assertion_body` を受け
+    取って `FinishAuthentication(ctx, requestBody, challengeID)` を呼ぶ設計（引数順は
+    design.md L669-671 に合わせて `(ctx, requestBody, challengeID)`）。
+  - **エラーマッピング**: `ErrAuthenticationFailed` → 400 `AUTHENTICATION_FAILED`
+    （tasks.md L176）。infra エラー wrap（`%w`）は handler 側で 500 `INTERNAL_ERROR`。
+    APIError 生成関数は `model.NewAuthenticationFailedError` を task 6 で追加する。
+  - **PKCE の共有点**: `model.AuthCode.PKCEChallenge` は既存 native auth と同じフィールド。
+    既存 `POST /api/auth/token` の `VerifyPKCES256Verifier(codeVerifier, stored.PKCEChallenge)`
+    が無変更でパスキー由来 auth_code の PKCE 検証に使える（Req 2.4 完全合流 / NFR 2.3）。
+    iOS クライアントは begin 時に生成した `code_verifier` を token 交換時に送信するだけで良い。
+  - **wiring（task 7 への申し送り）**: `passkey.NewAuthenticationService(webAuthnAdapter,
+    challengeStore, passkeyCredentialRepo, userRepo, authCodeRepo, nil)` の順で組み、
+    `authCodeRepo` は既存 native auth の wiring と共用する（tasks.md L237-238）。now=nil で
+    time.Now が既定採用される。
