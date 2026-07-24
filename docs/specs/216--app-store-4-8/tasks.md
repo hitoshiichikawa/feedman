@@ -27,7 +27,7 @@
   - _Requirements: 1.4, 1.5, 4.1, 4.2, 4.5, NFR 1.1, NFR 2.1_
   - _Boundary: MigrationSchema, PasskeyModel, UsernameValidator_
 
-- [ ] 2. Repository 層の追加（credential / challenge / users 拡張）
+- [x] 2. Repository 層の追加（credential / challenge / users 拡張）
   - `internal/repository/interfaces.go` に以下を追加
     - `PasskeyCredentialRepository` interface（Create / FindByCredentialID / ListByUserID /
       UpdateSignCount / DeleteByUserID / DeleteByUserIDExec）
