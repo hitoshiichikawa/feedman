@@ -40,6 +40,12 @@ const (
 	ErrCodeInvalidSearchQuery   = "INVALID_SEARCH_QUERY"
 	ErrCodeFeedNotSubscribed    = "FEED_NOT_SUBSCRIBED"
 	ErrCodeFeedHTTPError        = "FEED_HTTP_ERROR"
+	// Issue #216: パスキー登録・認証で使用する固定エラーコード群。
+	// 拒否メッセージにクライアント入力値・内部詳細を反射しない（NFR 1.3）。
+	ErrCodeInvalidUsername      = "INVALID_USERNAME"
+	ErrCodeUsernameTaken        = "USERNAME_TAKEN"
+	ErrCodeRegistrationFailed   = "REGISTRATION_FAILED"
+	ErrCodeAuthenticationFailed = "AUTHENTICATION_FAILED"
 )
 
 // NewItemNotFoundError は記事未検出エラーを生成する。
@@ -219,6 +225,63 @@ func NewFeedNotSubscribedError(feedID string) *APIError {
 		Message:  fmt.Sprintf("指定されたフィードを購読していません: %s", feedID),
 		Category: "authorization",
 		Action:   "購読中のフィードを指定するか、横断検索を利用してください。",
+	}
+}
+
+// NewInvalidUsernameError はパスキー登録要求のユーザー名形式が不正な場合のエラーを
+// 生成する（Issue #216 / Req 1.5）。HTTP 400 にマップされる。
+//
+// クライアントの入力値（生 username）は反射しない（NFR 1.3）。message / action は
+// 固定文言で、内部詳細（許容文字集合の詳細・長さ判定の内訳）も返さない。
+func NewInvalidUsernameError() *APIError {
+	return &APIError{
+		Code:     ErrCodeInvalidUsername,
+		Message:  "ユーザー名の形式が不正です。",
+		Category: "validation",
+		Action:   "ユーザー名は 3〜32 文字の半角英数字・アンダースコア・ハイフンのみで指定してください。",
+	}
+}
+
+// NewUsernameTakenError はパスキー登録要求のユーザー名が既存ユーザーと重複した場合の
+// エラーを生成する（Issue #216 / Req 1.4）。HTTP 409 にマップされる。
+//
+// 「重複した」という事実自体はクライアントが判別できる必要がある（Req 1.4）ため
+// この APIError は他の登録拒否（uniform 化された REGISTRATION_FAILED）と区別する。
+// 具体的な重複相手や既存 user の存在有無は返さない（NFR 1.3）。
+func NewUsernameTakenError() *APIError {
+	return &APIError{
+		Code:     ErrCodeUsernameTaken,
+		Message:  "指定されたユーザー名は既に使用されています。",
+		Category: "validation",
+		Action:   "別のユーザー名を指定してください。",
+	}
+}
+
+// NewRegistrationFailedError はパスキー登録・追加登録の拒否事象を uniform 化した
+// エラーを生成する（Issue #216 / Req 1.7 / 3.6 / 3.7）。HTTP 400 にマップされる。
+//
+// attestation 検証失敗・challenge 期限切れ・credential 重複などの拒否理由を
+// 区別しない固定メッセージを返す（Req 3.6 の存在有無非開示にも整合）。
+func NewRegistrationFailedError() *APIError {
+	return &APIError{
+		Code:     ErrCodeRegistrationFailed,
+		Message:  "パスキー登録を完了できませんでした。",
+		Category: "auth",
+		Action:   "しばらく待ってから再度お試しください。",
+	}
+}
+
+// NewAuthenticationFailedError はパスキー認証の拒否事象を uniform 化した
+// エラーを生成する（Issue #216 / Req 2.5 / 2.6 / NFR 1.4）。HTTP 400 にマップされる。
+//
+// user / credential / challenge のいずれで拒否したかを区別できる情報を返さない
+// （Req 2.6 の存在有無非開示）。counter 後退（NFR 1.4）も同じ APIError に合流する。
+func NewAuthenticationFailedError() *APIError {
+	return &APIError{
+		Code:     ErrCodeAuthenticationFailed,
+		Message:  "パスキー認証に失敗しました。",
+		Category: "auth",
+		Action:   "パスキーを選び直すか、しばらく待ってから再度お試しください。",
 	}
 }
 
