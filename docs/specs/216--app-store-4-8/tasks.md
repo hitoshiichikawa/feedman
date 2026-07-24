@@ -248,7 +248,7 @@
   - _Boundary: Config, AppWiring_
   - _Depends: 6_
 
-- [ ] 8. 退会 tx cleanup 統合と既存契約 regression 検証
+- [x] 8. 退会 tx cleanup 統合と既存契約 regression 検証
   - `internal/user/service.go` を拡張:
     - `TxPasskeyCredentialDeleter` interface を追加（`DeleteByUserIDTx(ctx, tx, userID) error`）
     - `Service.txPasskeyCredentialDeleter TxPasskeyCredentialDeleter` フィールドを追加
