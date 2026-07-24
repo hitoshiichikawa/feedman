@@ -2,9 +2,12 @@ package passkey
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/go-webauthn/webauthn/webauthn"
 
 	"github.com/hitoshi/feedman/internal/model"
 	"github.com/hitoshi/feedman/internal/repository"
@@ -237,17 +240,17 @@ func TestRegistrationService_BeginRegistrationNew(t *testing.T) {
 		if challenges.lastIssueKind != model.PasskeyChallengeKindRegistrationNew {
 			t.Errorf("Issue kind = %q, want registration_new", challenges.lastIssueKind)
 		}
-		if challenges.lastIssueUser == nil || *challenges.lastIssueUser == "" {
-			t.Errorf("Issue userID must be a non-empty pending UUID, got %v", challenges.lastIssueUser)
+		if challenges.lastIssueUser != nil {
+			t.Errorf("Issue userID must be nil for registration_new (user_id は users FK), got %v",
+				*challenges.lastIssueUser)
 		}
 		if challenges.lastIssuePend == nil || *challenges.lastIssuePend != "alice" {
 			t.Errorf("Issue pendingUsername = %v, want &alice", challenges.lastIssuePend)
 		}
-		// 仮 UUID の byte 列と WebAuthnUser.WebAuthnID が一致することを検証
-		// （task 5 credentialLookup 整合性の担保）。
-		if string(adapter.lastUserID) != *challenges.lastIssueUser {
-			t.Errorf("WebAuthnID bytes = %q, want %q (pending UUID)",
-				string(adapter.lastUserID), *challenges.lastIssueUser)
+		// 仮 UUID（WebAuthn user handle）が発行されていることを検証
+		// （sessionData 経由で Finish に引き継がれる / task 5 credentialLookup 整合性の担保）。
+		if len(adapter.lastUserID) == 0 {
+			t.Errorf("WebAuthnID must be a non-empty pending UUID, got empty")
 		}
 	})
 
@@ -370,19 +373,24 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 	pendingUserID := "pending-uuid-123"
 	pendingUsername := "alice"
 
+	// begin 時の仮 UUID は challenge.user_id 列ではなく sessionData
+	// （webauthn.SessionData.UserID）に保存される契約（BeginRegistrationNew 参照）。
+	sessionJSON, err := json.Marshal(webauthn.SessionData{UserID: []byte(pendingUserID)})
+	if err != nil {
+		t.Fatalf("marshal session fixture: %v", err)
+	}
+
 	newConsumedFn := func() func(ctx context.Context, challengeID string,
 		expectedKind model.PasskeyChallengeKind) (*model.PasskeyChallenge, error) {
 		return func(ctx context.Context, challengeID string,
 			expectedKind model.PasskeyChallengeKind,
 		) (*model.PasskeyChallenge, error) {
-			uid := pendingUserID
 			pend := pendingUsername
 			return &model.PasskeyChallenge{
 				ID:              challengeID,
 				Kind:            expectedKind,
-				UserID:          &uid,
 				PendingUsername: &pend,
-				SessionData:     []byte(`{"session":"stub"}`),
+				SessionData:     sessionJSON,
 			}, nil
 		}
 	}
@@ -513,7 +521,7 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		}
 	})
 
-	t.Run("challenge に UserID / PendingUsername が nil の場合は ErrRegistrationFailed", func(t *testing.T) {
+	t.Run("challenge の PendingUsername が nil の場合は ErrRegistrationFailed", func(t *testing.T) {
 		// Arrange
 		svc, _, challenges, _, _ := newRegistrationServiceFixture(t)
 		challenges.consumeFn = func(ctx context.Context, challengeID string,
@@ -522,8 +530,8 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 			return &model.PasskeyChallenge{
 				ID:          challengeID,
 				Kind:        expectedKind,
-				SessionData: []byte(`{}`),
-				// UserID / PendingUsername = nil (契約違反シミュレート)
+				SessionData: sessionJSON,
+				// PendingUsername = nil (契約違反シミュレート)
 			}, nil
 		}
 
@@ -533,6 +541,33 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		// Assert
 		if !errors.Is(err, ErrRegistrationFailed) {
 			t.Fatalf("expected ErrRegistrationFailed on malformed challenge, got %v", err)
+		}
+	})
+
+	t.Run("sessionData に user handle (仮 UUID) が無い場合は ErrRegistrationFailed", func(t *testing.T) {
+		// Arrange
+		svc, _, challenges, users, creds := newRegistrationServiceFixture(t)
+		challenges.consumeFn = func(ctx context.Context, challengeID string,
+			expectedKind model.PasskeyChallengeKind,
+		) (*model.PasskeyChallenge, error) {
+			pend := pendingUsername
+			return &model.PasskeyChallenge{
+				ID:              challengeID,
+				Kind:            expectedKind,
+				PendingUsername: &pend,
+				SessionData:     []byte(`{}`), // user_id 欠落 (契約違反シミュレート)
+			}, nil
+		}
+
+		// Act
+		_, err := svc.FinishRegistrationNew(ctx, "id", []byte("body"))
+
+		// Assert
+		if !errors.Is(err, ErrRegistrationFailed) {
+			t.Fatalf("expected ErrRegistrationFailed on malformed session, got %v", err)
+		}
+		if users.createUserOnlyCalled != 0 || creds.createCalled != 0 {
+			t.Errorf("no writes should occur on malformed session")
 		}
 	})
 }

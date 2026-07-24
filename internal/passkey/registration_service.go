@@ -132,11 +132,13 @@ func (u *registrationUser) WebAuthnCredentials() []webauthn.Credential { return 
 //     WebAuthn ceremony を起動しないよう防衛する。
 //  4. 仮 UUID を発行し WebAuthnUser を組み立て、WebAuthnAdapter.BeginRegistration で
 //     challenge / options / sessionData を生成
-//  5. ChallengeStore.Issue(kind=registration_new, userID=&仮UUID, pendingUsername=&normalized)
+//  5. ChallengeStore.Issue(kind=registration_new, userID=nil, pendingUsername=&normalized)
 //     として challenge を発行
 //
-// 仮 UUID は Finish 時に users.id として確定される（Finish 時にも同じ WebAuthnID を
-// 再構築する必要があるため、challenge.UserID に保存する）。task 5 の credentialLookup が
+// 仮 UUID は Finish 時に users.id として確定される。passkey_challenges.user_id は
+// users への FK のため、この時点で未作成の仮 UUID を渡すことはできない（userID=nil）。
+// 仮 UUID は sessionData（webauthn.SessionData.UserID = user handle）として保存され、
+// Finish 時はそこから復元して同じ WebAuthnID を再構築する。task 5 の credentialLookup が
 // [](byte)(users.id) を WebAuthnID として使う設計と整合する。
 //
 // 拒否の伝播:
@@ -189,7 +191,7 @@ func (s *RegistrationService) BeginRegistrationNew(
 	challengeID, err := s.challenges.Issue(
 		ctx,
 		model.PasskeyChallengeKindRegistrationNew,
-		&pendingUserID,
+		nil, // user_id は users FK のため、未作成 user の仮 UUID は渡せない（sessionData 経由で運ぶ）
 		&pending,
 		sessionData,
 		rawChallenge,
@@ -209,8 +211,8 @@ func (s *RegistrationService) BeginRegistrationNew(
 // 処理フロー:
 //  1. ChallengeStore.Consume(kind=registration_new) → 期限切れ / 二重消費 /
 //     kind 不一致は ErrRegistrationFailed に正規化（Req 1.7）
-//  2. 復元した challenge.UserID（仮 UUID）と challenge.PendingUsername（normalized）で
-//     WebAuthnUser を再構築
+//  2. challenge.SessionData（webauthn.SessionData.UserID = begin 時の仮 UUID）と
+//     challenge.PendingUsername（normalized）で WebAuthnUser を再構築
 //  3. WebAuthnAdapter.FinishRegistration で ParsedCredential を得る
 //     （拒否は ErrRegistrationFailed に正規化）
 //  4. CreateUserOnly で users 行を INSERT（仮 UUID を users.id として確定）。
@@ -237,14 +239,22 @@ func (s *RegistrationService) FinishRegistrationNew(
 		}
 		return "", fmt.Errorf("failed to consume registration challenge: %w", err)
 	}
-	if ch.UserID == nil || ch.PendingUsername == nil {
-		// begin 段階で仮 UUID と pendingUsername を必ず両方保存する契約
-		// （BeginRegistrationNew）。missing は自陣契約違反だが uniform 拒否側に倒す。
+	if ch.PendingUsername == nil {
+		// begin 段階で pendingUsername を必ず保存する契約（BeginRegistrationNew）。
+		// missing は自陣契約違反だが uniform 拒否側に倒す。
 		s.logRejection("passkey registration finish (new) rejected: malformed challenge",
 			shortID(challengeID))
 		return "", ErrRegistrationFailed
 	}
-	pendingUserID := *ch.UserID
+	// 仮 UUID（begin 時の WebAuthn user handle）は challenge.user_id 列ではなく
+	// sessionData に保存されている（user_id は users FK のため未作成 user を指せない）。
+	session, err := unmarshalSession(ch.SessionData)
+	if err != nil || len(session.UserID) == 0 {
+		s.logRejection("passkey registration finish (new) rejected: malformed challenge",
+			shortID(challengeID))
+		return "", ErrRegistrationFailed
+	}
+	pendingUserID := string(session.UserID)
 	normalized := *ch.PendingUsername
 
 	user := &registrationUser{
