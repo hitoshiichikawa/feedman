@@ -22,6 +22,24 @@ var ErrAuthCodeNotUsable = errors.New("auth_code is not usable")
 // メッセージには token_hash や user_id 等の機密値を含めない（NFR 1.2）。
 var ErrRefreshTokenAlreadyRotated = errors.New("refresh_token already rotated")
 
+// ErrChallengeNotUsable は PasskeyChallengeRepository.MarkConsumed の対象 challenge が
+// 見つからない・二重消費・期限切れのいずれかで、消費確定を成功させられないことを示す
+// sentinel error（Issue #216 / Req 4.3 / 4.4）。
+// メッセージには challenge_hash や user_id 等の機密値を含めない（NFR 1.2）。
+var ErrChallengeNotUsable = errors.New("passkey challenge is not usable")
+
+// ErrCredentialAlreadyRegistered は PasskeyCredentialRepository.Create が
+// credential_id UNIQUE 制約違反により保存を失敗したことを示す sentinel error
+// （Issue #216 / Req 3.6 / 1.7）。上位レイヤは Req 3.6 の防衛線として
+// ErrRegistrationFailed に正規化する。メッセージには credential_id や user_id 等の
+// 機密値を含めない（NFR 1.2）。
+var ErrCredentialAlreadyRegistered = errors.New("passkey credential already registered")
+
+// ErrUsernameTaken は UserRepository.CreateUserOnly が username_normalized UNIQUE
+// 制約違反により保存を失敗したことを示す sentinel error（Issue #216 / Req 1.4）。
+// メッセージには username 等の入力値を含めない（NFR 1.2）。
+var ErrUsernameTaken = errors.New("username already taken")
+
 // UserRepository はユーザーデータの永続化インターフェース。
 type UserRepository interface {
 	// FindByID は指定IDのユーザーを取得する。見つからない場合はnilを返す。
@@ -33,6 +51,88 @@ type UserRepository interface {
 	// DeleteByID は指定IDのユーザーを削除する。
 	// 関連するidentities、user_settingsはCASCADE削除される。
 	DeleteByID(ctx context.Context, id string) error
+
+	// FindByNormalizedUsername は正規化済みユーザー名（lowercase）でユーザーを検索する
+	// （Issue #216 / Req 1.4）。見つからない場合は (nil, nil) を返す。
+	// 呼び出し側は非空 normalized のみを渡す前提（DB 側の部分 UNIQUE INDEX は
+	// username_normalized IS NOT NULL を対象にしており、NULL 同士は衝突しない）。
+	FindByNormalizedUsername(ctx context.Context, normalized string) (*model.User, error)
+
+	// CreateUserOnly は identity を持たないユーザー（パスキー新規登録ユーザー）の
+	// users 行のみを INSERT する（Issue #216 / Req 1.2 / 1.6）。
+	// username_normalized の UNIQUE 制約違反時は ErrUsernameTaken を返す（Req 1.4）。
+	// email 空文字を許容し、リカバリ用メールなしのユーザー作成に対応する（Req 1.6）。
+	CreateUserOnly(ctx context.Context, u *model.User) error
+}
+
+// PasskeyCredentialRepository はパスキー credential（公開鍵・credential_id・
+// sign counter 等）の永続化インターフェース（Issue #216 / Req 1.2 / 3.2 / 3.4 / 3.6 /
+// 7.1〜7.5 / NFR 1.1）。
+//
+// 保存対象は検証に必要な情報のみ（NFR 1.1）で、パスキー本体の秘密情報は保持しない。
+// エラーメッセージには credential_id や public_key 等の機密値を含めない（NFR 1.2）。
+type PasskeyCredentialRepository interface {
+	// Create は credential を新規保存する（Req 1.2 / 3.2）。
+	// credential_id の UNIQUE 制約違反時は ErrCredentialAlreadyRegistered を返す
+	// （Req 3.6 の防衛線）。
+	Create(ctx context.Context, c *model.PasskeyCredential) error
+
+	// FindByCredentialID は credential_id で credential を検索する（Req 2.2 / 3.6）。
+	// 見つからない場合は (nil, nil) を返す。
+	FindByCredentialID(ctx context.Context, credentialID []byte) (*model.PasskeyCredential, error)
+
+	// ListByUserID は当該 user に紐付く全 credential を返す（Req 3.4 / 3.1 の excludeCredentials 用途）。
+	// 存在しない場合は空スライスを返す。
+	ListByUserID(ctx context.Context, userID string) ([]*model.PasskeyCredential, error)
+
+	// UpdateSignCount は当該 credential の sign_count と last_used_at を更新する
+	// （Req 2.2 / NFR 1.4 の counter 記録用途）。
+	UpdateSignCount(ctx context.Context, id string, signCount uint32, lastUsedAt time.Time) error
+
+	// DeleteByUserID は当該ユーザーに紐付く全 passkey_credentials を削除する
+	// （Issue #216 / Req 7.1 / 7.4）。対象 0 件でも成功する（冪等）。
+	DeleteByUserID(ctx context.Context, userID string) error
+
+	// DeleteByUserIDExec は指定の DBTX（*sql.DB または共有トランザクション）上で
+	// 当該ユーザーに紐付く全 passkey_credentials を削除する（Req 7.2 / 7.3）。
+	// 退会 tx（user.Service.withdrawTx）に統合するための共有 tx 対応版
+	// （PostgresAuthCodeRepo.DeleteByUserIDExec / PostgresSessionRepo.DeleteByUserIDExec と同型）。
+	DeleteByUserIDExec(ctx context.Context, q DBTX, userID string) error
+}
+
+// PasskeyChallengeRepository はパスキー challenge の永続化インターフェース
+// （Issue #216 / Req 4.1 / 4.2 / 4.3 / 4.4）。
+//
+// 生 challenge 値は保存せず、SHA-256 hex（challenge_hash）のみを保持する（NFR 1.2）。
+// MarkConsumed は UPDATE の atomic 判定により単回利用を保証する（Req 4.3）。
+type PasskeyChallengeRepository interface {
+	// Create は challenge を新規保存する（Req 4.1 / 4.2）。
+	// ch.ChallengeHash / ch.Kind / ch.SessionData / ch.ExpiresAt は呼び出し側で
+	// 確定済みであること。ch.ID が空文字 / ch.CreatedAt が zero-value の場合は
+	// DB 側デフォルト（gen_random_uuid() / now()）を採用する。
+	Create(ctx context.Context, ch *model.PasskeyChallenge) error
+
+	// FindByHash は challenge_hash に一致するレコードを 1 件返す。
+	// 見つからない場合は (nil, nil) を返す（既存 FindByHash パターンに整合）。
+	FindByHash(ctx context.Context, hash string) (*model.PasskeyChallenge, error)
+
+	// FindByID は id（PK / opaque challenge_id）でレコードを 1 件返す。
+	// 見つからない場合は (nil, nil) を返す。ChallengeStore.Consume が client の
+	// 提示する opaque challenge_id から challenge を逆引きするために用いる
+	// （tasks.md task 3 スコープ調整）。
+	FindByID(ctx context.Context, id string) (*model.PasskeyChallenge, error)
+
+	// MarkConsumed は当該 ID の challenge を consumed = true に遷移させる（Req 4.3）。
+	//
+	// レコードが以下のいずれかに該当する場合は ErrChallengeNotUsable を返し、
+	// 永続化状態は変更しない（Req 4.4）:
+	//   - 既に consumed = true（二重消費）
+	//   - expires_at <= now()（期限切れ）
+	//   - id に一致するレコードが存在しない
+	//
+	// UPDATE 文の WHERE 句で consumed / expires_at をまとめて判定することで、
+	// 並行アクセス下でも race を起こさず単回利用を保証する（PostgresAuthCodeRepo.MarkUsed と同流儀）。
+	MarkConsumed(ctx context.Context, id string) error
 }
 
 // IdentityRepository は外部IdP紐付け情報の永続化インターフェース。

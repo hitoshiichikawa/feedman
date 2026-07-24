@@ -3,10 +3,17 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/hitoshi/feedman/internal/model"
+	"github.com/lib/pq"
 )
+
+// pgErrCodeUniqueViolation は PostgreSQL の unique_violation エラーコード。
+// UNIQUE 制約違反（passkey 用の username_normalized 部分 UNIQUE INDEX 等）を
+// pq.Error.Code で識別するために用いる（Issue #216 / Req 1.4）。
+const pgErrCodeUniqueViolation = "23505"
 
 // PostgresUserRepo はPostgreSQLを使用したユーザーリポジトリ。
 type PostgresUserRepo struct {
@@ -19,12 +26,22 @@ func NewPostgresUserRepo(db *sql.DB) *PostgresUserRepo {
 }
 
 // FindByID は指定IDのユーザーを取得する。見つからない場合はnilを返す。
+//
+// Issue #216 で追加された username / username_normalized カラムも scan する。
+// 未設定（Google 由来ユーザー）の場合は NULL であるため sql.NullString で受け、
+// nil の場合は空文字にマップして既存挙動と互換性を保つ（NFR 2.1 / 2.2）。
 func (r *PostgresUserRepo) FindByID(ctx context.Context, id string) (*model.User, error) {
 	user := &model.User{}
+	var username, usernameNormalized sql.NullString
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, email, name, created_at, updated_at FROM users WHERE id = $1`,
+		`SELECT id, email, name, username, username_normalized, created_at, updated_at
+		 FROM users WHERE id = $1`,
 		id,
-	).Scan(&user.ID, &user.Email, &user.Name, &user.CreatedAt, &user.UpdatedAt)
+	).Scan(
+		&user.ID, &user.Email, &user.Name,
+		&username, &usernameNormalized,
+		&user.CreatedAt, &user.UpdatedAt,
+	)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -33,7 +50,113 @@ func (r *PostgresUserRepo) FindByID(ctx context.Context, id string) (*model.User
 		return nil, fmt.Errorf("failed to find user by ID: %w", err)
 	}
 
+	if username.Valid {
+		user.Username = username.String
+	}
+	if usernameNormalized.Valid {
+		user.UsernameNormalized = usernameNormalized.String
+	}
+
 	return user, nil
+}
+
+// FindByNormalizedUsername は正規化済みユーザー名（lowercase）でユーザーを検索する
+// （Issue #216 / Req 1.4）。見つからない場合は (nil, nil) を返す。
+//
+// 呼び出し側は非空 normalized のみを渡す前提。DB 側の部分 UNIQUE INDEX は
+// username_normalized IS NOT NULL を対象にしており、NULL 同士は衝突しないため、
+// 空文字を渡した場合の挙動は未定義（呼び出し側の validator で防ぐ）。
+// NFR 1.2: 入力 normalized の値をエラーメッセージに含めない。
+func (r *PostgresUserRepo) FindByNormalizedUsername(ctx context.Context, normalized string) (*model.User, error) {
+	user := &model.User{}
+	var username, usernameNormalized sql.NullString
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id, email, name, username, username_normalized, created_at, updated_at
+		 FROM users WHERE username_normalized = $1`,
+		normalized,
+	).Scan(
+		&user.ID, &user.Email, &user.Name,
+		&username, &usernameNormalized,
+		&user.CreatedAt, &user.UpdatedAt,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to find user by normalized username: %w", err)
+	}
+
+	if username.Valid {
+		user.Username = username.String
+	}
+	if usernameNormalized.Valid {
+		user.UsernameNormalized = usernameNormalized.String
+	}
+
+	return user, nil
+}
+
+// CreateUserOnly は identity を持たないユーザー（パスキー新規登録ユーザー）の
+// users 行のみを INSERT する（Issue #216 / Req 1.2 / 1.6）。
+//
+// u.ID が空文字 / u.CreatedAt / u.UpdatedAt が zero-value の場合は DB 側デフォルト
+// （gen_random_uuid() / now()）を採用し、確定値を u に反映する。
+// username_normalized の UNIQUE 制約違反時は ErrUsernameTaken に変換する
+// （Req 1.4）。email 空文字を許容し、リカバリ用メールなしのユーザー作成に対応する
+// （Req 1.6）。NFR 1.2: エラーメッセージには username / email の値を含めない。
+//
+// pq.Error による 23505 判定は、当該 INSERT で発生し得る UNIQUE 制約が
+// `idx_users_username_normalized`（部分 UNIQUE）のみである前提で、23505 を
+// ErrUsernameTaken に対応させる。将来 users テーブルに他 UNIQUE 制約が追加された
+// 場合は pq.Error.Constraint 名で分岐する必要があるため、その場合は本 doc comment を
+// 更新すること。
+func (r *PostgresUserRepo) CreateUserOnly(ctx context.Context, u *model.User) error {
+	if u == nil {
+		return fmt.Errorf("failed to create user: user is nil")
+	}
+	// username / username_normalized は空文字なら NULL として挿入する
+	// （部分 UNIQUE INDEX は NULL 同士を衝突扱いにしない）。
+	var usernameArg, usernameNormalizedArg interface{}
+	if u.Username != "" {
+		usernameArg = u.Username
+	}
+	if u.UsernameNormalized != "" {
+		usernameNormalizedArg = u.UsernameNormalized
+	}
+	// id / created_at / updated_at が未設定なら DB デフォルトに委ねる。
+	var idArg interface{}
+	if u.ID != "" {
+		idArg = u.ID
+	}
+	var createdAtArg, updatedAtArg interface{}
+	if !u.CreatedAt.IsZero() {
+		createdAtArg = u.CreatedAt
+	}
+	if !u.UpdatedAt.IsZero() {
+		updatedAtArg = u.UpdatedAt
+	}
+	err := r.db.QueryRowContext(ctx,
+		`INSERT INTO users (id, email, name, username, username_normalized, created_at, updated_at)
+		 VALUES (
+		     COALESCE($1::uuid, gen_random_uuid()),
+		     $2, $3, $4, $5,
+		     COALESCE($6::timestamptz, now()),
+		     COALESCE($7::timestamptz, now())
+		 )
+		 RETURNING id, created_at, updated_at`,
+		idArg, u.Email, u.Name, usernameArg, usernameNormalizedArg,
+		createdAtArg, updatedAtArg,
+	).Scan(&u.ID, &u.CreatedAt, &u.UpdatedAt)
+	if err != nil {
+		var pgErr *pq.Error
+		if errors.As(err, &pgErr) && string(pgErr.Code) == pgErrCodeUniqueViolation {
+			return ErrUsernameTaken
+		}
+		// NFR 1.2: username / email の値はメッセージに含めない。
+		return fmt.Errorf("failed to create user: %w", err)
+	}
+	return nil
 }
 
 // CreateWithIdentity はユーザーとidentityを同一トランザクションで作成する。

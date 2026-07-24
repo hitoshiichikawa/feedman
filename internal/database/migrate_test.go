@@ -38,6 +38,8 @@ func setupTestDB(t *testing.T) (*sql.DB, string) {
 
 	// クリーンアップ: 既存のテーブルとマイグレーション履歴を削除
 	cleanupSQL := `
+		DROP TABLE IF EXISTS passkey_challenges CASCADE;
+		DROP TABLE IF EXISTS passkey_credentials CASCADE;
 		DROP TABLE IF EXISTS refresh_tokens CASCADE;
 		DROP TABLE IF EXISTS refresh_token_families CASCADE;
 		DROP TABLE IF EXISTS auth_codes CASCADE;

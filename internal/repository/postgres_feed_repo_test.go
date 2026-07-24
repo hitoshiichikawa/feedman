@@ -103,6 +103,8 @@ func setupListDueTestDB(t *testing.T) *sql.DB {
 	}
 
 	cleanupSQL := `
+		DROP TABLE IF EXISTS passkey_challenges CASCADE;
+		DROP TABLE IF EXISTS passkey_credentials CASCADE;
 		DROP TABLE IF EXISTS refresh_tokens CASCADE;
 		DROP TABLE IF EXISTS refresh_token_families CASCADE;
 		DROP TABLE IF EXISTS auth_codes CASCADE;

@@ -29,6 +29,17 @@ func (m *mockUserRepo) DeleteByID(ctx context.Context, id string) error {
 	return m.deleteByIDFn(ctx, id)
 }
 
+// FindByNormalizedUsername / CreateUserOnly は Issue #216 で UserRepository に
+// 追加されたメソッド。本ファイルの既存テストは退会 tx フローのみを扱い
+// これらを呼ばないため、interface 充足のための no-op stub として実装する。
+func (m *mockUserRepo) FindByNormalizedUsername(_ context.Context, _ string) (*model.User, error) {
+	return nil, nil
+}
+
+func (m *mockUserRepo) CreateUserOnly(_ context.Context, _ *model.User) error {
+	return nil
+}
+
 type mockSessionRepo struct {
 	deleteByUserIDFn func(ctx context.Context, userID string) error
 }
