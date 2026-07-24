@@ -401,3 +401,70 @@
   - **task 8（退会 tx cleanup）に影響なし**: 本 task は handler / router 層に閉じており、
     `internal/user/service.go` の `withdrawTx` や `internal/app/withdraw_wiring.go` に
     触れていない。task 8 は tasks.md L253-263 の順序通り拡張すればよい。
+
+### Task 7
+
+- **採用方針**: `internal/config/config.go` に `WebAuthnRPID` /
+  `WebAuthnRPDisplayName` / `WebAuthnOrigins` / `WebAuthnIOSAppID` /
+  `PasskeyChallengeTTL` の 5 フィールドを追加し、既存 `NativeAuthJWTSecret` / HSTS
+  パターン（`parseCommaSeparated` / `getEnvString` / `getEnvInt` の共用 + Warn+
+  既定値フォールバック）を踏襲。`internal/app/app.go` の `runServe` は既存 native
+  auth wiring の直後に passkey / AASA の 2 wiring ブロックを追加し、独立に fail-closed
+  縮退（handler nil）できる形にした（NFR 2.2）。テストは config_test.go に 12
+  subtests（TestLoad_Passkey + TestLoad_DefaultValues 拡張）、app_test.go に 2 test
+  （Init 未設定既定値 / Init full set 反映）を追加。
+- **重要な判断**:
+  - **`NewGoWebAuthnAdapter` の error handling（tasks.md 例との差分）**: tasks.md L230-231 の
+    呼び出し例は 3 引数のみで error を無視する記法だが、実シグネチャは
+    `(*GoWebAuthnAdapter, error)` を返す（Task 3 impl-notes で確認済み: 空 origins 等で
+    library 側 error）。fail-closed の意図（構成不備を早期通知）を尊重し、error 発生時は
+    `fmt.Errorf("failed to construct WebAuthn adapter: %w", err)` で wrap して runServe
+    を中断する経路を採用した。生 RPID / origins 文字列は NFR 1.2 に従い message に反射しない。
+  - **`NewRegistrationService` / `NewAuthenticationService` の now 引数（tasks.md 例との差分）**:
+    tasks.md L234-238 の呼び出し例は 4 引数 / 5 引数だが、実シグネチャは末尾に
+    `now func() time.Time` を含む 5 引数 / 6 引数（Task 4 / 5 impl-notes 参照）。
+    Task 5 impl-notes L308-310 の指針に従い、両方に `nil` を渡して各 constructor 内の
+    「nil なら time.Now を採用」既定にフォールバックさせた（実装本体には触れず wiring 側で完結）。
+  - **`WEBAUTHN_ORIGINS` の parseCommaSeparated 再利用**: `TrustedCIDRs` と同じ挙動
+    （空白 trim / 空要素除外 / nil 返却）を継承。config 層では origin の形式検証を行わず、
+    webauthn library 側の `webauthn.New` に validation を委譲する（`NewGoWebAuthnAdapter`
+    が失敗すれば fail-closed で捕捉される）。
+  - **`PASSKEY_CHALLENGE_TTL_SECONDS` の型設計**: env は int（秒）として受け取り、
+    `time.Duration(getEnvInt(..., 300)) * time.Second` で time.Duration に昇格させた。
+    既存 `HatebuBatchInterval` 等の `time.ParseDuration` 経路（`10m` / `1h` 表記）ではなく
+    整数秒方式を採用したのは、tasks.md L222 が `PASSKEY_CHALLENGE_TTL_SECONDS`（秒単位の
+    整数）を指定しているため。不正値時の Warn ログ・既定値フォールバックは `getEnvInt` に
+    委譲する（既定 300s / Req 4.4）。
+  - **AASA と passkey handler の独立 fail-closed**: `WEBAUTHN_IOS_APP_ID` の判定は
+    RPID / Origins とは独立の `if` に分離した（design.md L972 の「PasskeyHandler の nil
+    判定とは独立」記述と Task 6 の `TestNewRouter_Passkey_AASA_IndependentFailClose`
+    に整合）。Warn ログもそれぞれ 1 回ずつ、独立して出力される。
+  - **`passkeyCredentialRepo` の生成位置（task 8 への申し送り）**: 本 task では passkey
+    wiring ブロック内でのみ `NewPostgresPasskeyCredentialRepo(db)` を呼ぶ配置とした。
+    task 8 では退会 tx cleanup（withdrawTx 内の passkey_credentials 削除）が env 未設定でも
+    動く必要があるため、当該 task が passkeyCredentialRepo を本ブロック外に引き上げて
+    `newTxUserService(..., passkeyCredentialRepo)` に注入する予定（tasks.md L275-278）。
+    本 task の scope（Config, AppWiring）は passkey handler / AASA handler の nil 縮退に
+    限定し、退会 cleanup 側の wiring 変更は task 8 の責務。
+  - **app_test.go のテスト範囲**: `runServe` は DB 接続を必須とするため、handler nil 化の
+    実際の分岐は本 test の対象外とした（既存 `TestInit_*` も Init のみを対象としており、
+    NativeAuthHandler の nil 縮退テストも app_test.go には無い）。代わりに Init が
+    WEBAUTHN 未設定でも成功し既定値が Config に載ることを検証（NFR 2.2）、および full set
+    時に fail-closed 分岐が発火可能な値が Config に載ることを検証（Req 5.1〜5.4 の
+    wiring 入力担保）。handler nil 縮退の実行時挙動は既存 router_test.go（Task 6 で追加
+    済み）が担保する。
+- **残存課題（task 8 への申し送り）**:
+  - **`passkeyCredentialRepo` の常時作成への引き上げ**: 上記の通り、退会 tx cleanup の
+    `TxPasskeyCredentialDeleter` を wiring するため、env 未設定でも
+    `NewPostgresPasskeyCredentialRepo(db)` を実行する必要がある。task 8 は本 task の
+    passkey wiring ブロックの **外側**（native auth wiring と同じ階層）で先に repo を
+    生成し、passkey handler 用途と退会 cleanup 用途で同一インスタンスを共有する形が
+    自然（tasks.md L275-278 の `passkeyCredentialRepo` はパスキー env 未設定でも常に
+    作成する規定と整合）。
+  - **`newTxUserService` 拡張**: 本 task は `newTxUserService` シグネチャに触れていない。
+    task 8 で `newTxUserService(..., passkeyCredentialRepo)` に第 8 引数を末尾追加する
+    修正が発生する。他の呼び出し側は無いため、影響範囲は app.go の runServe 1 箇所に
+    限定される（withdraw_wiring.go の adapter 定義とセットで拡張）。
+  - **本 task では `_ = passkeyHandler` 等のリンター警告は出ない**: 両 handler は
+    `deps.PasskeyHandler` / `deps.AASAHandler` に代入されるため未使用にならない。
+    `go vet ./internal/app/...` 全 pass を確認済み。
