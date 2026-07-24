@@ -112,6 +112,13 @@ func runServe(cfg *config.Config) error {
 	authCodeRepo := repository.NewPostgresAuthCodeRepo(db)
 	// native auth（#166）: POST /api/auth/token の refresh family / token 永続化に使用する。
 	refreshTokenRepo := repository.NewPostgresRefreshTokenRepo(db)
+	// passkey credential（#216）: 退会 tx cleanup と passkey handler の両方で共有する。
+	//   - 退会 tx cleanup（Req 7.1, 7.2）は env 未設定でも動く必要があるため、
+	//     passkey wiring ブロックの外側で常時生成する（NFR 2.2）。
+	//   - passkey handler 用途と退会 cleanup 用途で同一インスタンスを共有する。
+	//   - passkey handler が nil（env 未設定）でも newTxUserService に非 nil の
+	//     passkeyCredentialRepo を渡すことで、退会時の cleanup 段が有効になる。
+	passkeyCredentialRepo := repository.NewPostgresPasskeyCredentialRepo(db)
 	feedRepo := repository.NewPostgresFeedRepo(db)
 	subRepo := repository.NewPostgresSubscriptionRepo(db)
 	itemRepo := repository.NewPostgresItemRepo(db)
@@ -183,7 +190,14 @@ func runServe(cfg *config.Config) error {
 	// refresh_token_families）の明示削除を統合するため、authCodeRepo /
 	// refreshTokenRepo を newTxUserService に渡す。これらの repo は #165 / #166 で
 	// 上記の native auth 配線にも共用される。
-	userService := newTxUserService(txBeginner, userRepo, sessionRepo, subRepo, itemStateRepo, authCodeRepo, refreshTokenRepo)
+	// Issue #216: passkey_credentials の cleanup も同 tx に統合するため
+	// passkeyCredentialRepo を末尾に追加で渡す（Req 7.1〜7.4）。当該 repo は
+	// passkey handler wiring と共用され、env 未設定でも常時作成されるため env
+	// 未設定環境でも退会時の cleanup 段が動作する（NFR 2.2）。
+	userService := newTxUserService(
+		txBeginner, userRepo, sessionRepo, subRepo, itemStateRepo,
+		authCodeRepo, refreshTokenRepo, passkeyCredentialRepo,
+	)
 
 	// 5. ハンドラーアダプタの構築
 	subServiceAdapter := handler.NewSubscriptionServiceAdapter(subService)
@@ -247,13 +261,14 @@ func runServe(cfg *config.Config) error {
 	// NewGoWebAuthnAdapter は空 origins 等の library 側検証で error を返し得るため、初期化失敗時は
 	// serve 起動を中断して運用者に構成不備を早期通知する（fail-closed の一環）。
 	//
-	// PasskeyChallengeRepo と PasskeyCredentialRepo は passkey handler の依存として本ブロック内で
-	// のみ生成する。task 8（退会 tx cleanup 統合）で PasskeyCredentialRepo は env 未設定でも
-	// 常時作成が必要となるため、当該 task で本ブロック外へ再配置される予定。
+	// PasskeyCredentialRepo は退会 cleanup（Req 7.1, 7.2）でも必要となるため、passkey handler 用途と
+	// 退会 cleanup 用途で **同一インスタンスを共有** する形で本ブロック外（上記 repository 初期化
+	// セクション）で常時生成している（Issue #216 task 8）。本ブロックでは共有インスタンスをそのまま
+	// 参照する（passkey handler 未生成でも退会 cleanup 側に注入されることで env 未設定時も cleanup が
+	// 動作する / NFR 2.2）。
 	var passkeyHandler *handler.PasskeyHandler
 	var aasaHandler *handler.AASAHandler
 	if cfg.WebAuthnRPID != "" && len(cfg.WebAuthnOrigins) > 0 {
-		passkeyCredentialRepo := repository.NewPostgresPasskeyCredentialRepo(db)
 		passkeyChallengeRepo := repository.NewPostgresPasskeyChallengeRepo(db)
 		webAuthnAdapter, err := passkey.NewGoWebAuthnAdapter(
 			cfg.WebAuthnRPID, cfg.WebAuthnRPDisplayName, cfg.WebAuthnOrigins,
