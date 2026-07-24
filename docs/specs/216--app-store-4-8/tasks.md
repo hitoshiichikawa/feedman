@@ -126,7 +126,7 @@
   - _Boundary: RegistrationService_
   - _Depends: 3_
 
-- [ ] 5. AuthenticationService の実装（既存 auth_code 発行への合流）
+- [x] 5. AuthenticationService の実装（既存 auth_code 発行への合流）
   - `internal/passkey/authentication_service.go` を新規作成
     - `AuthenticationService` struct（依存: `WebAuthnAdapter` / `ChallengeStore` /
       `PasskeyCredentialReader`（最小 IF: FindByCredentialID / UpdateSignCount）/
