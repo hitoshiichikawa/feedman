@@ -72,6 +72,14 @@ type TxRefreshTokenDeleter interface {
 	DeleteByUserIDTx(ctx context.Context, tx Tx, userID string) error
 }
 
+// TxPasskeyCredentialDeleter は共有トランザクション上でパスキー credential を
+// 一括削除するインターフェース（Issue #216 Req 7.1, 7.2, 7.3, 7.4）。
+// 既存 TxAuthCodeDeleter / TxRefreshTokenDeleter と同型で、退会 tx への
+// passkey_credentials 削除段の統合に用いる。
+type TxPasskeyCredentialDeleter interface {
+	DeleteByUserIDTx(ctx context.Context, tx Tx, userID string) error
+}
+
 // Service はユーザー管理のサービス層。
 // 退会処理のビジネスロジックを提供する。
 //
@@ -86,13 +94,14 @@ type Service struct {
 	stateDeleter ItemStateDeleter
 
 	// トランザクションパス用のフィールド（txBeginner != nil のとき使用）。
-	txBeginner            TxBeginner
-	txUserDeleter         TxUserDeleter
-	txSessionDeleter      TxSessionDeleter
-	txSubDeleter          TxSubscriptionDeleter
-	txStateDeleter        TxItemStateDeleter
-	txAuthCodeDeleter     TxAuthCodeDeleter     // Issue #170: native auth 認可コード削除
-	txRefreshTokenDeleter TxRefreshTokenDeleter // Issue #170: native auth refresh token 削除
+	txBeginner                 TxBeginner
+	txUserDeleter              TxUserDeleter
+	txSessionDeleter           TxSessionDeleter
+	txSubDeleter               TxSubscriptionDeleter
+	txStateDeleter             TxItemStateDeleter
+	txAuthCodeDeleter          TxAuthCodeDeleter          // Issue #170: native auth 認可コード削除
+	txRefreshTokenDeleter      TxRefreshTokenDeleter      // Issue #170: native auth refresh token 削除
+	txPasskeyCredentialDeleter TxPasskeyCredentialDeleter // Issue #216: passkey credential 削除
 }
 
 // NewService は Service の新しいインスタンスを生成する（レガシー・非トランザクションパス）。
@@ -116,14 +125,15 @@ func NewService(
 // NewServiceWithTx はトランザクション対応の Service を生成する。
 //
 // 退会処理は txBeginner が開始する単一トランザクション上で
-// item_states → subscriptions → sessions → auth_codes → refresh_token_families →
-// user の順に削除し、全成功時のみコミット、途中失敗時は全ロールバックする
-// （Issue #170 で auth_codes / refresh_token_families の削除 2 段を sessions の
-// 直後・user の前に挿入）。
+// item_states → subscriptions → sessions → passkey_credentials → auth_codes →
+// refresh_token_families → user の順に削除し、全成功時のみコミット、途中失敗時は
+// 全ロールバックする（Issue #170 で auth_codes / refresh_token_families の削除
+// 2 段を sessions の直後・user の前に挿入し、Issue #216 で passkey_credentials
+// 削除段を sessions の直後・auth_codes の直前に追加）。
 //
-// authCodeDeleter / refreshTokenDeleter は nil でも構築でき、その場合は当該段は
-// スキップされる（既存 deleter 群と同じ nil ガード方針。本番 wiring では常に非 nil
-// を注入する）。
+// authCodeDeleter / refreshTokenDeleter / passkeyCredentialDeleter は nil でも
+// 構築でき、その場合は当該段はスキップされる（既存 deleter 群と同じ nil ガード
+// 方針。本番 wiring では常に非 nil を注入する）。
 func NewServiceWithTx(
 	txBeginner TxBeginner,
 	userDeleter TxUserDeleter,
@@ -132,15 +142,17 @@ func NewServiceWithTx(
 	stateDeleter TxItemStateDeleter,
 	authCodeDeleter TxAuthCodeDeleter,
 	refreshTokenDeleter TxRefreshTokenDeleter,
+	passkeyCredentialDeleter TxPasskeyCredentialDeleter,
 ) *Service {
 	return &Service{
-		txBeginner:            txBeginner,
-		txUserDeleter:         userDeleter,
-		txSessionDeleter:      sessionDeleter,
-		txSubDeleter:          subDeleter,
-		txStateDeleter:        stateDeleter,
-		txAuthCodeDeleter:     authCodeDeleter,
-		txRefreshTokenDeleter: refreshTokenDeleter,
+		txBeginner:                 txBeginner,
+		txUserDeleter:              userDeleter,
+		txSessionDeleter:           sessionDeleter,
+		txSubDeleter:               subDeleter,
+		txStateDeleter:             stateDeleter,
+		txAuthCodeDeleter:          authCodeDeleter,
+		txRefreshTokenDeleter:      refreshTokenDeleter,
+		txPasskeyCredentialDeleter: passkeyCredentialDeleter,
 	}
 }
 
@@ -173,18 +185,21 @@ func (s *Service) GetByID(ctx context.Context, userID string) (*model.User, erro
 
 // Withdraw はユーザーの退会処理を実行する。
 // 削除順序（トランザクションパス）: item_states → subscriptions → sessions →
-// auth_codes → refresh_token_families → user
+// passkey_credentials → auth_codes → refresh_token_families → user
 // （+ CASCADE: identities, user_settings, refresh_tokens）
 // feeds と items は共有キャッシュとして残す。
 //
 // Issue #170: native auth の認証状態（auth_codes / refresh_token_families）を
 // sessions の直後・user の前に挿入する。refresh_tokens は
 // refresh_token_families の DELETE に伴い FK ON DELETE CASCADE で削除される。
+// Issue #216: passkey_credentials 削除段を sessions の直後・auth_codes の直前に
+// 追加する（Req 7.1, 7.2, 7.3, 7.4）。passkey_credentials は user_id FK ON DELETE
+// CASCADE も持っているが、明示削除により tx 内の順序と失敗時 rollback 契約を確定させる。
 //
 // txBeginner が設定されている場合は単一トランザクションで原子的に削除し、
 // 途中失敗時は全ロールバックする。設定されていない場合はレガシーの逐次削除を行う
-// （レガシーパスでは native auth の明示削除を行わず、user 削除時の FK CASCADE
-// による DB 防衛線で 3 テーブルの行残存を防ぐ）。
+// （レガシーパスでは native auth / passkey の明示削除を行わず、user 削除時の
+// FK CASCADE による DB 防衛線で行残存を防ぐ）。
 func (s *Service) Withdraw(ctx context.Context, userID string) error {
 	if s.txBeginner != nil {
 		return s.withdrawTx(ctx, userID)
@@ -240,14 +255,23 @@ func (s *Service) withdrawTx(ctx context.Context, userID string) error {
 		}
 	}
 
-	// 4. native auth 認可コードを削除（Issue #170 Req 1.1, 2.1）
+	// 4. passkey credential を削除（Issue #216 Req 7.1, 7.2, 7.3, 7.4）
+	//    削除段は sessions の直後・auth_codes の直前に挿入する。deleter が nil の
+	//    場合はスキップし、user 削除時の FK ON DELETE CASCADE を防衛線として残す。
+	if s.txPasskeyCredentialDeleter != nil {
+		if err := s.txPasskeyCredentialDeleter.DeleteByUserIDTx(ctx, tx, userID); err != nil {
+			return fmt.Errorf("passkey credential の削除に失敗しました: %w", err)
+		}
+	}
+
+	// 5. native auth 認可コードを削除（Issue #170 Req 1.1, 2.1）
 	if s.txAuthCodeDeleter != nil {
 		if err := s.txAuthCodeDeleter.DeleteByUserIDTx(ctx, tx, userID); err != nil {
 			return fmt.Errorf("認可コードの削除に失敗しました: %w", err)
 		}
 	}
 
-	// 5. native auth refresh token（family ごと、配下 tokens は FK CASCADE）を削除
+	// 6. native auth refresh token（family ごと、配下 tokens は FK CASCADE）を削除
 	//    （Issue #170 Req 1.2, 2.1）
 	if s.txRefreshTokenDeleter != nil {
 		if err := s.txRefreshTokenDeleter.DeleteByUserIDTx(ctx, tx, userID); err != nil {
@@ -255,7 +279,7 @@ func (s *Service) withdrawTx(ctx context.Context, userID string) error {
 		}
 	}
 
-	// 6. ユーザーを削除（identities, user_settings は CASCADE 削除）
+	// 7. ユーザーを削除（identities, user_settings は CASCADE 削除）
 	if err := s.txUserDeleter.DeleteByIDTx(ctx, tx, userID); err != nil {
 		return fmt.Errorf("ユーザーの削除に失敗しました: %w", err)
 	}

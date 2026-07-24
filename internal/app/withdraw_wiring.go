@@ -106,6 +106,21 @@ func (a *txRefreshTokenDeleterAdapter) DeleteByUserIDTx(ctx context.Context, tx 
 	return a.repo.DeleteByUserIDExec(ctx, q, userID)
 }
 
+// txPasskeyCredentialDeleterAdapter は passkey credential リポジトリを
+// user.TxPasskeyCredentialDeleter に適合させる（Issue #216 Req 7.1, 7.2, 7.3, 7.4）。
+// 退会 tx 内で当該ユーザーに紐付く全 passkey_credentials を DELETE する。
+type txPasskeyCredentialDeleterAdapter struct {
+	repo *repository.PostgresPasskeyCredentialRepo
+}
+
+func (a *txPasskeyCredentialDeleterAdapter) DeleteByUserIDTx(ctx context.Context, tx user.Tx, userID string) error {
+	q, err := querierFromTx(tx)
+	if err != nil {
+		return err
+	}
+	return a.repo.DeleteByUserIDExec(ctx, q, userID)
+}
+
 // txUserDeleterAdapter はユーザーリポジトリを user.TxUserDeleter に適合させる。
 type txUserDeleterAdapter struct {
 	repo *repository.PostgresUserRepo
@@ -128,6 +143,10 @@ func (a *txUserDeleterAdapter) DeleteByIDTx(ctx context.Context, tx user.Tx, id 
 // Issue #170: native auth deleter（auth_code / refresh_token）を末尾に追加し、
 // 退会トランザクションへ auth_codes / refresh_token_families の明示削除を
 // 統合する。
+// Issue #216: passkey credential deleter をさらに末尾に追加し、退会 tx へ
+// passkey_credentials の明示削除を統合する（Req 7.1〜7.4）。
+// passkeyCredentialRepo が nil の場合は passkey deleter に nil を渡し、
+// 当該段はスキップされる（NFR 2.2 の env 未設定環境互換）。
 func newTxUserService(
 	beginner *repository.SQLTxBeginner,
 	userRepo *repository.PostgresUserRepo,
@@ -136,7 +155,14 @@ func newTxUserService(
 	itemStateRepo *repository.PostgresItemStateRepo,
 	authCodeRepo *repository.PostgresAuthCodeRepo,
 	refreshTokenRepo *repository.PostgresRefreshTokenRepo,
+	passkeyCredentialRepo *repository.PostgresPasskeyCredentialRepo,
 ) *user.Service {
+	// passkey credential deleter は nil-safe: repo が nil なら interface も nil で渡す
+	// （typed-nil を作らない）ことで、user.Service の nil ガード経路を素直に踏ませる。
+	var passkeyDeleter user.TxPasskeyCredentialDeleter
+	if passkeyCredentialRepo != nil {
+		passkeyDeleter = &txPasskeyCredentialDeleterAdapter{repo: passkeyCredentialRepo}
+	}
 	return user.NewServiceWithTx(
 		&txBeginnerAdapter{beginner: beginner},
 		&txUserDeleterAdapter{repo: userRepo},
@@ -145,16 +171,18 @@ func newTxUserService(
 		&txItemStateDeleterAdapter{repo: itemStateRepo},
 		&txAuthCodeDeleterAdapter{repo: authCodeRepo},
 		&txRefreshTokenDeleterAdapter{repo: refreshTokenRepo},
+		passkeyDeleter,
 	)
 }
 
 // compile-time interface checks
 var (
-	_ user.TxBeginner            = (*txBeginnerAdapter)(nil)
-	_ user.TxItemStateDeleter    = (*txItemStateDeleterAdapter)(nil)
-	_ user.TxSubscriptionDeleter = (*txSubscriptionDeleterAdapter)(nil)
-	_ user.TxSessionDeleter      = (*txSessionDeleterAdapter)(nil)
-	_ user.TxUserDeleter         = (*txUserDeleterAdapter)(nil)
-	_ user.TxAuthCodeDeleter     = (*txAuthCodeDeleterAdapter)(nil)
-	_ user.TxRefreshTokenDeleter = (*txRefreshTokenDeleterAdapter)(nil)
+	_ user.TxBeginner                 = (*txBeginnerAdapter)(nil)
+	_ user.TxItemStateDeleter         = (*txItemStateDeleterAdapter)(nil)
+	_ user.TxSubscriptionDeleter      = (*txSubscriptionDeleterAdapter)(nil)
+	_ user.TxSessionDeleter           = (*txSessionDeleterAdapter)(nil)
+	_ user.TxUserDeleter              = (*txUserDeleterAdapter)(nil)
+	_ user.TxAuthCodeDeleter          = (*txAuthCodeDeleterAdapter)(nil)
+	_ user.TxRefreshTokenDeleter      = (*txRefreshTokenDeleterAdapter)(nil)
+	_ user.TxPasskeyCredentialDeleter = (*txPasskeyCredentialDeleterAdapter)(nil)
 )

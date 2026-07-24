@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -51,6 +52,8 @@ func setupWithdrawTestDB(t *testing.T) *sql.DB {
 	}
 
 	cleanupSQL := `
+		DROP TABLE IF EXISTS passkey_challenges CASCADE;
+		DROP TABLE IF EXISTS passkey_credentials CASCADE;
 		DROP TABLE IF EXISTS refresh_tokens CASCADE;
 		DROP TABLE IF EXISTS refresh_token_families CASCADE;
 		DROP TABLE IF EXISTS auth_codes CASCADE;
@@ -243,6 +246,187 @@ func TestWithdrawIntegration_NativeAuthCleanup(t *testing.T) {
 		if c := countByUserID(t, db, table, bystanderUserID); c != 1 {
 			t.Errorf("bystander %s が target 退会で削除された: got %d, want 1 (他ユーザー非影響)", table, c)
 		}
+	}
+}
+
+// seedPasskeyCredentialForWithdraw は当該ユーザーに passkey_credentials レコードを
+// 1 件 seed する（Issue #216 task 8 の DB 結合検証用）。
+// credentialID は user_id と suffix を組み合わせて生成する（テスト間で衝突しないため）。
+func seedPasskeyCredentialForWithdraw(t *testing.T, db *sql.DB, userID, suffix string) {
+	t.Helper()
+	ctx := context.Background()
+	repo := NewPostgresPasskeyCredentialRepo(db)
+	c := &model.PasskeyCredential{
+		UserID:          userID,
+		CredentialID:    []byte("cred-" + userID[:8] + "-" + suffix),
+		PublicKey:       []byte{0x01, 0x02, 0x03, 0x04},
+		SignCount:       0,
+		AttestationType: "none",
+		Transports:      []string{"internal"},
+	}
+	if err := repo.Create(ctx, c); err != nil {
+		t.Fatalf("passkey credential Create に失敗 (%s): %v", suffix, err)
+	}
+}
+
+// TestWithdrawIntegration_PasskeyCredentialCleanup は退会 tx 相当の統合検証として、
+// 共有トランザクション上で sessions → passkey_credentials → auth_codes →
+// refresh_token_families → users を削除して Commit した後、
+// 当該ユーザーの passkey_credentials が 0 件・他ユーザーの passkey_credentials が
+// 残存することを検証する（Issue #216 Req 7.1, 7.2, 7.4 / NFR 4.2）。
+//
+// 本テストは PostgresPasskeyCredentialRepo.DeleteByUserIDExec が共有トランザクション上で
+// 他 deleter と協調動作することを検証する。user.Service.withdrawTx の順序と同じ削除を
+// repository レイヤから直接再現する（handler / service 層には依存しない）。
+func TestWithdrawIntegration_PasskeyCredentialCleanup(t *testing.T) {
+	db := setupWithdrawTestDB(t)
+	defer db.Close()
+
+	ctx := context.Background()
+
+	// Arrange: target user と bystander user に passkey credential + native auth + session を seed する
+	targetUserID := insertTestUserForWithdraw(t, db, "withdraw-passkey-target@test.com")
+	bystanderUserID := insertTestUserForWithdraw(t, db, "withdraw-passkey-bystander@test.com")
+
+	seedPasskeyCredentialForWithdraw(t, db, targetUserID, "target")
+	seedPasskeyCredentialForWithdraw(t, db, bystanderUserID, "bystander")
+	seedNativeAuthDataForWithdraw(t, db, targetUserID, "target-passkey")
+	seedNativeAuthDataForWithdraw(t, db, bystanderUserID, "bystander-passkey")
+
+	// 削除前の sanity check
+	if c := countByUserID(t, db, "passkey_credentials", targetUserID); c != 1 {
+		t.Fatalf("seed sanity: target passkey_credentials = %d, want 1", c)
+	}
+	if c := countByUserID(t, db, "passkey_credentials", bystanderUserID); c != 1 {
+		t.Fatalf("seed sanity: bystander passkey_credentials = %d, want 1", c)
+	}
+
+	// Act: 共有 tx 上で sessions → passkey_credentials → auth_codes →
+	// refresh_token_families → users を削除して Commit する
+	// （user.Service.withdrawTx の Issue #216 適用後の順序）。
+	authCodeRepo := NewPostgresAuthCodeRepo(db)
+	refreshTokenRepo := NewPostgresRefreshTokenRepo(db)
+	sessionRepo := NewPostgresSessionRepo(db)
+	passkeyCredRepo := NewPostgresPasskeyCredentialRepo(db)
+	userRepo := NewPostgresUserRepo(db)
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx に失敗: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := sessionRepo.DeleteByUserIDExec(ctx, tx, targetUserID); err != nil {
+		t.Fatalf("sessions 削除に失敗: %v", err)
+	}
+	if err := passkeyCredRepo.DeleteByUserIDExec(ctx, tx, targetUserID); err != nil {
+		t.Fatalf("passkey_credentials 削除に失敗: %v", err)
+	}
+	if err := authCodeRepo.DeleteByUserIDExec(ctx, tx, targetUserID); err != nil {
+		t.Fatalf("auth_codes 削除に失敗: %v", err)
+	}
+	if err := refreshTokenRepo.DeleteByUserIDExec(ctx, tx, targetUserID); err != nil {
+		t.Fatalf("refresh_token_families 削除に失敗: %v", err)
+	}
+	if err := userRepo.DeleteByIDExec(ctx, tx, targetUserID); err != nil {
+		t.Fatalf("users 削除に失敗: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit に失敗: %v", err)
+	}
+
+	// Assert 1 (Req 7.1 / 7.4): target user の passkey_credentials は 0 件
+	if c := countByUserID(t, db, "passkey_credentials", targetUserID); c != 0 {
+		t.Errorf("退会後の target passkey_credentials が残存: got %d, want 0 (Req 7.1)", c)
+	}
+	// Assert 2 (Req 7.4): 他 user の passkey_credentials は残存
+	if c := countByUserID(t, db, "passkey_credentials", bystanderUserID); c != 1 {
+		t.Errorf("bystander passkey_credentials が target 退会で削除された: got %d, want 1 (Req 7.4)", c)
+	}
+}
+
+// TestWithdrawIntegration_UsernameReusableAfterWithdraw は退会後に同一
+// username_normalized で新規登録が可能になることを検証する（Issue #216 Req 7.5 /
+// NFR 4.2）。user 削除で `users.username_normalized` の部分 UNIQUE 制約が解放され、
+// 同一 normalized ユーザー名を後続の passkey 新規登録で再取得できる。
+func TestWithdrawIntegration_UsernameReusableAfterWithdraw(t *testing.T) {
+	db := setupWithdrawTestDB(t)
+	defer db.Close()
+
+	ctx := context.Background()
+	userRepo := NewPostgresUserRepo(db)
+
+	// Arrange: username_normalized 付きで target user を作成
+	const normalized = "alice-reuse"
+	targetUser := &model.User{
+		Email:              "",
+		Username:           "alice-reuse",
+		UsernameNormalized: normalized,
+	}
+	if err := userRepo.CreateUserOnly(ctx, targetUser); err != nil {
+		t.Fatalf("target user CreateUserOnly に失敗: %v", err)
+	}
+	if targetUser.ID == "" {
+		t.Fatal("CreateUserOnly 後の targetUser.ID が空")
+	}
+
+	// Sanity: FindByNormalizedUsername で target user がヒットする
+	found, err := userRepo.FindByNormalizedUsername(ctx, normalized)
+	if err != nil {
+		t.Fatalf("FindByNormalizedUsername (pre-withdraw) に失敗: %v", err)
+	}
+	if found == nil || found.ID != targetUser.ID {
+		t.Fatalf("pre-withdraw FindByNormalizedUsername: got %+v, want ID=%q", found, targetUser.ID)
+	}
+
+	// Sanity: 同一 normalized で作ろうとすると ErrUsernameTaken
+	dup := &model.User{
+		Email:              "",
+		Username:           "alice-reuse",
+		UsernameNormalized: normalized,
+	}
+	err = userRepo.CreateUserOnly(ctx, dup)
+	if !errors.Is(err, ErrUsernameTaken) {
+		t.Fatalf("pre-withdraw duplicate CreateUserOnly: got %v, want ErrUsernameTaken", err)
+	}
+
+	// Act: target user を退会（tx 上で users 削除）。
+	// passkey_credentials 側の CASCADE は本テストのスコープ外だが、user 削除で
+	// username_normalized UNIQUE 制約が解放されることが主目的。
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx に失敗: %v", err)
+	}
+	if err := userRepo.DeleteByIDExec(ctx, tx, targetUser.ID); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("users 削除に失敗: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit に失敗: %v", err)
+	}
+
+	// Assert 1 (Req 7.5): FindByNormalizedUsername が (nil, nil) を返す
+	// （users 削除で当該 normalized 行が消失）
+	found, err = userRepo.FindByNormalizedUsername(ctx, normalized)
+	if err != nil {
+		t.Fatalf("FindByNormalizedUsername (post-withdraw) に失敗: %v", err)
+	}
+	if found != nil {
+		t.Errorf("post-withdraw FindByNormalizedUsername: got %+v, want nil (users 削除で行消失)", found)
+	}
+
+	// Assert 2 (Req 7.5): 同一 normalized で新規 CreateUserOnly が成功する
+	// （username 使い回し可能 = UNIQUE 制約が解放されている）
+	fresh := &model.User{
+		Email:              "",
+		Username:           "alice-reuse",
+		UsernameNormalized: normalized,
+	}
+	if err := userRepo.CreateUserOnly(ctx, fresh); err != nil {
+		t.Fatalf("post-withdraw CreateUserOnly が失敗（Req 7.5 の再取得不可）: %v", err)
+	}
+	if fresh.ID == "" || fresh.ID == targetUser.ID {
+		t.Errorf("post-withdraw fresh user ID = %q, want 新 UUID (target=%q)", fresh.ID, targetUser.ID)
 	}
 }
 

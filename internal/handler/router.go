@@ -75,6 +75,16 @@ type RouterDeps struct {
 	// fail-closed パターン。/metrics と同じ後方互換指針）。
 	NativeAuthHandler *NativeAuthHandler
 
+	// PasskeyHandler は passkey 登録・認証の 6 endpoint を提供する（Issue #216）。
+	// nil のときは passkey 系 route を一切登録しない（fail-closed。WEBAUTHN_RP_ID /
+	// WEBAUTHN_ORIGINS 未設定環境で NativeAuthHandler と同じ縮退パターン / NFR 2.2）。
+	PasskeyHandler *PasskeyHandler
+
+	// AASAHandler は `/.well-known/apple-app-site-association` を配信する（Issue #216 / Req 5.1〜5.4）。
+	// nil のときは AASA route を登録しない（fail-closed。WEBAUTHN_IOS_APP_ID 未設定環境で
+	// AASA だけ独立に無効化される。PasskeyHandler と独立して nil 判定される点に注意）。
+	AASAHandler *AASAHandler
+
 	// JWTVerifier は Bearer access token の検証器（任意 / Issue #169）。
 	// nil の場合、認証必須グループは従来どおり Cookie セッション認証のみで動作する
 	// （NATIVE_AUTH_JWT_SECRET 未設定環境の後方互換。NewBearerOrSessionMiddleware が
@@ -223,6 +233,29 @@ func NewRouter(deps *RouterDeps) http.Handler {
 			r.With(unauthIPMW, middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
 				Post("/api/auth/revoke", deps.NativeAuthHandler.Revoke)
 		}
+
+		// AASA（Issue #216 / Req 5.4: 認証・IP レート制限の外側）。
+		// AASAHandler nil のときは登録せず 404（WEBAUTHN_IOS_APP_ID 未設定環境の
+		// fail-closed / NFR 2.2）。PasskeyHandler の nil 判定とは独立に決まる。
+		if deps.AASAHandler != nil {
+			r.Get("/.well-known/apple-app-site-association", deps.AASAHandler.Serve)
+		}
+
+		// Passkey 未認証 endpoint（Issue #216 / Req 6.1〜6.5）。
+		// 既存 unauthIPMW（IP 単位レート制限） + MaxBodyBytes（body 上限）を通し、
+		// native auth 3 ルートと同じ縮退パターンを踏襲する（NFR 2.1 / NFR 2.2）。
+		// PasskeyHandler nil のときは登録せず 404（WEBAUTHN_RP_ID / WEBAUTHN_ORIGINS
+		// 未設定環境の fail-closed）。
+		if deps.PasskeyHandler != nil {
+			r.With(unauthIPMW, middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
+				Post("/api/passkey/registration/begin", deps.PasskeyHandler.RegistrationBegin)
+			r.With(unauthIPMW, middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
+				Post("/api/passkey/registration/finish", deps.PasskeyHandler.RegistrationFinish)
+			r.With(unauthIPMW, middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
+				Post("/api/passkey/authentication/begin", deps.PasskeyHandler.AuthenticationBegin)
+			r.With(unauthIPMW, middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
+				Post("/api/passkey/authentication/finish", deps.PasskeyHandler.AuthenticationFinish)
+		}
 	})
 
 	// --- 認証が必要なルート ---
@@ -294,6 +327,14 @@ func NewRouter(deps *RouterDeps) http.Handler {
 				r.Post("/fetch", subHandler.ManualFetch)
 			})
 		})
+
+		// Passkey 追加登録 endpoint（Issue #216 / Req 3.1, 3.2, 3.5）。
+		// 認証必須グループ配下に置くため BearerOrSession middleware が 401 を返す。
+		// PasskeyHandler nil のときは登録せず 404（fail-closed / NFR 2.2）。
+		if deps.PasskeyHandler != nil {
+			r.Post("/api/passkey/registration/add/begin", deps.PasskeyHandler.RegistrationAddBegin)
+			r.Post("/api/passkey/registration/add/finish", deps.PasskeyHandler.RegistrationAddFinish)
+		}
 
 		// ユーザー管理
 		r.Route("/api/users", func(r chi.Router) {

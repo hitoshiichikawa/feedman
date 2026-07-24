@@ -740,6 +740,355 @@ func TestNewRouter_NativeAuthIPRateLimit_SameShapeAsExistingRoutes(t *testing.T)
 	}
 }
 
+// --- Passkey 系ルーティング（Issue #216 / Req 3.5, 5.4, 6.5, NFR 2.2） ---
+
+// stubPasskeyRouterRegistration は router 統合テスト用に PasskeyRegistrationService の
+// 4 メソッドを固定成功として実装するスタブ。route 到達判定にのみ使う。
+type stubPasskeyRouterRegistration struct {
+	beginNewCalled  int
+	finishNewCalled int
+	beginAddCalled  int
+	finishAddCalled int
+	lastAuthUserID  string
+}
+
+func (s *stubPasskeyRouterRegistration) BeginRegistrationNew(ctx context.Context,
+	rawUsername, optionalEmail, codeChallenge string,
+) (string, []byte, error) {
+	s.beginNewCalled++
+	return "chal-router-new", []byte(`{}`), nil
+}
+
+func (s *stubPasskeyRouterRegistration) FinishRegistrationNew(ctx context.Context,
+	challengeID string, requestBody []byte,
+) (string, error) {
+	s.finishNewCalled++
+	return "user-router-new", nil
+}
+
+func (s *stubPasskeyRouterRegistration) BeginAddCredential(ctx context.Context,
+	authenticatedUserID string,
+) (string, []byte, error) {
+	s.beginAddCalled++
+	s.lastAuthUserID = authenticatedUserID
+	return "chal-router-add", []byte(`{}`), nil
+}
+
+func (s *stubPasskeyRouterRegistration) FinishAddCredential(ctx context.Context,
+	authenticatedUserID, challengeID string, requestBody []byte,
+) error {
+	s.finishAddCalled++
+	s.lastAuthUserID = authenticatedUserID
+	return nil
+}
+
+// stubPasskeyRouterAuthentication は router 統合テスト用の認証サービススタブ。
+type stubPasskeyRouterAuthentication struct {
+	beginCalled  int
+	finishCalled int
+}
+
+func (s *stubPasskeyRouterAuthentication) BeginAuthentication(ctx context.Context,
+	codeChallenge string,
+) (string, []byte, error) {
+	s.beginCalled++
+	return "chal-router-authn", []byte(`{}`), nil
+}
+
+func (s *stubPasskeyRouterAuthentication) FinishAuthentication(ctx context.Context,
+	requestBody []byte, challengeID string,
+) (string, error) {
+	s.finishCalled++
+	return "plain-router-auth-code", nil
+}
+
+// newPasskeyRouterDeps は passkey / AASA handler を差し替え可能に組み立てた最小 deps を返す。
+// passkeyHandler / aasaHandler の nil 指定で fail-closed 挙動を検証できる。
+func newPasskeyRouterDeps(passkeyHandler *PasskeyHandler, aasaHandler *AASAHandler) *RouterDeps {
+	deps := newMinimalDepsForNativeAuth(nil)
+	deps.PasskeyHandler = passkeyHandler
+	deps.AASAHandler = aasaHandler
+	deps.SessionFinder = &mockSessionFinderForRouter{
+		sessions: map[string]*model.Session{
+			"valid-session": {
+				ID:        "valid-session",
+				UserID:    "user-passkey-1",
+				ExpiresAt: time.Now().Add(1 * time.Hour),
+			},
+		},
+	}
+	return deps
+}
+
+// TestNewRouter_Passkey_UnauthEndpoints_RegisteredWhenHandlerInjected は passkey 未認証 4
+// endpoint がハンドラ注入時に到達可能で 200/2xx を返すことを検証する（Req 1.1 / 2.1）。
+func TestNewRouter_Passkey_UnauthEndpoints_RegisteredWhenHandlerInjected(t *testing.T) {
+	reg := &stubPasskeyRouterRegistration{}
+	authn := &stubPasskeyRouterAuthentication{}
+	deps := newPasskeyRouterDeps(NewPasskeyHandler(reg, authn), nil)
+	router := NewRouter(deps)
+
+	cases := []struct {
+		name       string
+		path       string
+		body       string
+		wantStatus int
+	}{
+		{"registration_begin", "/api/passkey/registration/begin",
+			`{"username":"alice","code_challenge":"E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"}`, http.StatusOK},
+		{"registration_finish", "/api/passkey/registration/finish",
+			`{"challenge_id":"c","credential":{"raw":true}}`, http.StatusOK},
+		{"authentication_begin", "/api/passkey/authentication/begin",
+			`{"code_challenge":"E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"}`, http.StatusOK},
+		{"authentication_finish", "/api/passkey/authentication/finish",
+			`{"challenge_id":"c","credential":{"raw":true}}`, http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"到達で 200", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			router.ServeHTTP(w, req)
+
+			if got := w.Result().StatusCode; got != tc.wantStatus {
+				t.Errorf("%s status = %d, want %d", tc.path, got, tc.wantStatus)
+			}
+		})
+	}
+}
+
+// TestNewRouter_Passkey_UnauthEndpoints_DoesNotRequireSession は passkey 未認証 route が
+// Cookie 無しで到達することを検証する（Req 5.4 と同じ性質 / 未認証グループ配置）。
+func TestNewRouter_Passkey_UnauthEndpoints_DoesNotRequireSession(t *testing.T) {
+	reg := &stubPasskeyRouterRegistration{}
+	authn := &stubPasskeyRouterAuthentication{}
+	deps := newPasskeyRouterDeps(NewPasskeyHandler(reg, authn), nil)
+	router := NewRouter(deps)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/passkey/authentication/begin",
+		strings.NewReader(`{"code_challenge":"E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"}`))
+	req.Header.Set("Content-Type", "application/json")
+	// Cookie / Bearer 無し
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if got := w.Result().StatusCode; got == http.StatusUnauthorized {
+		t.Errorf("status = 401, want non-401 (Cookie 無しで到達可能 / 未認証グループ)")
+	}
+	if authn.beginCalled != 1 {
+		t.Errorf("service called %d times, want 1", authn.beginCalled)
+	}
+}
+
+// TestNewRouter_Passkey_NotRegisteredWhenHandlerNil は passkey handler が nil のとき
+// 6 route すべてが 404 を返すことを検証する（NFR 2.2: WEBAUTHN_RP_ID 未設定環境の fail-closed）。
+func TestNewRouter_Passkey_NotRegisteredWhenHandlerNil(t *testing.T) {
+	// Arrange
+	deps := newPasskeyRouterDeps(nil, nil)
+	router := NewRouter(deps)
+
+	paths := []string{
+		"/api/passkey/registration/begin",
+		"/api/passkey/registration/finish",
+		"/api/passkey/registration/add/begin",
+		"/api/passkey/registration/add/finish",
+		"/api/passkey/authentication/begin",
+		"/api/passkey/authentication/finish",
+	}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
+			req.Header.Set("Content-Type", "application/json")
+			// 認証必須 route も対象。Cookie 有りで送っても handler nil なら 404 が返る。
+			req.AddCookie(&http.Cookie{Name: "session_id", Value: "valid-session"})
+			w := httptest.NewRecorder()
+
+			router.ServeHTTP(w, req)
+
+			if got := w.Result().StatusCode; got != http.StatusNotFound {
+				t.Errorf("%s status = %d, want 404 (PasskeyHandler nil / NFR 2.2)", path, got)
+			}
+		})
+	}
+}
+
+// TestNewRouter_Passkey_AddEndpoints_Require401WithoutCookie は追加登録 2 endpoint が
+// Cookie / Bearer 無しで 401 を返すことを検証する（Req 3.5）。
+func TestNewRouter_Passkey_AddEndpoints_Require401WithoutCookie(t *testing.T) {
+	reg := &stubPasskeyRouterRegistration{}
+	authn := &stubPasskeyRouterAuthentication{}
+	deps := newPasskeyRouterDeps(NewPasskeyHandler(reg, authn), nil)
+	router := NewRouter(deps)
+
+	paths := []string{
+		"/api/passkey/registration/add/begin",
+		"/api/passkey/registration/add/finish",
+	}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			body := `{}`
+			if strings.HasSuffix(path, "finish") {
+				body = `{"challenge_id":"c","credential":{"raw":true}}`
+			}
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			// Cookie / Bearer 無し
+			w := httptest.NewRecorder()
+
+			router.ServeHTTP(w, req)
+
+			if got := w.Result().StatusCode; got != http.StatusUnauthorized {
+				t.Errorf("%s status = %d, want 401 (Req 3.5)", path, got)
+			}
+			if reg.beginAddCalled != 0 || reg.finishAddCalled != 0 {
+				t.Errorf("service should not be called on unauthenticated request")
+			}
+		})
+	}
+}
+
+// TestNewRouter_Passkey_AddEndpoints_ReachesServiceWithValidCookie は追加登録 2 endpoint
+// が有効セッションで到達し、context 経由の userID が service に伝わることを検証する
+// （Req 3.1 / 3.2）。
+func TestNewRouter_Passkey_AddEndpoints_ReachesServiceWithValidCookie(t *testing.T) {
+	reg := &stubPasskeyRouterRegistration{}
+	authn := &stubPasskeyRouterAuthentication{}
+	deps := newPasskeyRouterDeps(NewPasskeyHandler(reg, authn), nil)
+	router := NewRouter(deps)
+
+	// begin
+	{
+		req := httptest.NewRequest(http.MethodPost, "/api/passkey/registration/add/begin",
+			strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: "session_id", Value: "valid-session"})
+		w := httptest.NewRecorder()
+
+		router.ServeHTTP(w, req)
+
+		if got := w.Result().StatusCode; got != http.StatusOK {
+			t.Errorf("add/begin status = %d, want 200", got)
+		}
+		if reg.beginAddCalled != 1 {
+			t.Errorf("service called %d times, want 1", reg.beginAddCalled)
+		}
+		if reg.lastAuthUserID != "user-passkey-1" {
+			t.Errorf("service received authUserID = %q, want user-passkey-1", reg.lastAuthUserID)
+		}
+	}
+	// finish
+	{
+		req := httptest.NewRequest(http.MethodPost, "/api/passkey/registration/add/finish",
+			strings.NewReader(`{"challenge_id":"c","credential":{"raw":true}}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: "session_id", Value: "valid-session"})
+		w := httptest.NewRecorder()
+
+		router.ServeHTTP(w, req)
+
+		if got := w.Result().StatusCode; got != http.StatusNoContent {
+			t.Errorf("add/finish status = %d, want 204", got)
+		}
+		if reg.finishAddCalled != 1 {
+			t.Errorf("service called %d times, want 1", reg.finishAddCalled)
+		}
+	}
+}
+
+// TestNewRouter_AASA_RegisteredWhenHandlerInjected は AASA handler 注入時に GET が
+// 200 で応答することを検証する（Req 5.1 / 5.4: 認証・IP 制限の外側）。
+func TestNewRouter_AASA_RegisteredWhenHandlerInjected(t *testing.T) {
+	deps := newPasskeyRouterDeps(nil, NewAASAHandler("TEAM1234.com.example.feedman"))
+	router := NewRouter(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/apple-app-site-association", nil)
+	// Cookie / Bearer 無し
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if got := w.Result().StatusCode; got != http.StatusOK {
+		t.Errorf("status = %d, want 200 (認証・IP 制限の外側 / Req 5.4)", got)
+	}
+	if ct := w.Result().Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+}
+
+// TestNewRouter_AASA_NotRegisteredWhenHandlerNil は AASA handler が nil のとき 404 を
+// 返すことを検証する（NFR 2.2: WEBAUTHN_IOS_APP_ID 未設定環境の fail-closed）。
+// また PasskeyHandler が非 nil でも AASA が独立に無効化されることを確認する。
+func TestNewRouter_AASA_NotRegisteredWhenHandlerNil(t *testing.T) {
+	// Arrange: PasskeyHandler は生きているが AASA は nil
+	reg := &stubPasskeyRouterRegistration{}
+	authn := &stubPasskeyRouterAuthentication{}
+	deps := newPasskeyRouterDeps(NewPasskeyHandler(reg, authn), nil)
+	router := NewRouter(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/apple-app-site-association", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert
+	if got := w.Result().StatusCode; got != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 (AASA handler nil / NFR 2.2)", got)
+	}
+}
+
+// TestNewRouter_Passkey_AASA_IndependentFailClose は PasskeyHandler と AASAHandler が
+// 独立に fail-closed であることを検証する（片方だけ nil のパターン 2 通り）。
+func TestNewRouter_Passkey_AASA_IndependentFailClose(t *testing.T) {
+	t.Run("Passkey生存 + AASA nil", func(t *testing.T) {
+		reg := &stubPasskeyRouterRegistration{}
+		authn := &stubPasskeyRouterAuthentication{}
+		deps := newPasskeyRouterDeps(NewPasskeyHandler(reg, authn), nil)
+		router := NewRouter(deps)
+
+		// passkey 未認証 route は到達可能
+		req := httptest.NewRequest(http.MethodPost, "/api/passkey/authentication/begin",
+			strings.NewReader(`{"code_challenge":"E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Result().StatusCode != http.StatusOK {
+			t.Errorf("passkey status = %d, want 200 (Passkey は生存)", w.Result().StatusCode)
+		}
+		// AASA は 404
+		req2 := httptest.NewRequest(http.MethodGet, "/.well-known/apple-app-site-association", nil)
+		w2 := httptest.NewRecorder()
+		router.ServeHTTP(w2, req2)
+		if w2.Result().StatusCode != http.StatusNotFound {
+			t.Errorf("AASA status = %d, want 404 (AASA は独立に無効)", w2.Result().StatusCode)
+		}
+	})
+
+	t.Run("Passkey nil + AASA生存", func(t *testing.T) {
+		deps := newPasskeyRouterDeps(nil, NewAASAHandler("TEAM1234.com.example.feedman"))
+		router := NewRouter(deps)
+
+		// passkey は 404
+		req := httptest.NewRequest(http.MethodPost, "/api/passkey/authentication/begin",
+			strings.NewReader(`{"code_challenge":"E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Result().StatusCode != http.StatusNotFound {
+			t.Errorf("passkey status = %d, want 404 (Passkey は独立に無効)", w.Result().StatusCode)
+		}
+		// AASA は 200
+		req2 := httptest.NewRequest(http.MethodGet, "/.well-known/apple-app-site-association", nil)
+		w2 := httptest.NewRecorder()
+		router.ServeHTTP(w2, req2)
+		if w2.Result().StatusCode != http.StatusOK {
+			t.Errorf("AASA status = %d, want 200 (AASA は生存)", w2.Result().StatusCode)
+		}
+	})
+}
+
 // TestNewRouter_NativeAuthIPRateLimit_Degradations は縮退構成での後方互換を検証する
 // （Testing Strategy 6 / Req 2.4）。
 func TestNewRouter_NativeAuthIPRateLimit_Degradations(t *testing.T) {

@@ -50,6 +50,8 @@ func setupAuthCodeTestDB(t *testing.T) *sql.DB {
 	// 新規 native auth テーブル（auth_codes / refresh_token_families / refresh_tokens）も
 	// 明示 DROP しておく（同一 DB を繰り返し利用するローカル開発機でも fresh up を保証）。
 	cleanupSQL := `
+		DROP TABLE IF EXISTS passkey_challenges CASCADE;
+		DROP TABLE IF EXISTS passkey_credentials CASCADE;
 		DROP TABLE IF EXISTS refresh_tokens CASCADE;
 		DROP TABLE IF EXISTS refresh_token_families CASCADE;
 		DROP TABLE IF EXISTS auth_codes CASCADE;

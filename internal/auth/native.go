@@ -46,7 +46,7 @@ func (s *Service) HandleNativeCallback(ctx context.Context, code, pkceChallenge 
 		return "", err
 	}
 
-	plainCode, err := generateAuthCode()
+	plainCode, err := GenerateAuthCode()
 	if err != nil {
 		return "", fmt.Errorf("failed to generate auth code: %w", err)
 	}
@@ -74,9 +74,13 @@ func (s *Service) HandleNativeCallback(ctx context.Context, code, pkceChallenge 
 	return plainCode, nil
 }
 
-// generateAuthCode は暗号論的乱数 32 byte（256bit）を base64url（no-padding）へ
+// GenerateAuthCode は暗号論的乱数 32 byte（256bit）を base64url（no-padding）へ
 // エンコードした URL-safe な auth_code を生成する（NFR 1.1）。
-func generateAuthCode() (string, error) {
+//
+// パスキー認証成功時にも同じ生成規則で auth_code を発行するため（Issue #216 / Req 2.2 /
+// 2.3）、`internal/passkey` から参照できるよう exported にしている（既存挙動は完全に
+// 不変 / NFR 2.1）。
+func GenerateAuthCode() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", err

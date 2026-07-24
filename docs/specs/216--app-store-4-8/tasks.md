@@ -5,7 +5,7 @@
 各タスクは独立コミット可能な粒度で、下から上へ（永続化層 → ドメイン層 → HTTP 層 → wiring）
 積み上げる方針とする。並列可能（`(P)`）を明示したタスクは異なる `_Boundary:_` を担当する。
 
-- [ ] 1. マイグレーション追加とドメインモデル / username 正規化の導入
+- [x] 1. マイグレーション追加とドメインモデル / username 正規化の導入
   - `internal/database/migrations/20260724120000_add_passkey_tables.up.sql` を新規作成
     - `passkey_credentials` テーブル（id / user_id / credential_id UNIQUE / public_key /
       sign_count / attestation_type / aaguid / transports / created_at / last_used_at）
@@ -27,7 +27,7 @@
   - _Requirements: 1.4, 1.5, 4.1, 4.2, 4.5, NFR 1.1, NFR 2.1_
   - _Boundary: MigrationSchema, PasskeyModel, UsernameValidator_
 
-- [ ] 2. Repository 層の追加（credential / challenge / users 拡張）
+- [x] 2. Repository 層の追加（credential / challenge / users 拡張）
   - `internal/repository/interfaces.go` に以下を追加
     - `PasskeyCredentialRepository` interface（Create / FindByCredentialID / ListByUserID /
       UpdateSignCount / DeleteByUserID / DeleteByUserIDExec）
@@ -59,7 +59,7 @@
   - _Boundary: PasskeyCredentialRepository, PasskeyChallengeRepository, UserRepository_
   - _Depends: 1_
 
-- [ ] 3. ChallengeStore と WebAuthnAdapter の実装
+- [x] 3. ChallengeStore と WebAuthnAdapter の実装
   - `internal/passkey/errors.go` を新規作成し `ErrInvalidUsername` / `ErrUsernameTaken` /
     `ErrRegistrationFailed` / `ErrAuthenticationFailed` / `ErrChallengeNotUsable` sentinel を集約
   - `go.mod` に `github.com/go-webauthn/webauthn` を追加（`go get github.com/go-webauthn/webauthn@latest`）
@@ -88,7 +88,7 @@
   - _Boundary: WebAuthnAdapter, ChallengeStore_
   - _Depends: 2_
 
-- [ ] 4. RegistrationService の実装（新規登録 + 追加登録）
+- [x] 4. RegistrationService の実装（新規登録 + 追加登録）
   - `internal/passkey/registration_service.go` を新規作成
     - `RegistrationService` struct（依存: `WebAuthnAdapter` / `ChallengeStore` /
       `UserWriter`（最小 IF）/ `PasskeyCredentialWriter`（最小 IF）/ `now func() time.Time`）
@@ -126,7 +126,7 @@
   - _Boundary: RegistrationService_
   - _Depends: 3_
 
-- [ ] 5. AuthenticationService の実装（既存 auth_code 発行への合流）
+- [x] 5. AuthenticationService の実装（既存 auth_code 発行への合流）
   - `internal/passkey/authentication_service.go` を新規作成
     - `AuthenticationService` struct（依存: `WebAuthnAdapter` / `ChallengeStore` /
       `PasskeyCredentialReader`（最小 IF: FindByCredentialID / UpdateSignCount）/
@@ -162,7 +162,7 @@
   - _Boundary: AuthenticationService_
   - _Depends: 3, 4_
 
-- [ ] 6. HTTP handlers + router 配線 + IP rate limit
+- [x] 6. HTTP handlers + router 配線 + IP rate limit
   - `internal/handler/passkey_handler.go` を新規作成
     - `PasskeyHandler` struct（依存: `PasskeyRegistrationService` / `PasskeyAuthenticationService`
       の最小 IF）
@@ -211,7 +211,7 @@
   - _Boundary: PasskeyHandler, AASAHandler, Router_
   - _Depends: 4, 5_
 
-- [ ] 7. Config 拡張と app.go wiring（fail-closed 縮退の完成）
+- [x] 7. Config 拡張と app.go wiring（fail-closed 縮退の完成）
   - `internal/config/config.go` を拡張:
     - `Config` に `WebAuthnRPID string` / `WebAuthnRPDisplayName string` /
       `WebAuthnOrigins []string` / `WebAuthnIOSAppID string` /
@@ -248,7 +248,7 @@
   - _Boundary: Config, AppWiring_
   - _Depends: 6_
 
-- [ ] 8. 退会 tx cleanup 統合と既存契約 regression 検証
+- [x] 8. 退会 tx cleanup 統合と既存契約 regression 検証
   - `internal/user/service.go` を拡張:
     - `TxPasskeyCredentialDeleter` interface を追加（`DeleteByUserIDTx(ctx, tx, userID) error`）
     - `Service.txPasskeyCredentialDeleter TxPasskeyCredentialDeleter` フィールドを追加

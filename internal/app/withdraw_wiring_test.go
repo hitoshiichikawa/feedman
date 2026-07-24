@@ -33,6 +33,7 @@ func TestQuerierFromTx_RejectsUnexpectedType(t *testing.T) {
 // 配線できることを検証する（nil リポジトリでも構築自体は成功する）。
 // Issue #170: native auth deleter（auth_code / refresh_token）の repository を
 // 末尾に追加した呼び出し signature を検証する。
+// Issue #216: passkey credential deleter の repository を末尾に追加する。
 func TestNewTxUserService_Constructs(t *testing.T) {
 	beginner := repository.NewSQLTxBeginner(nil)
 	svc := newTxUserService(
@@ -43,15 +44,37 @@ func TestNewTxUserService_Constructs(t *testing.T) {
 		repository.NewPostgresItemStateRepo(nil),
 		repository.NewPostgresAuthCodeRepo(nil),
 		repository.NewPostgresRefreshTokenRepo(nil),
+		repository.NewPostgresPasskeyCredentialRepo(nil),
 	)
 	if svc == nil {
 		t.Fatal("expected non-nil user.Service")
 	}
 }
 
+// TestNewTxUserService_NilPasskeyRepoStillConstructs は passkeyCredentialRepo が
+// nil でも Service が構築できることを検証する（NFR 2.2 の env 未設定環境互換 /
+// Issue #216 の passkey 無効化経路）。
+func TestNewTxUserService_NilPasskeyRepoStillConstructs(t *testing.T) {
+	beginner := repository.NewSQLTxBeginner(nil)
+	svc := newTxUserService(
+		beginner,
+		repository.NewPostgresUserRepo(nil),
+		repository.NewPostgresSessionRepo(nil),
+		repository.NewPostgresSubscriptionRepo(nil),
+		repository.NewPostgresItemStateRepo(nil),
+		repository.NewPostgresAuthCodeRepo(nil),
+		repository.NewPostgresRefreshTokenRepo(nil),
+		nil, // passkeyCredentialRepo 無し（env 未設定 → passkey 無効の経路）
+	)
+	if svc == nil {
+		t.Fatal("expected non-nil user.Service even when passkey repo is nil")
+	}
+}
+
 // TestWithdrawWiringAdapters_SatisfyInterfaces は各アダプタが
 // user パッケージのトランザクション対応インターフェースを満たすことを検証する。
 // Issue #170: txAuthCodeDeleterAdapter / txRefreshTokenDeleterAdapter も対象。
+// Issue #216: txPasskeyCredentialDeleterAdapter も対象。
 func TestWithdrawWiringAdapters_SatisfyInterfaces(t *testing.T) {
 	var _ user.TxBeginner = (*txBeginnerAdapter)(nil)
 	var _ user.TxItemStateDeleter = (*txItemStateDeleterAdapter)(nil)
@@ -60,4 +83,5 @@ func TestWithdrawWiringAdapters_SatisfyInterfaces(t *testing.T) {
 	var _ user.TxUserDeleter = (*txUserDeleterAdapter)(nil)
 	var _ user.TxAuthCodeDeleter = (*txAuthCodeDeleterAdapter)(nil)
 	var _ user.TxRefreshTokenDeleter = (*txRefreshTokenDeleterAdapter)(nil)
+	var _ user.TxPasskeyCredentialDeleter = (*txPasskeyCredentialDeleterAdapter)(nil)
 }
