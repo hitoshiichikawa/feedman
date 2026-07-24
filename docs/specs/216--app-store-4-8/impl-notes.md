@@ -18,6 +18,25 @@
   stage-a-verify gate が発火する可能性がある。boundary（MigrationSchema / PasskeyModel /
   UsernameValidator）外の修正は本 task では行わなかった。別 Issue での cleanup 起票、または
   gate の許容判断を人間に委ねる。
+- **task 4 の codeChallenge 引数（design.md L596-598 と tasks.md L95 の差分 / 実装判断）**:
+  design.md の Go シグネチャ L596-598 は `BeginRegistrationNew(ctx, rawUsername string,
+  optionalEmail string)` で codeChallenge 引数を持たないが、tasks.md L95 は
+  `BeginRegistrationNew(ctx, rawUsername, optionalEmail, codeChallenge)` の 4 引数を
+  指示し、design.md L707 の API 契約（`{username, email?, code_challenge}`）と整合する。
+  一方、design.md L610 の `FinishRegistrationNew` は `(userID string, err error)` を返し
+  **auth_code を発行しない**。task 4 の `_Requirements:_` にも Req 2.x（PKCE / auth_code）
+  は含まれない。加えて `model.PasskeyChallenge`（task 1 で確定・変更不可）は PKCE 用
+  フィールドを持たず、`SessionData` は go-webauthn.SessionData そのままの契約なので
+  PKCE を混ぜられない。以上の制約下で「session_data に PKCE を保存して後段継承」を
+  task 4 内で実現する手段は無い。**採用解**: `BeginRegistrationNew` に `codeChallenge
+  string` 引数を追加し、`auth.ValidatePKCES256(codeChallenge, "S256")` で **early
+  validation のみ**を実施（不正 PKCE で無駄な WebAuthn ceremony 起動を防ぐ）。**PKCE の
+  永続化・後段継承は本 task では省略**（FinishRegistrationNew が auth_code を発行しない
+  ため事実上 no-op）。task 5 の AuthenticationService 側で `BeginAuthentication` が
+  code_challenge を受け取り session に載せて finish 時に PKCEChallenge として auth_code に
+  紐付ける設計を tasks.md L135-152 が担うため、新規登録から auth_code 発行までの一連の
+  合流は認証フロー側で完結する（新規登録 finish 直後に別途 `/api/passkey/authentication/*`
+  を叩く前提）。design/tasks 上の軽微な不整合であり実装は tasks.md に従った。
 - **design.md File Structure Plan の表記ゆれ（実装は tasks.md に準拠）**: design.md L254 の
   ディレクトリ tree では passkey ドメイン型を `internal/passkey/model.go` と記載しているが、
   同 design.md の Modified Files（L267）・コード内コメント（L390 / L413 の
@@ -153,3 +172,58 @@
     task 4 の RegistrationService も同じ user handle を UUID から生成し、credentials 保存時に userHandle を
     永続化することを検討する（現行 model.PasskeyCredential は user_id を持つが user_handle 生値は持たない。
     UUID を直接 handle として使うか、UUID bytes を base64url 化するかは task 4/5 の実装判断）。
+
+### Task 4
+
+- **採用方針**: `internal/passkey/registration_service.go` に `RegistrationService` を追加し、
+  新規登録 (Begin/FinishRegistrationNew) と追加登録 (Begin/FinishAddCredential) の 4 メソッドを
+  設計通り実装した。依存はすべて最小 interface（`WebAuthnAdapter` 既存 / `challengeStore`
+  内部宣言 / `UserWriter` / `PasskeyCredentialWriter`）として受け、テスト（22 サブテスト）は
+  全依存を stub 化した table-driven 形式で外部ネットワーク非依存に主要ケース（正常系・
+  異常系・境界値）を検証した（NFR 4.1）。
+- **重要な判断**:
+  - **user handle と UUID→bytes 方式（task 3 申し送り解消）**: WebAuthnID は
+    **`[]byte(uuidString)`（36 バイト = UUID の文字列を byte 列化）** で統一した。新規登録の
+    Begin では `uuid.New().String()` で仮 UUID を発行し、Finish 時に users.id として
+    そのまま採用する（CreateUserOnly の `u.ID = 仮UUID`）。これにより task 5 の
+    credentialLookup が `[]byte(users.id)` を WebAuthnID として使う実装と bytes.Equal で
+    整合する。追加登録は既存 `users.id` をそのまま `[]byte(u.ID)` として使う。
+  - **仮 UUID の challenge への保存経路**: model.PasskeyChallenge を変更禁止のため、
+    `challenge.UserID` フィールドに仮 UUID を保存する形で Finish 時に復元可能にした
+    （design.md では registration_new は UserID=nil を想定しているが、Finish で
+    WebAuthnUser を再構築するために UserID を保存する運用差分。実装判断として選択）。
+  - **codeChallenge 引数の追加**: 上記「確認事項」節に記載の通り、design.md L596-598 の
+    シグネチャに対し tasks.md L95 と design API 契約 L707 を優先し、`BeginRegistrationNew`
+    に `codeChallenge string` 引数を追加。`auth.ValidatePKCES256(codeChallenge, "S256")` で
+    early validation のみ実施し、PKCE の永続化・後段継承は task 5 の AuthenticationService
+    側に委譲した（本 task では no-op）。
+  - **エラー正規化**: username 形式不正→`ErrInvalidUsername`（handler で 400
+    INVALID_USERNAME）、username 重複→`ErrUsernameTaken`（409）、それ以外の登録拒否
+    （PKCE 形式不正 / challenge 期限切れ = `ErrChallengeNotUsable` / attestation 失敗
+    / `repository.ErrCredentialAlreadyRegistered` / `repository.ErrUsernameTaken` の
+    Finish 段階 race / userID mismatch / user 未存在）はすべて `ErrRegistrationFailed`
+    に uniform 化（Req 1.7 / 3.6 / 3.7）。DB 障害等の infra エラーは
+    `fmt.Errorf("...: %w", err)` で wrap して伝播（handler で 500）。拒否ログは
+    `slog.Warn` + `challenge_id_prefix`（先頭 8 文字）のみで、平文 challenge / attestation
+    / requestBody / username 生値は出さない（NFR 1.2 / 3.2）。
+  - **追加登録の Req 3.6 二段防衛**: `FindByCredentialID` による pre-check（attestation
+    検証**後**に他 user 既登録を明示的に拒否）と `Create` の UNIQUE 衝突 race による最終
+    防衛線（`repository.ErrCredentialAlreadyRegistered` → `ErrRegistrationFailed`）の
+    2 段で担保。attestation 検証後 pre-check にした理由は、requestBody 内の credential.rawId は
+    parse 前は取り出せないため。
+  - **依存の interface segregation**: `challengeStore` interface を service ファイル内で
+    `Issue` / `Consume` の 2 メソッドに絞って宣言。具体型 `*passkey.ChallengeStore` が
+    構造的にこれを充足するため wiring 時にそのまま渡せ、テストでは stub を差し込める
+    （CLAUDE.md §5 準拠）。
+- **残存課題（task 5 への申し送り）**:
+  - **PKCE 継承**: task 5 の AuthenticationService は begin で codeChallenge を受け取り、
+    session に載せて finish 時に AuthCode.PKCEChallenge へ設定する（tasks.md L135-152）。
+    task 4 側では PKCE を permanent 保存しないため、認証と登録の PKCE 経路は完全に
+    独立する（登録直後に別途認証 begin/finish を呼ぶ想定）。
+  - **credentialLookup 実装**: task 5 は `FindByCredentialID` → `FindByID` の順で解決し、
+    WebAuthnUser の `WebAuthnID = []byte(users.id)` として組み立てること。本 task の
+    実装（追加登録の WebAuthnUser 組み立てと同じパターン）を参照。
+  - **user 表示名の扱い**: 追加登録の `registrationUser.name / displayName` は
+    `displayNameFor(u)`（Username → Name → Email → users.id の順で fallback）で確定。
+    task 5 の WebAuthnUser 組み立ても同 helper を再利用するか、独自の short helper を
+    切るかは task 5 の判断。表示名は認証判定には関わらないため、非空であればよい。
