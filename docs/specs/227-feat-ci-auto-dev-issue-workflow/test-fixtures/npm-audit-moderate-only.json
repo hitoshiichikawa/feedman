@@ -1,0 +1,45 @@
+{
+  "auditReportVersion": 2,
+  "vulnerabilities": {
+    "esbuild": {
+      "name": "esbuild",
+      "severity": "moderate",
+      "isDirect": false,
+      "via": [
+        {
+          "source": 1105441,
+          "name": "esbuild",
+          "dependency": "esbuild",
+          "title": "esbuild enables any website to send any requests to the development server and read the response",
+          "url": "https://github.com/advisories/GHSA-g7r4-m6w7-qqqr",
+          "severity": "moderate",
+          "cwe": ["CWE-346"],
+          "cvss": {"score": 5.3, "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+          "range": "<=0.24.2"
+        }
+      ],
+      "effects": [],
+      "range": "<=0.24.2",
+      "nodes": ["node_modules/esbuild"],
+      "fixAvailable": true
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 1,
+      "high": 0,
+      "critical": 0,
+      "total": 1
+    },
+    "dependencies": {
+      "prod": 100,
+      "dev": 200,
+      "optional": 0,
+      "peer": 0,
+      "peerOptional": 0,
+      "total": 300
+    }
+  }
+}
