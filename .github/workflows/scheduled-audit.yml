@@ -1,0 +1,265 @@
+name: Scheduled Vulnerability Audit
+
+# =============================================================================
+# 定期依存脆弱性スキャン workflow (Issue #227)
+#
+# 既存の `.github/workflows/ci.yml` (push / pull_request トリガー) とは独立に
+# schedule (cron) で毎日 1 回実行し、依存脆弱性が検出された場合に auto-dev ラベル付き
+# Issue を自動起票する。これにより advisory rotation 起因で無関係 PR の CI が赤くなる
+# 事象 (過去 3 回発生: 2026-06-23 / 2026-07-24 / 2026-07-26) への先手対応を可能にする。
+#
+# 設計方針:
+#   - 対象ブランチ: develop の HEAD (Req 1.4)
+#   - 実行時刻: 22:15 UTC = 07:15 JST (NFR 2.1, 2.2 / PM 決定 1)
+#   - スキャン: frontend (npm audit --audit-level=high) / backend (govulncheck)
+#   - 起票粒度: 1 スキャン = 1 Issue に集約 (PM 決定 2)
+#   - 重複ガード: HTML コメントマーカー (PM 決定 3)
+#   - 検出ゼロ時: Issue 作成なし・green で完了 (Req 5.1, 5.3)
+#   - 既存 CI (ci.yml) には一切影響しない (Req 6.1, 6.2, 6.3)
+#
+# 詳細仕様:
+#   - `docs/specs/227-feat-ci-auto-dev-issue-workflow/requirements.md`
+#
+# 抽出・render は再利用可能なスクリプトに切り出し済み:
+#   - `.github/scripts/scheduled-audit/extract-npm-audit.sh`
+#   - `.github/scripts/scheduled-audit/extract-govulncheck.sh`
+#   - `.github/scripts/scheduled-audit/render-issue-body.sh`
+# =============================================================================
+
+on:
+  # Req 1.2 / NFR 2.1, 2.2: 毎日 22:15 UTC = 07:15 JST。毎時 0 分の混雑帯を避ける
+  schedule:
+    - cron: '15 22 * * *'
+  # Req 1.3: GitHub UI からの手動実行
+  workflow_dispatch:
+  # Req 6.3: pull_request / push はトリガーにしない (明示的に列挙しないことで担保)
+
+# NFR 1.1: 最小権限
+#   - contents: read : develop の checkout に必要
+#   - issues:   write: 検出時の Issue 起票に必要
+# その他の権限 (pull-requests / actions / packages 等) は付与しない
+permissions:
+  contents: read
+  issues: write
+
+# 同一日の schedule と workflow_dispatch が同時発火した場合は先発を優先
+concurrency:
+  group: scheduled-audit-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Frontend: `web/` の npm 依存を `npm audit --audit-level=high` でスキャン
+  # 検出時は `<!-- scheduled-audit: npm -->` マーカーを含む Issue を起票
+  # ---------------------------------------------------------------------------
+  frontend-audit:
+    name: Frontend Dependency Vulnerability Scan (scheduled)
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Req 3.3 / 4.6 / PM 決定 3: フロントエンド用 canonical マーカー
+      MARKER: '<!-- scheduled-audit: npm -->'
+      JOB_NAME: frontend-audit
+      # Req 1.4: 対象ブランチ
+      TARGET_REF: develop
+    steps:
+      # Req 1.4: develop の HEAD を checkout
+      - name: Checkout develop HEAD
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_REF }}
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies (web/)
+        working-directory: web
+        run: npm ci
+
+      # Req 1.5 / NFR 4.1: `npm audit --json` を実行し、非ゼロ終了でも JSON を捕捉
+      # 抽出は既存スクリプトに委譲し high / critical のみを TSV 化する
+      - name: Run npm audit and extract advisories
+        id: audit
+        working-directory: web
+        run: |
+          set +e
+          npm audit --json > /tmp/npm-audit.json
+          npm_exit=$?
+          set -e
+          echo "npm audit exit code: $npm_exit"
+
+          bash "$GITHUB_WORKSPACE/.github/scripts/scheduled-audit/extract-npm-audit.sh" \
+            < /tmp/npm-audit.json > /tmp/npm-advisories.tsv
+
+          detected=$(wc -l < /tmp/npm-advisories.tsv | tr -d ' ')
+          echo "detected=$detected" >> "$GITHUB_OUTPUT"
+          echo "Detected $detected high/critical advisories"
+
+      # NFR 4.1: 検出結果 (件数・サマリー) をジョブサマリーに残す
+      - name: Publish scan summary
+        if: always()
+        run: |
+          {
+            echo "## Frontend Dependency Vulnerability Scan (npm audit)"
+            echo ""
+            echo "- 対象ブランチ: \`${TARGET_REF}\`"
+            echo "- 検出件数: **${{ steps.audit.outputs.detected }}** (high / critical)"
+            echo ""
+            if [ "${{ steps.audit.outputs.detected }}" != "0" ] && [ -s /tmp/npm-advisories.tsv ]; then
+              echo "| Severity | Package | Advisory ID | Title |"
+              echo "|---|---|---|---|"
+              awk -F'\t' '{ printf "| %s | `%s` | %s | %s |\n", $1, $2, $3, $4 }' /tmp/npm-advisories.tsv
+            else
+              echo "検出なし。green で完了します。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Req 3.1 / 3.4 / PM 決定 3: open Issue から同一マーカーを持つものを探す
+      # (close 済みは対象外 / Req 3.4)。search index の遅延を避けるため
+      # gh issue list の JSON を fetch して local jq で contains 判定する
+      - name: Check duplicate open issue
+        id: dup
+        if: steps.audit.outputs.detected != '0'
+        run: |
+          existing=$(gh issue list --state open --limit 200 \
+            --search "scheduled-audit in:body" --json number,body \
+            | jq -r --arg marker "$MARKER" \
+                '[.[] | select(.body // "" | contains($marker))] | first | .number // empty')
+          if [ -n "$existing" ]; then
+            echo "duplicate=true" >> "$GITHUB_OUTPUT"
+            echo "existing_issue=$existing" >> "$GITHUB_OUTPUT"
+            echo "Duplicate open issue found: #$existing (skip create)"
+          else
+            echo "duplicate=false" >> "$GITHUB_OUTPUT"
+            echo "No duplicate open issue"
+          fi
+
+      # Req 2.1 / 2.3 / 2.4 / 4.*: 未重複時のみ Issue を起票
+      - name: Render body and create Issue
+        if: steps.audit.outputs.detected != '0' && steps.dup.outputs.duplicate != 'true'
+        env:
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/scripts/scheduled-audit/render-issue-body.sh" \
+            --kind npm \
+            --workflow-url "$WORKFLOW_URL" \
+            --marker "$MARKER" \
+            --job-name "$JOB_NAME" \
+            --input /tmp/npm-advisories.tsv \
+            > /tmp/issue-body.md
+
+          # Req 4.5: title 先頭に fix(deps) prefix (既存 issue #225 と同型)
+          title="fix(deps): web の npm audit high 検出 ($(date -u +%Y-%m-%d) 定期スキャン)"
+          gh issue create \
+            --title "$title" \
+            --body-file /tmp/issue-body.md \
+            --label auto-dev
+
+  # ---------------------------------------------------------------------------
+  # Backend: `go.mod` の Go 依存を `govulncheck ./...` でスキャン
+  # 検出時は `<!-- scheduled-audit: govulncheck -->` マーカーを含む Issue を起票
+  # Req 3.2: frontend-audit と独立に判定 (needs 依存を持たない)
+  # ---------------------------------------------------------------------------
+  backend-govulncheck:
+    name: Go Dependency Vulnerability Scan (scheduled)
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Req 3.3 / 4.6 / PM 決定 3: バックエンド用 canonical マーカー
+      MARKER: '<!-- scheduled-audit: govulncheck -->'
+      JOB_NAME: backend-govulncheck
+      # Req 1.4: 対象ブランチ
+      TARGET_REF: develop
+    steps:
+      - name: Checkout develop HEAD
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_REF }}
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # 既存 ci.yml の govulncheck ジョブと同じインストール方式を踏襲
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      # Req 1.6 / NFR 4.1: `govulncheck -json` を実行し、非ゼロでも JSON を捕捉
+      - name: Run govulncheck and extract advisories
+        id: scan
+        run: |
+          set +e
+          govulncheck -json ./... > /tmp/govulncheck.json 2>/tmp/govulncheck.err
+          scan_exit=$?
+          set -e
+          echo "govulncheck exit code: $scan_exit"
+
+          bash "$GITHUB_WORKSPACE/.github/scripts/scheduled-audit/extract-govulncheck.sh" \
+            < /tmp/govulncheck.json > /tmp/go-advisories.tsv
+
+          detected=$(wc -l < /tmp/go-advisories.tsv | tr -d ' ')
+          echo "detected=$detected" >> "$GITHUB_OUTPUT"
+          echo "Detected $detected callable vulnerabilities"
+
+      - name: Publish scan summary
+        if: always()
+        run: |
+          {
+            echo "## Go Dependency Vulnerability Scan (govulncheck)"
+            echo ""
+            echo "- 対象ブランチ: \`${TARGET_REF}\`"
+            echo "- 検出件数: **${{ steps.scan.outputs.detected }}** (呼び出し到達)"
+            echo ""
+            if [ "${{ steps.scan.outputs.detected }}" != "0" ] && [ -s /tmp/go-advisories.tsv ]; then
+              echo "| Severity | Package | Advisory ID | Summary |"
+              echo "|---|---|---|---|"
+              awk -F'\t' '{ printf "| %s | `%s` | %s | %s |\n", $1, $2, $3, $4 }' /tmp/go-advisories.tsv
+            else
+              echo "検出なし。green で完了します。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Req 3.1 / 3.2 / 3.4 / PM 決定 3
+      - name: Check duplicate open issue
+        id: dup
+        if: steps.scan.outputs.detected != '0'
+        run: |
+          existing=$(gh issue list --state open --limit 200 \
+            --search "scheduled-audit in:body" --json number,body \
+            | jq -r --arg marker "$MARKER" \
+                '[.[] | select(.body // "" | contains($marker))] | first | .number // empty')
+          if [ -n "$existing" ]; then
+            echo "duplicate=true" >> "$GITHUB_OUTPUT"
+            echo "existing_issue=$existing" >> "$GITHUB_OUTPUT"
+            echo "Duplicate open issue found: #$existing (skip create)"
+          else
+            echo "duplicate=false" >> "$GITHUB_OUTPUT"
+            echo "No duplicate open issue"
+          fi
+
+      # Req 2.2 / 2.3 / 2.4 / 4.*
+      - name: Render body and create Issue
+        if: steps.scan.outputs.detected != '0' && steps.dup.outputs.duplicate != 'true'
+        env:
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/scripts/scheduled-audit/render-issue-body.sh" \
+            --kind govulncheck \
+            --workflow-url "$WORKFLOW_URL" \
+            --marker "$MARKER" \
+            --job-name "$JOB_NAME" \
+            --input /tmp/go-advisories.tsv \
+            > /tmp/issue-body.md
+
+          title="fix(deps): govulncheck 検出 ($(date -u +%Y-%m-%d) 定期スキャン)"
+          gh issue create \
+            --title "$title" \
+            --body-file /tmp/issue-body.md \
+            --label auto-dev
