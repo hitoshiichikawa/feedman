@@ -1,0 +1,3 @@
+{"config":{"protocol_version":"v1.0.0","scanner_name":"govulncheck","scanner_version":"v1.1.4","db":"https://vuln.go.dev","db_last_modified":"2026-07-25T12:00:00Z","go_version":"go1.25.0","scan_level":"symbol"}}
+{"progress":{"message":"Scanning your code and 100 packages across 20 dependent modules for known vulnerabilities..."}}
+{"progress":{"message":"No vulnerabilities found."}}
