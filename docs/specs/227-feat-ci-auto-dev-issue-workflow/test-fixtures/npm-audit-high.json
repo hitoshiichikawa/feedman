@@ -1,0 +1,77 @@
+{
+  "auditReportVersion": 2,
+  "vulnerabilities": {
+    "brace-expansion": {
+      "name": "brace-expansion",
+      "severity": "high",
+      "isDirect": false,
+      "via": [
+        {
+          "source": 1105443,
+          "name": "brace-expansion",
+          "dependency": "brace-expansion",
+          "title": "brace-expansion Regular Expression Denial of Service vulnerability",
+          "url": "https://github.com/advisories/GHSA-v6h2-p8h4-qcjw",
+          "severity": "high",
+          "cwe": ["CWE-1333"],
+          "cvss": {"score": 7.5, "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"},
+          "range": "<=5.0.7"
+        }
+      ],
+      "effects": ["minimatch"],
+      "range": "<=5.0.7",
+      "nodes": ["node_modules/brace-expansion"],
+      "fixAvailable": false
+    },
+    "postcss": {
+      "name": "postcss",
+      "severity": "critical",
+      "isDirect": false,
+      "via": [
+        {
+          "source": 1105442,
+          "name": "postcss",
+          "dependency": "postcss",
+          "title": "postcss Line return parsing error",
+          "url": "https://github.com/advisories/GHSA-r28c-9q8g-f849",
+          "severity": "critical",
+          "cwe": ["CWE-74"],
+          "cvss": {"score": 9.1, "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"},
+          "range": "<=8.5.17"
+        }
+      ],
+      "effects": [],
+      "range": "<=8.5.17",
+      "nodes": ["node_modules/postcss"],
+      "fixAvailable": true
+    },
+    "minimatch": {
+      "name": "minimatch",
+      "severity": "high",
+      "isDirect": false,
+      "via": ["brace-expansion"],
+      "effects": ["eslint"],
+      "range": "*",
+      "nodes": ["node_modules/minimatch"],
+      "fixAvailable": false
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 2,
+      "critical": 1,
+      "total": 3
+    },
+    "dependencies": {
+      "prod": 100,
+      "dev": 200,
+      "optional": 0,
+      "peer": 0,
+      "peerOptional": 0,
+      "total": 300
+    }
+  }
+}
