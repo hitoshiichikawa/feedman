@@ -25,9 +25,9 @@
 - native_auth_handler_test.go
 - passkey_handler_test.go
 - router_test.go
-- export
-- /**
-- NC-->>HR:
+- router_unauth_ratelimit_test.go
+- use-passkey-authentication.contract.test.tsx
+- api.test.ts
 
 ## Candidate docs
 - design.md
