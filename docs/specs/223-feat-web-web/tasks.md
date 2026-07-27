@@ -27,7 +27,7 @@ per-task ループ運用時のテスト境界: 各タスクは実装 + テスト
   - _Requirements: 3.1, 4.2, NFR 1.1_
   - _Boundary: SessionExchangeService_
 
-- [ ] 2. サーバ: `POST /api/auth/session` handler と wiring を追加する（既存 Cookie 属性と厳密一致）
+- [x] 2. サーバ: `POST /api/auth/session` handler と wiring を追加する（既存 Cookie 属性と厳密一致）
   - `internal/handler/native_auth_handler.go` の `NativeAuthHandler` に `Session(w, r)` メソッドを追加。
     `dec.DisallowUnknownFields()` で `{auth_code, code_verifier}` を厳格 decode（既存 `Token`
     流儀）。必須欠落 / JSON 不正 → 400 INVALID_REQUEST（既存 `invalidRequestError` 相当）。
