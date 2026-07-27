@@ -397,6 +397,45 @@ func TestNewRouter_NativeAuthSessionIPRateLimit_SameShapeAsExistingRoutes(t *tes
 	}
 }
 
+// --- GET /api/passkey/capability の IP 単位レート制限（Issue #223 / task 3 / Req 5.2 / NFR 2.1） ---
+
+// doGetRateLimit は指定 path / remoteAddr で GET リクエストを送るヘルパ。
+// passkey/capability など GET 系の rate-limit 検証に使う（POST 系は doPostRateLimit）。
+func doGetRateLimit(router http.Handler, path, remoteAddr string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.RemoteAddr = remoteAddr
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	return w
+}
+
+// TestNewRouter_PasskeyCapabilityIPRateLimit_429OnExcess は GET /api/passkey/capability が
+// 同一 IP の閾値超過時に 429 + Retry-After で応答することを検証する
+// （Issue #223 / task 3: 既存 passkey 4 route と同じ unauthIPMW を通す / Req 5.2 / NFR 2.1）。
+func TestNewRouter_PasskeyCapabilityIPRateLimit_429OnExcess(t *testing.T) {
+	// Arrange: burst=1（1 回目で枯渇）— 既存 passkey rate-limit ヘルパを再利用
+	router, _, _, ipRL := newPasskeyRateLimitRouter(1)
+	defer ipRL.Stop()
+
+	// Act 1: 1 回目は閾値以内なので通常応答（200）
+	w1 := doGetRateLimit(router, "/api/passkey/capability", "203.0.113.130:60000")
+	if got := w1.Result().StatusCode; got != http.StatusOK {
+		t.Fatalf("1st status = %d, want 200 (閾値以内は通過)", got)
+	}
+
+	// Act 2: 2 回目は超過 → 429
+	w2 := doGetRateLimit(router, "/api/passkey/capability", "203.0.113.130:60001")
+
+	// Assert: 429 + Retry-After（既存 passkey 4 route と同一形式 / NFR 2.1）
+	resp := w2.Result()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("2nd status = %d, want %d", resp.StatusCode, http.StatusTooManyRequests)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Error("Retry-After header is empty (既存応答形式 / NFR 2.1)")
+	}
+}
+
 // NFR 2 / Req 4: UnauthIPRateLimiter が nil のとき IP 制限を適用せず既存挙動を保つ（後方互換）。
 func TestNewRouter_UnauthIPRateLimit_NilLimiter_NoRestriction(t *testing.T) {
 	// Arrange: createTestRouter は UnauthIPRateLimiter を設定しない（nil）。

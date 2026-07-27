@@ -806,6 +806,66 @@ func TestPasskeyHandler_RegistrationFinish_BodyLimitExceeded(t *testing.T) {
 	}
 }
 
+// ------------------------------------------------------------
+// Capability（Issue #223 / task 3 / Req 5.2 / NFR 1.1）
+// ------------------------------------------------------------
+
+// Req 5.2: Capability は常に 200 で `{"available": true}` を返す（endpoint 到達 = 有効判定）。
+// handler 単体では stub 依存不要（env 参照・分岐を持たず、到達したら固定応答のみ）。
+func TestPasskeyHandler_Capability_ReturnsAvailableTrue(t *testing.T) {
+	// Arrange
+	h := NewPasskeyHandler(&stubPasskeyRegistrationService{}, &stubPasskeyAuthenticationService{})
+	req := httptest.NewRequest(http.MethodGet, "/api/passkey/capability", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Capability(w, req)
+
+	// Assert: status 200 + body {"available": true}
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Result().StatusCode)
+	}
+	var resp capabilityResponse
+	if err := json.NewDecoder(w.Result().Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.Available {
+		t.Errorf("available = %v, want true (Req 5.2: 到達 = 有効判定)", resp.Available)
+	}
+}
+
+// NFR 1.1: Capability 応答は Content-Type: application/json ヘッダを常に返す。
+func TestPasskeyHandler_Capability_SetsContentTypeApplicationJSON(t *testing.T) {
+	// Arrange
+	h := NewPasskeyHandler(&stubPasskeyRegistrationService{}, &stubPasskeyAuthenticationService{})
+	req := httptest.NewRequest(http.MethodGet, "/api/passkey/capability", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Capability(w, req)
+
+	// Assert
+	if got := w.Result().Header.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+}
+
+// Req 5.2: Capability は Cache-Control: no-store を常に返す（CDN / ブラウザにキャッシュさせない）。
+func TestPasskeyHandler_Capability_SetsCacheControlNoStore(t *testing.T) {
+	// Arrange
+	h := NewPasskeyHandler(&stubPasskeyRegistrationService{}, &stubPasskeyAuthenticationService{})
+	req := httptest.NewRequest(http.MethodGet, "/api/passkey/capability", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Capability(w, req)
+
+	// Assert
+	if got := w.Result().Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store (design.md §Capability / Req 5.2)", got)
+	}
+}
+
 // エラーマッピングの網羅を宣言的に確認する（tasks.md L173-177 に厳密準拠）。
 func TestPasskeyHandler_RegistrationErrorMapping_Table(t *testing.T) {
 	cases := []struct {

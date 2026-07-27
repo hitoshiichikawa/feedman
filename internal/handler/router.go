@@ -261,6 +261,12 @@ func NewRouter(deps *RouterDeps) http.Handler {
 				Post("/api/passkey/authentication/begin", deps.PasskeyHandler.AuthenticationBegin)
 			r.With(unauthIPMW, middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
 				Post("/api/passkey/authentication/finish", deps.PasskeyHandler.AuthenticationFinish)
+			// Web capability probe（Issue #223 / Req 5.2）。
+			// endpoint 到達 = 200 = 「サーバがパスキーを提供している」判定に使う。
+			// PasskeyHandler nil のときは登録せず 404 = Web は「非提供」と判定して
+			// Google 単体構成へ縮退する（既存 passkey 4 route と同じ fail-closed 連動 / NFR 2.1）。
+			// GET なので body 上限 middleware（MaxBodyBytes）は不要。unauthIPMW のみ通す。
+			r.With(unauthIPMW).Get("/api/passkey/capability", deps.PasskeyHandler.Capability)
 		}
 	})
 

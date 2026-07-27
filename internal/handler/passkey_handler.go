@@ -111,6 +111,15 @@ type authenticationFinishResponse struct {
 	AuthCode string `json:"auth_code"`
 }
 
+// capabilityResponse は GET /api/passkey/capability の 200 応答固定 body。
+// 常に `{"available": true}` のみを返し、RP ID / origins / IOS App ID 等の env 由来値を
+// ボディ・ヘッダに一切露出させない（Issue #223 / Req 5.2 / NFR 1.1）。
+// endpoint 到達 = 有効という設計であり、fail-closed（env 未設定時に 404）は router 側の
+// `deps.PasskeyHandler != nil` gate が担う（CLAUDE.md §1 レイヤリング）。
+type capabilityResponse struct {
+	Available bool `json:"available"`
+}
+
 // --- ハンドラ本体 ---
 
 // RegistrationBegin は POST /api/passkey/registration/begin を処理する（Req 1.1, 1.4, 1.5）。
@@ -295,6 +304,24 @@ func (h *PasskeyHandler) AuthenticationFinish(w http.ResponseWriter, r *http.Req
 	}
 
 	writeJSON(w, http.StatusOK, authenticationFinishResponse{AuthCode: authCode})
+}
+
+// Capability は GET /api/passkey/capability を処理する（Issue #223 / Req 5.2 / NFR 1.1）。
+//
+//   - 200: {"available": true}（endpoint 到達 = パスキー有効判定）
+//
+// 常に `Content-Type: application/json` + `Cache-Control: no-store` を返し、CDN や
+// ブラウザキャッシュに載せない。RP ID / origins / IOS App ID 等の env 由来値は
+// ボディ・ヘッダに一切露出させない（NFR 1.1）。
+//
+// fail-closed は router 側の `deps.PasskeyHandler != nil` gate が担うため、handler 本体は
+// env 参照・分岐を持たず「到達したら常に available:true」を返すだけの単純実装とする。
+// PasskeyHandler が nil のとき本 endpoint は router に未登録 = 404 となり、Web は
+// 「パスキー非提供」と判定して Google 単体構成へ縮退する（NFR 2.1）。
+func (h *PasskeyHandler) Capability(w http.ResponseWriter, r *http.Request) {
+	// writeJSON は Content-Type のみ set するため、Cache-Control: no-store を追加で set。
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, capabilityResponse{Available: true})
 }
 
 // --- helpers ---

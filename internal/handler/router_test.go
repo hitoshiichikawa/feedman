@@ -882,6 +882,59 @@ func TestNewRouter_Passkey_UnauthEndpoints_DoesNotRequireSession(t *testing.T) {
 	}
 }
 
+// TestNewRouter_PasskeyCapability_RegisteredWhenHandlerInjected は PasskeyHandler
+// 注入時に GET /api/passkey/capability がセッション無しで到達し、200 + JSON
+// `{"available": true}` を返すことを検証する（Issue #223 / task 3 / Req 5.2）。
+func TestNewRouter_PasskeyCapability_RegisteredWhenHandlerInjected(t *testing.T) {
+	// Arrange
+	reg := &stubPasskeyRouterRegistration{}
+	authn := &stubPasskeyRouterAuthentication{}
+	deps := newPasskeyRouterDeps(NewPasskeyHandler(reg, authn), nil)
+	router := NewRouter(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/passkey/capability", nil)
+	// Cookie / Bearer 無し（未認証グループ配下）
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: 200 + body / header
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 (handler 到達 / Req 5.2)", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	if !strings.Contains(w.Body.String(), `"available":true`) {
+		t.Errorf("body = %q, want to contain {\"available\":true}", w.Body.String())
+	}
+}
+
+// TestNewRouter_PasskeyCapability_NotRegisteredWhenHandlerNil は PasskeyHandler が nil の
+// とき GET /api/passkey/capability がルートとして登録されず 404 が返ることを検証する
+// （Issue #223 / task 3 / Req 5.2: fail-closed = Web は「パスキー非提供」判定へ縮退 / NFR 2.1）。
+func TestNewRouter_PasskeyCapability_NotRegisteredWhenHandlerNil(t *testing.T) {
+	// Arrange: PasskeyHandler nil
+	deps := newPasskeyRouterDeps(nil, nil)
+	router := NewRouter(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/passkey/capability", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: fail-closed として 404
+	if got := w.Result().StatusCode; got != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 (PasskeyHandler nil で fail-closed / Req 5.2 / NFR 2.1)", got)
+	}
+}
+
 // TestNewRouter_Passkey_NotRegisteredWhenHandlerNil は passkey handler が nil のとき
 // 6 route すべてが 404 を返すことを検証する（NFR 2.2: WEBAUTHN_RP_ID 未設定環境の fail-closed）。
 func TestNewRouter_Passkey_NotRegisteredWhenHandlerNil(t *testing.T) {

@@ -73,6 +73,42 @@ task 単位で記録する。前方伝播（先行 task の learning を後続 t
 - **残存課題**: なし。task 3（`GET /api/passkey/capability` handler）は Boundary
   `PasskeyHandler, Router` で独立に着手可能。
 
+### Task 3
+
+- **採用方針**: `PasskeyHandler.Capability` は「到達 = 有効」の設計原則に忠実な最小
+  実装（env 参照・分岐なし・固定 `{"available": true}` 応答）とし、fail-closed は
+  router 側の `deps.PasskeyHandler != nil` gate に任せる（CLAUDE.md §1 レイヤリング）。
+- **重要な判断**:
+  - **DTO 新設**: 既存 `passkeyBeginResponse` / `authenticationFinishResponse` と同じ
+    idiom で `capabilityResponse struct { Available bool \`json:"available"\` }` を
+    passkey_handler.go 内に追加。inline map[string]any より型安全で、既存応答 DTO 群と
+    表記が揃う。
+  - **Cache-Control: no-store の付与**: 既存 `writeJSON` は Content-Type のみ set する
+    ため、handler 側で `w.Header().Set("Cache-Control", "no-store")` を writeJSON
+    呼び出し**前**に set する（WriteHeader 後は Header 変更が反映されないため順序が
+    重要 / design.md §Capability §Cache）。writeJSON 自体は他 endpoint と共有のため
+    改変せず、Cache-Control 付与のみ handler 側で行う最小差分方針。
+  - **既存 passkey `if deps.PasskeyHandler != nil` ブロックへの相乗り**: router.go
+    L255-264 の既存 passkey 未認証 4 route の同一 gate ブロック末尾に 1 行追記する
+    形とし、fail-closed の連動（PasskeyHandler nil = passkey 系 5 route すべて未登録 =
+    Web は Google 単体構成へ縮退）を自然に実現。新たな `if` を切らず、既存 4 route の
+    順序・middleware も不変（NFR 2.1）。
+  - **GET なので MaxBodyBytes 不使用**: capability は body を持たない GET のため
+    `unauthIPMW` のみ通す（tasks.md L66-67 の指定どおり）。他 4 route の POST は
+    `unauthIPMW + MaxBodyBytes` の 2 段。
+  - **テスト構造の再利用**: router_test.go では既存
+    `TestNewRouter_NativeAuthSession_RegisteredWhenHandlerInjected` /
+    `_NotRegisteredWhenHandlerNil`（task 2）を参照 idiom とし、`newPasskeyRouterDeps`
+    ヘルパを再利用。router_unauth_ratelimit_test.go では既存
+    `TestNewRouter_NativeAuthSessionIPRateLimit_429OnExcess`（task 2）を参照 idiom
+    とし、`newPasskeyRateLimitRouter` ヘルパを再利用。既存 helper・stub の再利用で
+    重複組み立てを増やさない（CLAUDE.md §4 コピペ禁止）。GET 用の小さな
+    `doGetRateLimit` ヘルパは同ファイルの既存 `doPostRateLimit` と対称に追加。
+- **残存課題**: なし（本 spec の Boundary `PasskeyHandler, Router` で完結）。task 4 以降
+  は Web 側（`web/src/lib/pkce.ts` 他）で backend 側の残存課題は特に無い。app.go の
+  wiring（Issue #216 で完了済み）は `PasskeyHandler` を既に注入しており、本 task で
+  追加した Capability route も注入済み環境で自動的に有効化される。
+
 ## AC トレース
 
 Task 1 で担保した AC は以下:
