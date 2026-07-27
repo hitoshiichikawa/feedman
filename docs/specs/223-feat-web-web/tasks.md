@@ -110,7 +110,7 @@ per-task ループ運用時のテスト境界: 各タスクは実装 + テスト
   - _Requirements: 2.2, 2.7, 4.1, 4.5, NFR 1.1_
   - _Boundary: lib/webauthn_
 
-- [ ] 6. Web: `web/src/types/passkey.ts` + `web/src/lib/passkey-capability.ts` + `web/src/hooks/use-passkey-capability.ts` を追加し、サーバ / ブラウザ合成の capability 判定を提供する
+- [x] 6. Web: `web/src/types/passkey.ts` + `web/src/lib/passkey-capability.ts` + `web/src/hooks/use-passkey-capability.ts` を追加し、サーバ / ブラウザ合成の capability 判定を提供する
   - `web/src/types/passkey.ts` を新規追加し、`RegistrationBeginRequest` /
     `PasskeyBeginResponse` / `PasskeyFinishRequest` / `RegistrationFinishResponse` /
     `AuthenticationBeginRequest` / `AuthenticationFinishResponse` / `SessionExchangeRequest` /
