@@ -144,6 +144,69 @@ task 単位で記録する。前方伝播（先行 task の learning を後続 t
   private helper を export に格上げして共有するかは task 5 実装時に判断）。人間 Reviewer
   による design.md との整合性確認（`deriveCodeChallengeS256` の追加 export）を推奨。
 
+### Task 5
+
+- **採用方針**: `web/src/lib/webauthn.ts` を純粋 utility として実装し、
+  `base64urlToArrayBuffer` / `arrayBufferToBase64url` / `decodeCreationOptions` /
+  `decodeRequestOptions` / `encodeAttestationResponse` / `encodeAssertionResponse`
+  の 6 関数を export。副作用なし・throw なし（形式不正はドメイン境界で `TypeError`
+  を throw）。base64url ↔ Uint8Array の変換ロジックは `pkce.ts` の private helper
+  `bytesToBase64url` と類似するが、共有化は行わず本 file 内に閉じ込める（Boundary
+  `lib/webauthn` に閉じるため）。
+- **重要な判断**:
+  - **base64url 共有化を見送り本 file 内実装とした根拠**: task 5 の Boundary は
+    `lib/webauthn` に限定されており、`web/src/lib/pkce.ts`（Boundary 外）を編集して
+    private helper `bytesToBase64url` を export に格上げする変更は boundary 逸脱に
+    なる。したがって同種変換を本 file 内に独立実装した（CLAUDE.md §4 の共有ヘルパ
+    抽出との緊張関係あり）。両モジュールは実装方針（`btoa` + `String.fromCharCode`
+    のバイナリ文字列組み立て + base64→base64url 差分置換）を同一にし、後日 spec 別
+    共有化 PR（`web/src/lib/base64url.ts` 等の切り出し）を行えるよう関数シグネチャを
+    互換に保った（`arrayBufferToBase64url` は `ArrayBuffer | Uint8Array` を受ける
+    superset で、`bytesToBase64url(bytes: Uint8Array)` の呼び出しをそのまま置換
+    可能）。
+  - **encode 関数の JSON shape をサーバ実装で確認した結果**: サーバ側
+    `internal/passkey/webauthn_adapter.go` の `ParseCredentialCreationResponseBytes`
+    / `ParseCredentialRequestResponseBytes` は go-webauthn `protocol` package
+    （v0.17.4）に委譲され、内部 `CredentialCreationResponse.Parse()` /
+    `CredentialAssertionResponse.Parse()` が **`ccr.ID == ""` と
+    `ccr.Type != "public-key"` を明示的に reject** する（`protocol/credential.go`
+    L129-144）。design.md §Contracts の関数ヘッダは `rawId` / `clientDataJSON` /
+    `attestationObject` / `authenticatorData` / `signature` / `userHandle` のみを
+    列挙していたが、実サーバ実装は **top-level `id` (base64url 文字列) と
+    `type: "public-key"`** も必須である。したがって encode 関数は WebAuthn IDL の
+    `PublicKeyCredentialJSON` に準じ、`{ id, type, rawId, response: {...} }` の
+    4 top-level フィールドを出力する形とした（`id` は browser の
+    `PublicKeyCredential.id` が既に base64url 文字列なのでそのまま採用、`type` は
+    常に "public-key"）。assertion 側の `userHandle` は go-webauthn の
+    `URLEncodedBase64` + `omitempty` 相当（`UnmarshalJSON` が `null` を許容）
+    のため、`null` / `undefined` のとき出力から省略する。この乖離は design.md
+    契約を毀損しない（新規追加フィールドで既存契約と整合的）。
+  - **NFR 1.1 遵守**: 本 file 内で `console.*` を一切呼ばない（純粋関数として
+    副作用を持たせない）。サーバから受け取った base64url 生値・credential 生バイトを
+    ログ・storage・URL に書かない。テストは jsdom 環境の標準 `atob` / `btoa` /
+    `ArrayBuffer` / `Uint8Array` のみを使用（追加依存なし）。
+  - **`_test.ts` での `PublicKeyCredential` 構築**: jsdom は `PublicKeyCredential`
+    の runtime 実装を持たないため、encode 関数が参照するフィールドだけを持つ
+    duck-typed オブジェクトを組み立てて `as unknown as PublicKeyCredential` で
+    cast する。これは encode 関数の入力契約が「4 フィールド (`id` / `type` /
+    `rawId` / `response.*`) を持つ」ことのみに依存する純粋関数だから許容できる
+    （フルモックは不要 / NFR 3.1）。
+- **残存課題**:
+  - **base64url helper の共有化提案**: `pkce.ts` の private `bytesToBase64url` と
+    `webauthn.ts` の `arrayBufferToBase64url` が同一ロジックを持つため、
+    `web/src/lib/base64url.ts` を新設して両 file から import する統合 PR を別 spec
+    として起票することを推奨（本 task では Boundary 制約下で見送り。関数シグネチャは
+    互換にしてある）。
+  - **人間 Reviewer への確認事項**: design.md §Contracts の encode 関数ヘッダ
+    （`rawId` / `clientDataJSON` / `attestationObject` / …）に対し、実装では
+    サーバ go-webauthn の必須検証（`id` / `type` の存在）を満たすため
+    top-level `id` / `type` を追加出力している。設計意図（"透過的にコピー" の暗黙前提）
+    と整合するが、design.md 本文には明記が無かった点は下記「確認事項」節にも別途記載する。
+  - task 6 以降（`use-passkey-*` hooks）で本 file の encode/decode 関数を呼ぶ際、
+    `code_verifier` / `auth_code` / assertion 生バイトが hook 側の closure 変数の
+    みに保持されて storage / console に漏れないこと（NFR 1.1）を hook 側テストで
+    別途担保する必要がある（本 file はあくまで純粋変換のみで、保持責務は持たない）。
+
 ## AC トレース
 
 Task 1 で担保した AC は以下:
@@ -208,3 +271,17 @@ Task 2 で担保した AC は以下:
   対称性を回帰テスト化する目的）。`generatePkcePair` の signature と `PkcePair` の
   shape は design.md 契約と厳密一致で毀損なし。人間 Reviewer による design.md との
   整合性確認を推奨。
+- Task 5 追記: design.md §lib/webauthn.ts の `encodeAttestationResponse` /
+  `encodeAssertionResponse` の Contracts は `cred.rawId` / `cred.response.clientDataJSON`
+  / `cred.response.attestationObject`（および assertion 側の `authenticatorData` /
+  `signature` / `userHandle`）の base64url 化のみを列挙している。しかし実サーバ
+  （go-webauthn v0.17.4 の `CredentialCreationResponse.Parse()` /
+  `CredentialAssertionResponse.Parse()` in `protocol/credential.go` L129-144）は
+  `ccr.ID == ""` と `ccr.Type != "public-key"` を明示的に reject するため、実装では
+  WebAuthn IDL `PublicKeyCredentialJSON` に準じ **top-level `id` / `type` を追加出力**
+  している（`id` は cred.id の base64url 文字列そのまま、`type` は cred.type = "public-key"）。
+  design.md 契約の「他フィールドは透過的にコピー」の暗黙前提と整合すると解釈しているが、
+  design.md 本文には明記が無かった点は人間 Reviewer による整合性確認を推奨する。
+  加えて base64url 変換ヘルパは `lib/pkce.ts` の private `bytesToBase64url` と重複
+  実装になっているため（Boundary `lib/webauthn` 制約下での判断）、共有化 PR
+  （`web/src/lib/base64url.ts` 新設）の別 spec 起票を推奨する。
