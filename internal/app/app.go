@@ -241,14 +241,30 @@ func runServe(cfg *config.Config) error {
 	if cfg.NativeAuthJWTSecret != "" {
 		jwtIssuer := auth.NewJWTIssuer([]byte(cfg.NativeAuthJWTSecret), cfg.NativeAuthJWTKid)
 		nativeTokenService := auth.NewTokenService(authCodeRepo, refreshTokenRepo, jwtIssuer)
-		nativeAuthHandler = handler.NewNativeAuthHandler(nativeTokenService)
+		// Web パスキー導線用 Session 交換サービス（Issue #223 / task 2）: 既存 authCodeRepo /
+		// sessionRepo を再利用する（interface segregation の SessionCreator は SessionRepo が
+		// 構造的に充足する）。sessionTTL は既存 SessionMaxAge（秒 int）を time.Duration 化して
+		// 渡す（design.md §SessionExchangeService の Contracts / task 2 impl-notes.md 参照）。
+		sessionTTL := time.Duration(cfg.SessionMaxAge) * time.Second
+		sessionExchangeService := auth.NewSessionExchangeService(authCodeRepo, sessionRepo, sessionTTL)
+		// Cookie 属性は既存 Google OAuth Callback（handler.AuthHandlerConfig）と厳密一致させる
+		// ため、CookieDomain / CookieSecure / SessionMaxAge を同じ cfg 値から注入する。
+		nativeAuthHandler = handler.NewNativeAuthHandler(
+			nativeTokenService,
+			handler.WithSessionExchange(
+				sessionExchangeService,
+				cfg.CookieDomain,
+				cfg.CookieSecure,
+				cfg.SessionMaxAge,
+			),
+		)
 		// 検証は発行と同一の env 値（署名鍵）を共用する（#169 Req 4.1）。
 		jwtVerifier = auth.NewJWTVerifier([]byte(cfg.NativeAuthJWTSecret))
 		slog.Info("native token exchange enabled",
 			slog.String("kid", cfg.NativeAuthJWTKid),
 		)
 	} else {
-		slog.Warn("NATIVE_AUTH_JWT_SECRET is not set; POST /api/auth/token and Bearer auth are disabled")
+		slog.Warn("NATIVE_AUTH_JWT_SECRET is not set; POST /api/auth/token, /api/auth/session, and Bearer auth are disabled")
 	}
 
 	// Passkey / AASA wiring（Issue #216）: fail-closed 縮退。

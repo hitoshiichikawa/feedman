@@ -307,6 +307,96 @@ func TestNewRouter_PasskeyUnauthIPRateLimit_IndependentPerIP(t *testing.T) {
 	}
 }
 
+// --- POST /api/auth/session の IP 単位レート制限（Issue #223 / task 2 / design.md Testing Strategy） ---
+
+// newSessionRouteRateLimitRouter は SessionExchanger 注入済み NativeAuthHandler と
+// UnauthIPRateLimiter（burst 指定）を注入した router を構築する。burst=1 なら 2 回目で 429。
+func newSessionRouteRateLimitRouter(burst int) (http.Handler, *alwaysSucceedSessionExchange, *middleware.IPRateLimiter) {
+	sessionSvc := &alwaysSucceedSessionExchange{}
+	nh := NewNativeAuthHandler(
+		&alwaysSucceedExchangeService{},
+		WithSessionExchange(sessionSvc, "example.com", true, 86400),
+	)
+	deps := newMinimalDepsForNativeAuth(nh)
+	deps.UnauthIPRateLimiter = middleware.NewIPRateLimiter(middleware.IPRateLimiterConfig{
+		Rate:            rate.Limit(1),
+		Burst:           burst,
+		CleanupInterval: 1 * time.Minute,
+	})
+	return NewRouter(deps), sessionSvc, deps.UnauthIPRateLimiter
+}
+
+// TestNewRouter_NativeAuthSessionIPRateLimit_429OnExcess は POST /api/auth/session が
+// 同一 IP の閾値超過時に 429 + Retry-After で応答し、handler に到達しないことを検証する
+// （Issue #223 / task 2: 既存 native auth 3 route と同じ unauthIPMW を通す）。
+func TestNewRouter_NativeAuthSessionIPRateLimit_429OnExcess(t *testing.T) {
+	// Arrange: burst=1（1 回目で枯渇）
+	router, sessionSvc, ipRL := newSessionRouteRateLimitRouter(1)
+	defer ipRL.Stop()
+	body := `{"auth_code":"a","code_verifier":"v"}`
+
+	// Act 1: 1 回目は閾値以内なので通常応答（204）
+	w1 := doPostRateLimit(router, "/api/auth/session", body, "203.0.113.100:60000")
+	if got := w1.Result().StatusCode; got != http.StatusNoContent {
+		t.Fatalf("1st status = %d, want %d (閾値以内は通過)", got, http.StatusNoContent)
+	}
+	if sessionSvc.callCount != 1 {
+		t.Fatalf("1st service calls = %d, want 1", sessionSvc.callCount)
+	}
+
+	// Act 2: 2 回目は超過 → 429
+	w2 := doPostRateLimit(router, "/api/auth/session", body, "203.0.113.100:60001")
+
+	// Assert: 429 + Retry-After、handler 未到達（既存 3 route と同一形式）
+	resp := w2.Result()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("2nd status = %d, want %d", resp.StatusCode, http.StatusTooManyRequests)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Error("Retry-After header is empty (既存応答形式)")
+	}
+	if sessionSvc.callCount != 1 {
+		t.Errorf("service calls after 429 = %d, want 1 (429 は handler 到達前に遮断)",
+			sessionSvc.callCount)
+	}
+}
+
+// TestNewRouter_NativeAuthSessionIPRateLimit_SameShapeAsExistingRoutes は
+// POST /api/auth/session の 429 応答（status / Content-Type / body / Retry-After）が
+// 既存未認証 route（/health）の 429 と同一形式であることを検証する
+// （既存応答形式との整合 / NFR 2.1）。
+func TestNewRouter_NativeAuthSessionIPRateLimit_SameShapeAsExistingRoutes(t *testing.T) {
+	// Arrange: 基準となる /health の 429 応答を取得
+	router, _, ipRL := newSessionRouteRateLimitRouter(1)
+	defer ipRL.Stop()
+	doRouterReq(router, http.MethodGet, "/health", "203.0.113.110:60000")
+	baseW := doRouterReq(router, http.MethodGet, "/health", "203.0.113.110:60001")
+	baseResp := baseW.Result()
+	if baseResp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("health 2nd status = %d, want 429", baseResp.StatusCode)
+	}
+
+	// Act: /api/auth/session の 429 応答（別 IP で burst 消費 → 超過）
+	body := `{"auth_code":"a","code_verifier":"v"}`
+	doPostRateLimit(router, "/api/auth/session", body, "203.0.113.120:60000")
+	w := doPostRateLimit(router, "/api/auth/session", body, "203.0.113.120:60001")
+	resp := w.Result()
+
+	// Assert: status / Content-Type / body / Retry-After が /health と一致
+	if resp.StatusCode != baseResp.StatusCode {
+		t.Errorf("status = %d, want %d", resp.StatusCode, baseResp.StatusCode)
+	}
+	if got, want := resp.Header.Get("Content-Type"), baseResp.Header.Get("Content-Type"); got != want {
+		t.Errorf("Content-Type = %q, want %q", got, want)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Error("Retry-After header is empty")
+	}
+	if got, want := w.Body.String(), baseW.Body.String(); got != want {
+		t.Errorf("429 body = %q, want %q (既存未認証 route と同一形式)", got, want)
+	}
+}
+
 // NFR 2 / Req 4: UnauthIPRateLimiter が nil のとき IP 制限を適用せず既存挙動を保つ（後方互換）。
 func TestNewRouter_UnauthIPRateLimit_NilLimiter_NoRestriction(t *testing.T) {
 	// Arrange: createTestRouter は UnauthIPRateLimiter を設定しない（nil）。

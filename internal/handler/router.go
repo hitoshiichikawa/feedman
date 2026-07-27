@@ -232,6 +232,12 @@ func NewRouter(deps *RouterDeps) http.Handler {
 				Post("/api/auth/refresh", deps.NativeAuthHandler.Refresh)
 			r.With(unauthIPMW, middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
 				Post("/api/auth/revoke", deps.NativeAuthHandler.Revoke)
+			// Web 用 Session 交換（Issue #223 / design.md §Router 追加）:
+			// 既存 native auth 3 route と同じ横断ミドルウェア（unauthIPMW + MaxBodyBytes）を通す。
+			// NativeAuthHandler == nil の場合は本 route も未登録 = 404（fail-closed / NFR 2.2）で
+			// 既存 3 route の縮退挙動と連動する。
+			r.With(unauthIPMW, middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
+				Post("/api/auth/session", deps.NativeAuthHandler.Session)
 		}
 
 		// AASA（Issue #216 / Req 5.4: 認証・IP レート制限の外側）。

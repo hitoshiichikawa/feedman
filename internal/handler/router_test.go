@@ -1131,3 +1131,117 @@ func TestNewRouter_NativeAuthIPRateLimit_Degradations(t *testing.T) {
 		}
 	})
 }
+
+// --- Session route（Issue #223 / task 2 / design.md §Router 追加） ---
+
+// alwaysSucceedSessionExchange は SessionExchanger 最小 IF の固定成功モック（route 到達判定用）。
+type alwaysSucceedSessionExchange struct {
+	callCount int
+}
+
+func (s *alwaysSucceedSessionExchange) ExchangeAuthCodeForSession(ctx context.Context, authCode, codeVerifier string) (*model.Session, error) {
+	s.callCount++
+	return &model.Session{
+		ID:        "route-test-session-id",
+		UserID:    "user-route-test",
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+		CreatedAt: time.Now(),
+	}, nil
+}
+
+// newDepsForSessionRoute は Session route 到達確認用に NativeAuthHandler
+// （SessionExchanger 注入済み）を組み立てた最小 deps を返す。
+func newDepsForSessionRoute(sessionSvc SessionExchanger) *RouterDeps {
+	nh := NewNativeAuthHandler(
+		&alwaysSucceedExchangeService{},
+		WithSessionExchange(sessionSvc, "example.com", true, 86400),
+	)
+	return newMinimalDepsForNativeAuth(nh)
+}
+
+// TestNewRouter_NativeAuthSession_RegisteredWhenHandlerInjected は NativeAuthHandler を
+// 注入したとき POST /api/auth/session がセッション無しで到達し、204 が返ることを検証する
+// （Req 3.1 / 4.2: Cookie / Bearer なしで呼び出し可能）。
+func TestNewRouter_NativeAuthSession_RegisteredWhenHandlerInjected(t *testing.T) {
+	// Arrange
+	sessionSvc := &alwaysSucceedSessionExchange{}
+	router := NewRouter(newDepsForSessionRoute(sessionSvc))
+
+	body := `{"auth_code":"plain-auth-code","code_verifier":"plain-verifier"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("status = %d, want %d (handler 到達 / Req 3.1 / 4.2)",
+			resp.StatusCode, http.StatusNoContent)
+	}
+	if sessionSvc.callCount != 1 {
+		t.Errorf("session service called %d times, want 1 (handler に到達していない可能性)",
+			sessionSvc.callCount)
+	}
+	// Set-Cookie が発行されている（既存 OAuth Callback と同等の挙動 / Req 3.1 / 4.2）
+	var found bool
+	for _, c := range resp.Cookies() {
+		if c.Name == "session_id" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("session_id cookie was not set (Req 3.1 / 4.2: 成功時 Set-Cookie 必須)")
+	}
+}
+
+// TestNewRouter_NativeAuthSession_NotRegisteredWhenHandlerNil は NativeAuthHandler が
+// nil のとき POST /api/auth/session がルートとして登録されず 404 が返ることを検証する
+// （NFR 2.2: 署名鍵未設定環境の fail-closed / 既存 3 route と連動）。
+func TestNewRouter_NativeAuthSession_NotRegisteredWhenHandlerNil(t *testing.T) {
+	// Arrange: NativeAuthHandler nil
+	router := NewRouter(newMinimalDepsForNativeAuth(nil))
+
+	body := `{"auth_code":"a","code_verifier":"v"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: fail-closed として 404
+	if got := w.Result().StatusCode; got != http.StatusNotFound {
+		t.Errorf("status = %d, want %d (NativeAuthHandler nil で fail-closed / NFR 2.2)",
+			got, http.StatusNotFound)
+	}
+}
+
+// TestNewRouter_NativeAuthSession_DoesNotRequireSession は注入時に Cookie 無しでも
+// 401 を返さず handler まで到達することを検証する（Req 3.1 / 4.2: Session middleware 通らない）。
+func TestNewRouter_NativeAuthSession_DoesNotRequireSession(t *testing.T) {
+	// Arrange
+	sessionSvc := &alwaysSucceedSessionExchange{}
+	router := NewRouter(newDepsForSessionRoute(sessionSvc))
+
+	body := `{"auth_code":"a","code_verifier":"v"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	// セッション Cookie 無し
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: 401 ではなく 204（Session middleware を経由していない）
+	resp := w.Result()
+	if resp.StatusCode == http.StatusUnauthorized {
+		t.Errorf("status = 401, want non-401 (Req 3.1 / 4.2: Cookie 無しで呼び出し可能)")
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+}

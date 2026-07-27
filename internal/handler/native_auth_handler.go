@@ -24,15 +24,60 @@ type TokenExchangeService interface {
 	RevokeRefreshToken(ctx context.Context, refreshToken string) error
 }
 
+// SessionExchanger は NativeAuthHandler.Session が必要とする最小サービス IF（Issue #223 / task 2）。
+// auth.SessionExchangeService が構造的に充足する（interface segregation / CLAUDE.md §5）。
+// 既存 TokenExchangeService と同じ idiom で、handler 層は具体型に依存しない。
+type SessionExchanger interface {
+	ExchangeAuthCodeForSession(ctx context.Context, authCode, codeVerifier string) (*model.Session, error)
+}
+
 // NativeAuthHandler は POST /api/auth/token を処理する HTTP ハンドラ（Issue #166）。
 // JSON I/O のみを担当し、ビジネスロジックは TokenExchangeService に委譲する。
+//
+// Issue #223 / task 2 で SessionExchanger（POST /api/auth/session 用）と Cookie 発行の
+// 設定値（Domain / Secure / Max-Age）を注入するフィールドを追加した。既存 Token /
+// Refresh / Revoke の挙動は不変（NFR 2.1）。sessionExchange が nil のときは Session()
+// を呼ばない構成に限定される（router 側で NativeAuthHandler != nil の gate で連動制御）。
 type NativeAuthHandler struct {
 	svc TokenExchangeService
+
+	// Session 経路（Issue #223 / task 2）で使う依存。未注入時は nil（既存 test 経路との
+	// 互換維持のため variadic Option で任意注入とする）。
+	sessionExchange SessionExchanger
+	cookieDomain    string
+	cookieSecure    bool
+	sessionMaxAge   int
+}
+
+// NativeAuthHandlerOption は NewNativeAuthHandler の functional option。
+// 既存呼び出し `NewNativeAuthHandler(svc)` の互換を保ちつつ Session 経路の依存を
+// 任意注入するために採用（既存 item.WithMetrics / fetchpkg.WithMetrics と同 idiom）。
+type NativeAuthHandlerOption func(*NativeAuthHandler)
+
+// WithSessionExchange は POST /api/auth/session の依存を注入する Option。
+// Cookie 属性（Domain / Secure / Max-Age）は既存 Google OAuth Callback と一致させるため
+// 呼び出し側の設定値（cfg.CookieDomain / cfg.CookieSecure / cfg.SessionMaxAge）を
+// そのまま受け取る。Cookie 名 / HttpOnly / SameSite / Path は Session() 内でハードコード
+// （既存 sessionCookieName / http.SameSiteLaxMode / true / "/" と一致）。
+func WithSessionExchange(exchange SessionExchanger, cookieDomain string, cookieSecure bool, sessionMaxAge int) NativeAuthHandlerOption {
+	return func(h *NativeAuthHandler) {
+		h.sessionExchange = exchange
+		h.cookieDomain = cookieDomain
+		h.cookieSecure = cookieSecure
+		h.sessionMaxAge = sessionMaxAge
+	}
 }
 
 // NewNativeAuthHandler は TokenExchangeService を注入して NativeAuthHandler を生成する。
-func NewNativeAuthHandler(svc TokenExchangeService) *NativeAuthHandler {
-	return &NativeAuthHandler{svc: svc}
+// Session 経路（Issue #223 / task 2）の依存は WithSessionExchange オプションで任意注入する。
+// 既存 test の 1 引数呼び出し `NewNativeAuthHandler(svc)` は variadic のため互換維持される
+// （NFR 2.1）。
+func NewNativeAuthHandler(svc TokenExchangeService, opts ...NativeAuthHandlerOption) *NativeAuthHandler {
+	h := &NativeAuthHandler{svc: svc}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // tokenRequest は POST /api/auth/token のリクエストボディ。
@@ -98,6 +143,79 @@ func (h *NativeAuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 		TokenType:    "Bearer",
 		ExpiresIn:    pair.ExpiresIn,
 	})
+}
+
+// sessionRequest は POST /api/auth/session のリクエストボディ（Issue #223 / task 2）。
+// snake_case で受ける（既存 tokenRequest と同一 idiom）。
+type sessionRequest struct {
+	AuthCode     string `json:"auth_code"`
+	CodeVerifier string `json:"code_verifier"`
+}
+
+// Session は POST /api/auth/session を処理する（Issue #223 / task 2 / design.md
+// §NativeAuthHandler.Session）。パスキー認証で発行された auth_code を PKCE 検証付きで
+// 単回消費し、Web 用の Cookie session を発行する。
+//
+//   - 204: 成功。Set-Cookie: session_id=...（既存 Google OAuth Callback と完全同一属性）
+//   - 400 INVALID_REQUEST: JSON 不正・必須フィールド欠落
+//   - 400 INVALID_GRANT:   ErrInvalidGrant に正規化された拒否（未検出 / PKCE 不一致 / used / 期限切れ）
+//   - 500 INTERNAL_ERROR:  上記以外（DB 障害等 / NFR 1.1）
+//
+// 認証不要グループに登録されるため、セッション / Bearer なしで呼び出される。
+// 既存 sessionExchange.ExchangeAuthCodeForSession は平文 authCode / codeVerifier /
+// sessionID をログ・エラーメッセージに出さないため、本 handler も応答に内部詳細を
+// 反射しない（NFR 1.1）。
+func (h *NativeAuthHandler) Session(w http.ResponseWriter, r *http.Request) {
+	// JSON 不正・必須フィールド欠落は 400 INVALID_REQUEST に合流する。
+	// ボディ上限超過（MaxBytesReader）も json.Decode のエラーとしてここで合流する。
+	var req sessionRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		// クライアント入力値・パーサ詳細はクライアントへ反射しない（NFR 1.1）。
+		slog.Info("session exchange rejected: invalid request body")
+		middleware.WriteErrorResponse(w, http.StatusBadRequest, invalidRequestError())
+		return
+	}
+	if req.AuthCode == "" || req.CodeVerifier == "" {
+		slog.Info("session exchange rejected: missing required field")
+		middleware.WriteErrorResponse(w, http.StatusBadRequest, invalidRequestError())
+		return
+	}
+
+	session, err := h.sessionExchange.ExchangeAuthCodeForSession(r.Context(), req.AuthCode, req.CodeVerifier)
+	if err != nil {
+		if errors.Is(err, auth.ErrInvalidGrant) {
+			// auth_code 不明 / 期限切れ / 使用済み / verifier 不一致を区別しない
+			// （NFR 1.1 と既存 Token / Refresh と同方針）。
+			slog.Info("session exchange rejected: invalid grant")
+			middleware.WriteErrorResponse(w, http.StatusBadRequest, invalidGrantError())
+			return
+		}
+		// インフラ起因（DB 障害等）。詳細は slog のみ、応答は固定メッセージ。
+		slog.Error("session exchange failed", slog.String("error", err.Error()))
+		middleware.WriteInternalServerError(w)
+		return
+	}
+
+	// 既存 Google OAuth Callback（internal/handler/auth_handler.go の Callback 手順 5）
+	// と完全同一の Cookie 属性で Set-Cookie する（Name / Path / Domain / MaxAge /
+	// HttpOnly / Secure / SameSite）。定数 sessionCookieName / http.SameSiteLaxMode を
+	// 共有し、Domain / Secure / MaxAge は wiring 時に注入された値を使用する。
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    session.ID,
+		Path:     "/",
+		Domain:   h.cookieDomain,
+		MaxAge:   h.sessionMaxAge,
+		HttpOnly: true,
+		Secure:   h.cookieSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	// 応答ボディは空（204 No Content）。Web は credentials: "include" により自動的に
+	// Cookie を保存し、以降の /auth/me が認証済み状態になる（design.md §NativeAuthHandler.Session）。
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // invalidRequestError は 400 INVALID_REQUEST の固定 APIError を返す。

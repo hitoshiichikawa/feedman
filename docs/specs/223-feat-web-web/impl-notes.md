@@ -35,6 +35,44 @@ task 単位で記録する。前方伝播（先行 task の learning を後続 t
   `errors.Is(err, auth.ErrInvalidGrant)` により 400 INVALID_GRANT へ、その他 error は
   500 INTERNAL_ERROR へ振り分ける（design.md §Error Handling / task 2 詳細）。
 
+### Task 2
+
+- **採用方針**: `NativeAuthHandler.Session` を既存 `Token` / `Refresh` / `Revoke` と
+  同 idiom（`dec.DisallowUnknownFields()` + `invalidRequestError` /
+  `invalidGrantError` / `WriteInternalServerError` 再利用）で実装し、成功時のみ
+  既存 `sessionCookieName` 定数と OAuth Callback と同一属性で Set-Cookie する。
+- **重要な判断**:
+  - **Cookie 属性の特定と再利用**: 既存 Google OAuth callback の Cookie 発行箇所は
+    `grep 'http.SetCookie'` および `sessionCookieName` の検索で `internal/handler/auth_handler.go`
+    の `AuthHandler.Callback` 手順 5（line 193-202）と特定。既存定数
+    `sessionCookieName` = `"session_id"`、`http.SameSiteLaxMode` をそのまま参照し、
+    Domain / Secure / MaxAge は `AuthHandler` と同じ `cfg.CookieDomain` /
+    `cfg.CookieSecure` / `cfg.SessionMaxAge` を `WithSessionExchange` 経由で注入する。
+    Path=`"/"` / HttpOnly=`true` は既存 Cookie と同じくハードコード。実装差分は
+    `TestNativeAuthHandler_Session_Success` で Domain / MaxAge / HttpOnly / Secure /
+    SameSite の全 5 属性を assert して回帰防止済み。
+  - **handler が service を受ける interface**: design.md では `sessionExchange
+    *auth.SessionExchangeService`（具体型）を想定していたが、既存 `TokenExchangeService`
+    と同 idiom で `SessionExchanger` narrow interface（`ExchangeAuthCodeForSession` 1
+    メソッドのみ）を handler package に追加し、`*auth.SessionExchangeService` を構造的に
+    充足させた（interface segregation / CLAUDE.md §5 / testability 優先）。design.md の
+    「Cookie 属性の完全一致」「fail-closed の連動」「NFR 2.1 の既存挙動不変」の 3 契約は
+    interface 化によって毀損されない（handler の依存が抽象化されるだけで挙動は不変）。
+  - **既存 constructor の後方互換**: `NewNativeAuthHandler` は functional option
+    （`NativeAuthHandlerOption` + `WithSessionExchange`）で拡張。既存呼び出し
+    `NewNativeAuthHandler(svc)` は variadic のため無変更で compile 通過（NFR 2.1）。
+    既存 `native_auth_handler_test.go` / `router_test.go` / `integration_test.go` /
+    `native_auth_e2e_db_test.go` / `passkey_e2e_db_test.go` の 15 callsites を編集
+    せずに済み、既存 Token / Refresh / Revoke tests が完全不変を維持することを
+    `go test ./...` all-green で確認済み。この functional option 採用は既存
+    `item.WithMetrics` / `fetchpkg.WithMetrics` と同 idiom で codebase 一貫性も維持。
+  - **fail-closed の連動**: 本 route の登録は `deps.NativeAuthHandler != nil` gate に
+    含めることで、既存 3 route（token/refresh/revoke）と連動して
+    `NATIVE_AUTH_JWT_SECRET` 未設定時に 404 で縮退する（NFR 2.2）。
+    `TestNewRouter_NativeAuthSession_NotRegisteredWhenHandlerNil` で確認。
+- **残存課題**: なし。task 3（`GET /api/passkey/capability` handler）は Boundary
+  `PasskeyHandler, Router` で独立に着手可能。
+
 ## AC トレース
 
 Task 1 で担保した AC は以下:
@@ -50,6 +88,45 @@ Task 1 で担保した AC は以下:
   ことを検証。実装側は追跡ログを `code_hash[:8]` / `session_id_hash[:8]` に留めており、
   平文値を slog にも出さない（既存 `TokenService` と同方針）。
 
+Task 2 で担保した AC は以下:
+
+- **3.1（新規作成後のセッション合流）** / **4.2（ログイン成功後のセッション合流）**:
+  `NativeAuthHandler.Session` の 204 応答 + Set-Cookie 発行を
+  `TestNativeAuthHandler_Session_Success` および
+  `TestNewRouter_NativeAuthSession_RegisteredWhenHandlerInjected` で担保。
+  Cookie 属性は既存 Google OAuth Callback（`AuthHandler.Callback`）と同一
+  （Name=`session_id` / Path=`/` / Domain=`CookieDomain` / MaxAge=`SessionMaxAge` /
+  HttpOnly / Secure / SameSite=Lax）で、Web は追加操作なしに Cookie セッション認証状態に
+  到達する。
+- **3.4（合流失敗時にセッションに到達させない）** / **4.7（サーバエラー時に認証状態に
+  到達させない）**: 400 INVALID_GRANT を `TestNativeAuthHandler_Session_InvalidGrant`、
+  500 INTERNAL_ERROR を `TestNativeAuthHandler_Session_InternalError` で担保。両者とも
+  Set-Cookie 未発行を assert し、handler 経路で session 発行が起きないことを検証。
+- **NFR 1.1（機密情報の非漏出）**: 応答 message に内部詳細
+  （`db connection refused` / `verifier` / `expired` / `mismatch` 等の拒否理由語彙）が
+  反射されないことを `TestNativeAuthHandler_Session_InvalidGrant` /
+  `_InternalError` の両テストで assert。handler は slog に平文 authCode /
+  codeVerifier / sessionID を出さない実装（追跡は service 層の hash log に一元化）。
+- **NFR 2.1（既存挙動不変）**: 既存 `Token` / `Refresh` / `Revoke` methods は完全不変
+  （signature も含めて未編集）で、`go test ./...` all-green を確認。
+  `NewNativeAuthHandler` の signature 拡張は variadic option 採用により既存 15
+  callsites の書き換えを不要にした。route 登録は既存 3 route と同じ
+  `NativeAuthHandler != nil` gate と `unauthIPMW` + `MaxBodyBytes` 順序で行い、
+  route 順序も末尾追加のみ。
+- **NFR 2.2（縮退時の既存挙動維持）**: `NATIVE_AUTH_JWT_SECRET` 未設定 →
+  `NativeAuthHandler = nil` → `/api/auth/session` route 未登録 → 404 を
+  `TestNewRouter_NativeAuthSession_NotRegisteredWhenHandlerNil` で担保。
+  `TestNewRouter_NativeAuthSessionIPRateLimit_429OnExcess` および
+  `_SameShapeAsExistingRoutes` で `unauthIPMW` の閾値超過時の 429 応答が既存
+  `/health` 429 応答と body / header レベルで同一形式であることを assert。
+
 ## 確認事項
 
-（現時点でなし。design.md § SessionExchangeService の Contracts と実装は一致している）
+- Task 1 時点: 現時点でなし。design.md § SessionExchangeService の Contracts と実装は一致。
+- Task 2 追記: design.md §NativeAuthHandler.Session の struct field 例示
+  （`sessionExchange *auth.SessionExchangeService` の具体型）に対し、実装は
+  `SessionExchanger` narrow interface を追加してそこに `*auth.SessionExchangeService`
+  を構造的に充足させる形にした（interface segregation / CLAUDE.md §5 / 既存
+  `TokenExchangeService` と同 idiom / testability 向上）。API 契約
+  （POST /api/auth/session / Cookie 属性 / status code / error code）および
+  fail-closed の連動は不変。人間 Reviewer による design.md との整合性確認を推奨。
