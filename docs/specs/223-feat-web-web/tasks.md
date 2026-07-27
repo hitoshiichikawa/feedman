@@ -58,7 +58,7 @@ per-task ループ運用時のテスト境界: 各タスクは実装 + テスト
   - _Boundary: NativeAuthHandler, Router_
   - _Depends: 1_
 
-- [ ] 3. サーバ: `GET /api/passkey/capability` handler を追加する（fail-closed で non-nil = 有効判定を Web に提供）
+- [x] 3. サーバ: `GET /api/passkey/capability` handler を追加する（fail-closed で non-nil = 有効判定を Web に提供）
   - `internal/handler/passkey_handler.go` の `PasskeyHandler` に `Capability(w, r)` メソッドを追加。
     常に `Content-Type: application/json` + `Cache-Control: no-store` で 200 `{"available":true}` を返す。
     RP ID / origins / IOS App ID 等の env 由来値を一切ボディ / ヘッダに露出させない（NFR 1.1）
