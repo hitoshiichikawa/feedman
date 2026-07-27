@@ -74,7 +74,7 @@ per-task ループ運用時のテスト境界: 各タスクは実装 + テスト
   - _Requirements: 5.2, NFR 1.1, NFR 2.1_
   - _Boundary: PasskeyHandler, Router_
 
-- [ ] 4. Web: `web/src/lib/pkce.ts` を追加し、PKCE code_verifier / code_challenge (S256) 生成の純粋 utility を実装する
+- [x] 4. Web: `web/src/lib/pkce.ts` を追加し、PKCE code_verifier / code_challenge (S256) 生成の純粋 utility を実装する
   - `generatePkcePair(): Promise<PkcePair>` を実装。`crypto.getRandomValues(new Uint8Array(32))`
     → base64url（`+/=` 除去 / padding なし）で code_verifier（43 文字 = 32 バイト base64url 化）。
     `crypto.subtle.digest("SHA-256", verifierBytes)` → base64url で code_challenge（43 文字）
