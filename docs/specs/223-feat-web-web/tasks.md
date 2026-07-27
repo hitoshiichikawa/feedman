@@ -137,7 +137,7 @@ per-task ループ運用時のテスト境界: 各タスクは実装 + テスト
   - _Requirements: 5.1, 5.2, 5.3, 5.4, NFR 1.4_
   - _Boundary: types/passkey, lib/passkey-capability, hooks/use-passkey-capability_
 
-- [ ] 7. Web: `web/src/hooks/use-passkey-authentication.ts` を追加し、ログイン用の mutation chain（begin → get → finish → session）を提供する
+- [x] 7. Web: `web/src/hooks/use-passkey-authentication.ts` を追加し、ログイン用の mutation chain（begin → get → finish → session）を提供する
   - `usePasskeyAuthentication()` を `useMutation<void, PasskeyAuthError, void>` で実装。
     内部 chain は design.md §Flows「ログインフロー」の全 5 段:
     1. `generatePkcePair()`
