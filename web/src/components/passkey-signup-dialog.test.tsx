@@ -57,9 +57,15 @@ function mockRegistration(mutation: MockMutation) {
   );
 }
 
-/** kind から実物クラスの `PasskeyRegistrationError` を組み立てる。 */
-function buildError(kind: PasskeyRegistrationErrorKind): PasskeyRegistrationError {
-  return new PasskeyRegistrationError(kind);
+/**
+ * kind から実物クラスの `PasskeyRegistrationError` を組み立てる。
+ * `registered` はアカウント作成後の失敗か（review #6）。既定は作成前失敗（false）。
+ */
+function buildError(
+  kind: PasskeyRegistrationErrorKind,
+  registered = false,
+): PasskeyRegistrationError {
+  return new PasskeyRegistrationError(kind, { registered });
 }
 
 describe("PasskeySignupDialog", () => {
@@ -170,5 +176,68 @@ describe("PasskeySignupDialog", () => {
     await waitFor(() => {
       expect(onOpenChange).toHaveBeenCalledWith(false);
     });
+  });
+
+  it("session_exchange_failed（registered=true）のとき Dialog を閉じ、onAccountCreatedNeedsLogin を呼びログイン画面へ復帰させること（Req 3.4 / review #6）", async () => {
+    // Arrange
+    const onOpenChange = vi.fn();
+    const onAccountCreatedNeedsLogin = vi.fn();
+    const reset = vi.fn();
+    mockRegistration(
+      buildMutation({
+        isError: true,
+        error: buildError("session_exchange_failed", true),
+        reset,
+      }),
+    );
+
+    // Act
+    render(
+      <PasskeySignupDialog
+        open={true}
+        onOpenChange={onOpenChange}
+        onAccountCreatedNeedsLogin={onAccountCreatedNeedsLogin}
+      />,
+    );
+
+    // Assert: 作成後失敗なので Dialog を閉じ、親へ復旧を委譲する
+    await waitFor(() => {
+      expect(onAccountCreatedNeedsLogin).toHaveBeenCalledTimes(1);
+    });
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    // 再作成に戻す reset は呼ばない（username_taken 誘発を防ぐ / review #6）
+    expect(reset).not.toHaveBeenCalled();
+    // Dialog 内のインライン汎用エラーは表示しない（案内はログイン画面のバナーへ移す）
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("アカウント作成後の cancelled（registered=true）は reset せず、Dialog を閉じてログイン画面へ復帰させること（review #6）", async () => {
+    // Arrange
+    const onOpenChange = vi.fn();
+    const onAccountCreatedNeedsLogin = vi.fn();
+    const reset = vi.fn();
+    mockRegistration(
+      buildMutation({
+        isError: true,
+        error: buildError("cancelled", true),
+        reset,
+      }),
+    );
+
+    // Act
+    render(
+      <PasskeySignupDialog
+        open={true}
+        onOpenChange={onOpenChange}
+        onAccountCreatedNeedsLogin={onAccountCreatedNeedsLogin}
+      />,
+    );
+
+    // Assert: 作成後キャンセルは再作成フォームへ戻さない（reset 不発）
+    await waitFor(() => {
+      expect(onAccountCreatedNeedsLogin).toHaveBeenCalledTimes(1);
+    });
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(reset).not.toHaveBeenCalled();
   });
 });

@@ -262,11 +262,19 @@ func NewRouter(deps *RouterDeps) http.Handler {
 			r.With(unauthIPMW, middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
 				Post("/api/passkey/authentication/finish", deps.PasskeyHandler.AuthenticationFinish)
 			// Web capability probe（Issue #223 / Req 5.2）。
-			// endpoint 到達 = 200 = 「サーバがパスキーを提供している」判定に使う。
-			// PasskeyHandler nil のときは登録せず 404 = Web は「非提供」と判定して
-			// Google 単体構成へ縮退する（既存 passkey 4 route と同じ fail-closed 連動 / NFR 2.1）。
+			// endpoint 到達 = 200 = 「サーバがパスキー Web フロー全体を提供している」判定に使う。
+			// Web パスキーフローは passkey ceremony（PasskeyHandler）だけでなく session 合流
+			// （POST /api/auth/session = NativeAuthHandler.Session）まで到達して初めて完結する。
+			// このため capability は PasskeyHandler と NativeAuthHandler の **双方が有効なとき**
+			// のみ 200 を返し、片方でも欠ければ登録せず 404 とする（Issue #223 review #3:
+			// capability と session の有効化条件を統一。passkey 設定あり・session 交換 endpoint
+			// 無効という不整合状態で capability だけ 200 になり Web フローが session 合流で
+			// 破綻する事故を防ぐ）。404 のとき Web は「非提供」と判定して Google 単体構成へ
+			// 縮退する（既存 passkey route と同じ fail-closed 連動 / NFR 2.1）。
 			// GET なので body 上限 middleware（MaxBodyBytes）は不要。unauthIPMW のみ通す。
-			r.With(unauthIPMW).Get("/api/passkey/capability", deps.PasskeyHandler.Capability)
+			if deps.NativeAuthHandler != nil {
+				r.With(unauthIPMW).Get("/api/passkey/capability", deps.PasskeyHandler.Capability)
+			}
 		}
 	})
 

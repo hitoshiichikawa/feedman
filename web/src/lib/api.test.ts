@@ -229,6 +229,65 @@ describe("apiClient", () => {
     });
   });
 
+  describe("ボディなし成功応答（204 / 205）", () => {
+    it("204 No Content のとき json() を呼ばず undefined を返すこと（POST /api/auth/session の契約）", async () => {
+      // Arrange: 204 は空ボディのため json() は呼ばれてはならない
+      // （呼ぶと空ボディで SyntaxError になり正常系 chain が失敗する）
+      const jsonSpy = vi.fn(async () => {
+        throw new SyntaxError("Unexpected end of JSON input");
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 204,
+        json: jsonSpy,
+      });
+
+      // Act
+      const result = await apiClient.post("/api/auth/session", {
+        auth_code: "a",
+        code_verifier: "v",
+      });
+
+      // Assert: undefined を返し、json() は一度も呼ばれない
+      expect(result).toBeUndefined();
+      expect(jsonSpy).not.toHaveBeenCalled();
+    });
+
+    it("205 Reset Content でも json() を呼ばず undefined を返すこと", async () => {
+      // Arrange
+      const jsonSpy = vi.fn(async () => {
+        throw new SyntaxError("Unexpected end of JSON input");
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 205,
+        json: jsonSpy,
+      });
+
+      // Act
+      const result = await apiClient.post("/api/some-action");
+
+      // Assert
+      expect(result).toBeUndefined();
+      expect(jsonSpy).not.toHaveBeenCalled();
+    });
+
+    it("200 でボディがあるときは従来どおり json() を返すこと（204 分岐が正常系を壊さない）", async () => {
+      // Arrange
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true }),
+      });
+
+      // Act
+      const result = await apiClient.get("/api/feeds");
+
+      // Assert
+      expect(result).toEqual({ ok: true });
+    });
+  });
+
   describe("エラーハンドリング", () => {
     it("レスポンスが非OKの場合にエラーをスローすること", async () => {
       mockFetch.mockResolvedValueOnce({

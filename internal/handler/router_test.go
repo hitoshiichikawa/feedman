@@ -882,15 +882,31 @@ func TestNewRouter_Passkey_UnauthEndpoints_DoesNotRequireSession(t *testing.T) {
 	}
 }
 
-// TestNewRouter_PasskeyCapability_RegisteredWhenHandlerInjected は PasskeyHandler
-// 注入時に GET /api/passkey/capability がセッション無しで到達し、200 + JSON
-// `{"available": true}` を返すことを検証する（Issue #223 / task 3 / Req 5.2）。
-func TestNewRouter_PasskeyCapability_RegisteredWhenHandlerInjected(t *testing.T) {
-	// Arrange
-	reg := &stubPasskeyRouterRegistration{}
-	authn := &stubPasskeyRouterAuthentication{}
-	deps := newPasskeyRouterDeps(NewPasskeyHandler(reg, authn), nil)
-	router := NewRouter(deps)
+// newCapabilityDeps は capability の有効化条件（PasskeyHandler + NativeAuthHandler の
+// 双方が非 nil）を任意に組み合わせるための deps builder（Issue #223 review #3）。
+// withPasskey / withNativeAuth の各 bool で 4 通りの構成を作れる。
+func newCapabilityDeps(withPasskey, withNativeAuth bool) *RouterDeps {
+	var ph *PasskeyHandler
+	if withPasskey {
+		ph = NewPasskeyHandler(&stubPasskeyRouterRegistration{}, &stubPasskeyRouterAuthentication{})
+	}
+	deps := newPasskeyRouterDeps(ph, nil)
+	if withNativeAuth {
+		deps.NativeAuthHandler = NewNativeAuthHandler(
+			&alwaysSucceedExchangeService{},
+			WithSessionExchange(&alwaysSucceedSessionExchange{}, "example.com", true, 86400),
+		)
+	}
+	return deps
+}
+
+// TestNewRouter_PasskeyCapability_RegisteredWhenBothHandlersInjected は PasskeyHandler と
+// NativeAuthHandler の **双方** が注入されたとき GET /api/passkey/capability がセッション無しで
+// 到達し、200 + JSON `{"available": true}` を返すことを検証する（Issue #223 / task 3 / Req 5.2 /
+// review #3: capability は Web フロー全体が有効なときのみ 200）。
+func TestNewRouter_PasskeyCapability_RegisteredWhenBothHandlersInjected(t *testing.T) {
+	// Arrange: passkey + native auth（session 交換）双方あり
+	router := NewRouter(newCapabilityDeps(true, true))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/passkey/capability", nil)
 	// Cookie / Bearer 無し（未認証グループ配下）
@@ -902,7 +918,7 @@ func TestNewRouter_PasskeyCapability_RegisteredWhenHandlerInjected(t *testing.T)
 	// Assert: 200 + body / header
 	resp := w.Result()
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("status = %d, want 200 (handler 到達 / Req 5.2)", resp.StatusCode)
+		t.Errorf("status = %d, want 200 (両 handler 到達 / Req 5.2)", resp.StatusCode)
 	}
 	if got := resp.Header.Get("Content-Type"); got != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", got)
@@ -915,11 +931,65 @@ func TestNewRouter_PasskeyCapability_RegisteredWhenHandlerInjected(t *testing.T)
 	}
 }
 
+// TestNewRouter_PasskeyCapability_GatingMatrix は capability の有効化条件が session 交換
+// endpoint（/api/auth/session = NativeAuthHandler）と統一されていることを、構成の 4 通り
+// 組合せで検証する（Issue #223 review #3: passkey 設定あり・NATIVE_AUTH_JWT_SECRET なしで
+// capability だけ 200 になり session が 404 になる不整合を防ぐ）。
+//
+// capability と /api/auth/session が **同じ 200/404** を返す（両方 200 か両方 404）ことを
+// 同一 router で突き合わせる。
+func TestNewRouter_PasskeyCapability_GatingMatrix(t *testing.T) {
+	cases := []struct {
+		name        string
+		withPasskey bool
+		withNative  bool
+		wantStatus  int
+	}{
+		{"passkey+native 双方あり → 200", true, true, http.StatusOK},
+		{"passkey あり native なし → 404（review #3 の修正対象）", true, false, http.StatusNotFound},
+		{"passkey なし native あり → 404", false, true, http.StatusNotFound},
+		{"双方なし → 404", false, false, http.StatusNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			router := NewRouter(newCapabilityDeps(tc.withPasskey, tc.withNative))
+
+			// Act: capability
+			capReq := httptest.NewRequest(http.MethodGet, "/api/passkey/capability", nil)
+			capW := httptest.NewRecorder()
+			router.ServeHTTP(capW, capReq)
+
+			// Act: session 交換 endpoint（Content-Type: application/json 必須）
+			sessBody := `{"auth_code":"a","code_verifier":"v"}`
+			sessReq := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(sessBody))
+			sessReq.Header.Set("Content-Type", "application/json")
+			sessW := httptest.NewRecorder()
+			router.ServeHTTP(sessW, sessReq)
+
+			// Assert: capability の登録有無が期待どおり
+			if got := capW.Result().StatusCode; got != tc.wantStatus {
+				t.Errorf("capability status = %d, want %d", got, tc.wantStatus)
+			}
+			// Assert (review #3 の核心): capability が 200（登録）なら /api/auth/session も
+			// 必ず到達可能でなければならない。「capability 200 なのに session 404」という
+			// 不整合（Web がパスキー導線を出すが session 合流で破綻する）を禁止する。
+			// 逆（session 登録済みだが capability 404）は許容する — passkey 未設定時は Web が
+			// パスキー導線を出さず session に到達する経路が無いため無害。
+			sessRegistered := sessW.Result().StatusCode != http.StatusNotFound
+			capRegistered := capW.Result().StatusCode != http.StatusNotFound
+			if capRegistered && !sessRegistered {
+				t.Errorf("capability が有効(200)なのに /api/auth/session が無効(404): Web フローが session 合流で破綻する不整合 (review #3)")
+			}
+		})
+	}
+}
+
 // TestNewRouter_PasskeyCapability_NotRegisteredWhenHandlerNil は PasskeyHandler が nil の
 // とき GET /api/passkey/capability がルートとして登録されず 404 が返ることを検証する
 // （Issue #223 / task 3 / Req 5.2: fail-closed = Web は「パスキー非提供」判定へ縮退 / NFR 2.1）。
 func TestNewRouter_PasskeyCapability_NotRegisteredWhenHandlerNil(t *testing.T) {
-	// Arrange: PasskeyHandler nil
+	// Arrange: PasskeyHandler nil（NativeAuthHandler も nil）
 	deps := newPasskeyRouterDeps(nil, nil)
 	router := NewRouter(deps)
 

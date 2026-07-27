@@ -257,6 +257,9 @@ func runServe(cfg *config.Config) error {
 				cfg.CookieSecure,
 				cfg.SessionMaxAge,
 			),
+			// CSRF 対策（Issue #223 review #2）: /api/auth/session の Origin 検証で許可する
+			// ブラウザオリジン。既存 CORS 層と同じ cfg.CORSAllowedOrigin を共有する。
+			handler.WithSessionAllowedOrigin(cfg.CORSAllowedOrigin),
 		)
 		// 検証は発行と同一の env 値（署名鍵）を共用する（#169 Req 4.1）。
 		jwtVerifier = auth.NewJWTVerifier([]byte(cfg.NativeAuthJWTSecret))
@@ -264,7 +267,12 @@ func runServe(cfg *config.Config) error {
 			slog.String("kid", cfg.NativeAuthJWTKid),
 		)
 	} else {
-		slog.Warn("NATIVE_AUTH_JWT_SECRET is not set; POST /api/auth/token, /api/auth/session, and Bearer auth are disabled")
+		// NATIVE_AUTH_JWT_SECRET 未設定時は NativeAuthHandler が nil となり、/api/auth/token /
+		// refresh / revoke / session と Bearer 認証がすべて無効化される（fail-closed）。
+		// /api/auth/session が無効になると Web パスキーフローの session 合流が成立しないため、
+		// GET /api/passkey/capability も 404 に倒れ、Web はパスキー導線を非表示にして
+		// Google 単体構成へ縮退する（Issue #223 review #3: capability と session の有効化条件を統一）。
+		slog.Warn("NATIVE_AUTH_JWT_SECRET is not set; POST /api/auth/token, /api/auth/session, /api/passkey/capability, and Bearer auth are disabled (Web passkey degrades to Google-only)")
 	}
 
 	// Passkey / AASA wiring（Issue #216）: fail-closed 縮退。
@@ -307,6 +315,15 @@ func runServe(cfg *config.Config) error {
 			slog.Int("origins", len(cfg.WebAuthnOrigins)),
 			slog.Duration("challenge_ttl", cfg.PasskeyChallengeTTL),
 		)
+		// Web パスキーフロー（GET /api/passkey/capability + POST /api/auth/session）は
+		// session 合流に NativeAuthHandler を必要とする。passkey は有効でも
+		// NATIVE_AUTH_JWT_SECRET 未設定なら capability / session が 404 となり、Web は
+		// パスキー導線を出さずに Google 単体構成へ縮退する（iOS 側 passkey API は有効なまま）。
+		// 運用者が Web パスキーを意図している場合の取りこぼしを防ぐため Warn を 1 回出す
+		// （Issue #223 review #3 / #4）。
+		if cfg.NativeAuthJWTSecret == "" {
+			slog.Warn("passkey is enabled but NATIVE_AUTH_JWT_SECRET is not set; Web passkey (GET /api/passkey/capability, POST /api/auth/session) stays disabled and the login screen shows Google only")
+		}
 	} else {
 		slog.Warn("passkey is disabled (WEBAUTHN_RP_ID or WEBAUTHN_ORIGINS not set)")
 	}

@@ -30,6 +30,14 @@ export interface PasskeySignupDialogProps {
    * からも `false` で呼び出す。
    */
   onOpenChange: (open: boolean) => void;
+  /**
+   * アカウント作成（registration/finish）が成功した **後** に失敗が発生したときに呼ばれる
+   * （review #6）。session 合流失敗・作成後の WebAuthn キャンセル等が該当する。親（`LoginPage`）は
+   * これを受けて「アカウントは作成済みなのでログインへ」という復旧バナーを表示する。
+   * このケースでは Dialog を閉じ、同じユーザー名での再作成（`username_taken` を誘発）に
+   * 戻さないことで復旧導線を成立させる。
+   */
+  onAccountCreatedNeedsLogin?: () => void;
 }
 
 /**
@@ -83,6 +91,7 @@ const ERROR_MESSAGES: Partial<Record<PasskeyRegistrationErrorKind, string>> = {
 export function PasskeySignupDialog({
   open,
   onOpenChange,
+  onAccountCreatedNeedsLogin,
 }: PasskeySignupDialogProps) {
   const [username, setUsername] = useState("");
   const mutation = usePasskeyRegistration();
@@ -90,6 +99,9 @@ export function PasskeySignupDialog({
   const errorKind: PasskeyRegistrationErrorKind | undefined = isError
     ? error?.kind
     : undefined;
+  // review #6: アカウント作成（registration/finish）成功後に発生した失敗か。
+  // true のときは再作成に戻さずログイン導線へ誘導する（作成前失敗と分岐する）。
+  const registered = isError ? (error?.registered ?? false) : false;
 
   // Requirement 3.1 / 3.2: 成功時に Dialog を閉じ、AuthGuard の再判定に委ねて 2 ペイン UI へ遷移させる
   useEffect(() => {
@@ -98,21 +110,28 @@ export function PasskeySignupDialog({
     }
   }, [isSuccess, onOpenChange]);
 
-  // Requirement 2.7: cancelled は「画面を壊さず戻す」— エラー表示を出さず mutation state を初期化する
+  // review #6 / Requirement 3.4: アカウント作成後の失敗（session 合流失敗・作成後の
+  // WebAuthn キャンセル等）は、Dialog を閉じて親のログイン画面へ復旧を委譲する。同じ
+  // ユーザー名での再作成に戻すと `username_taken` になるため、reset せず親へ通知する。
   useEffect(() => {
-    if (errorKind === "cancelled") {
-      reset();
-    }
-  }, [errorKind, reset]);
-
-  // Requirement 3.4: session 合流失敗時は Dialog を閉じ、ログイン画面から再試行できるようにする
-  useEffect(() => {
-    if (errorKind === "session_exchange_failed") {
+    if (isError && registered) {
+      onAccountCreatedNeedsLogin?.();
       onOpenChange(false);
     }
-  }, [errorKind, onOpenChange]);
+  }, [isError, registered, onAccountCreatedNeedsLogin, onOpenChange]);
 
-  const errorMessage = errorKind ? ERROR_MESSAGES[errorKind] : undefined;
+  // Requirement 2.7: 作成前の cancelled は「画面を壊さず戻す」— エラー表示を出さず
+  // mutation state を初期化する。作成後（registered）の cancelled は上の効果で扱う。
+  useEffect(() => {
+    if (errorKind === "cancelled" && !registered) {
+      reset();
+    }
+  }, [errorKind, registered, reset]);
+
+  // 作成前失敗のみインラインのエラー文言を表示する。作成後失敗（registered）は Dialog を
+  // 閉じてログイン画面のバナーで案内するため、ここでは表示しない。
+  const errorMessage =
+    errorKind && !registered ? ERROR_MESSAGES[errorKind] : undefined;
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();

@@ -47,10 +47,21 @@ export type PasskeyRegistrationErrorKind =
  */
 export class PasskeyRegistrationError extends Error {
   readonly kind: PasskeyRegistrationErrorKind;
-  constructor(kind: PasskeyRegistrationErrorKind, message?: string) {
-    super(message ?? kind);
+  /**
+   * アカウント作成（`POST /api/passkey/registration/finish`）が **成功した後** に発生した
+   * 失敗なら `true`（review #6）。true のとき UI は「アカウントは既に作成済みなので、
+   * 同じユーザー名で再作成させると `username_taken` になる」ことを踏まえ、再作成に戻さず
+   * ログイン導線へ誘導する復旧フローに切り替える。false は作成前の失敗（再入力・再試行が妥当）。
+   */
+  readonly registered: boolean;
+  constructor(
+    kind: PasskeyRegistrationErrorKind,
+    options?: { message?: string; registered?: boolean },
+  ) {
+    super(options?.message ?? kind);
     this.name = "PasskeyRegistrationError";
     this.kind = kind;
+    this.registered = options?.registered ?? false;
   }
 }
 
@@ -123,43 +134,54 @@ function extractApiErrorCode(err: ApiError): string | null {
  * に振り分ける（tasks.md L182-193 / Req 2.5, 2.6, 2.7, 2.8, 3.4）。
  */
 function classifyError(err: unknown, step: number): PasskeyRegistrationError {
+  // registration/finish（step 4）完了後に発生した失敗は「アカウント作成済み」を意味する
+  // （step が STEP_AUTH_BEGIN=5 以降 = 認証・session 合流フェーズ）。この区別で UI は
+  // 作成前失敗（再入力・再試行）と作成後失敗（ログインへ誘導する復旧導線）を分ける（review #6）。
+  const registered = step > STEP_REG_FINISH;
   if (err instanceof PasskeyRegistrationError) {
-    return err;
+    // 手動 throw（create/get の null 解決 = cancelled）にも step 由来の registered を付与し直す。
+    // create の null は step 3（作成前）、get の null は step 6（作成後）で意味が異なる。
+    return new PasskeyRegistrationError(err.kind, {
+      message: err.message,
+      registered,
+    });
   }
   if (isCancelledError(err)) {
-    return new PasskeyRegistrationError("cancelled");
+    return new PasskeyRegistrationError("cancelled", { registered });
   }
   if (err instanceof TypeError) {
     // fetch reject（ネットワーク断・DNS 失敗等）
-    return new PasskeyRegistrationError("network_error");
+    return new PasskeyRegistrationError("network_error", { registered });
   }
   if (err instanceof ApiError) {
     if (step === STEP_SESSION_EXCHANGE) {
-      // step 8 の失敗は理由に関わらず session 合流失敗に集約（Req 3.4）
-      return new PasskeyRegistrationError("session_exchange_failed");
+      // step 8 の失敗は理由に関わらず session 合流失敗に集約（Req 3.4）。常に作成後（registered）。
+      return new PasskeyRegistrationError("session_exchange_failed", {
+        registered,
+      });
     }
     if (step === STEP_REG_BEGIN) {
       // registration/begin の 400 は `code: "INVALID_USERNAME"` のときのみ形式不正
       // として扱い、それ以外の 400 は server_rejected として汎用エラーへ集約する
       // （Req 2.5 / 2.8）
       if (err.status === 400 && extractApiErrorCode(err) === "INVALID_USERNAME") {
-        return new PasskeyRegistrationError("invalid_username");
+        return new PasskeyRegistrationError("invalid_username", { registered });
       }
       // Req 2.6: 409 は username 重複を UI に区別表示させる（begin でのみ意味を持つ）
       if (err.status === 409) {
-        return new PasskeyRegistrationError("username_taken");
+        return new PasskeyRegistrationError("username_taken", { registered });
       }
     }
     if (err.status === 400 || err.status === 409) {
       // 400 REGISTRATION_FAILED / 400 AUTHENTICATION_FAILED / 409 系は
       // server_rejected（内部区別を反射しない / NFR 1.2）
-      return new PasskeyRegistrationError("server_rejected");
+      return new PasskeyRegistrationError("server_rejected", { registered });
     }
     // 500 系および想定外 status は server_error
-    return new PasskeyRegistrationError("server_error");
+    return new PasskeyRegistrationError("server_error", { registered });
   }
   // その他の予期しない例外は安全側に server_error とし、詳細を UI に露出させない
-  return new PasskeyRegistrationError("server_error");
+  return new PasskeyRegistrationError("server_error", { registered });
 }
 
 /**
@@ -251,6 +273,16 @@ export function usePasskeyRegistration(): UseMutationResult<
 
         step = STEP_NAV_GET;
         const requestOptions = decodeRequestOptions(authBegin.options);
+        // review #5: 登録直後の discoverable login が、同一端末上の **別の** Feedman
+        // パスキーを選んでしまい別アカウントとしてログインする事故を防ぐ。直前に
+        // `navigator.credentials.create()` で登録した credential（`attestation.rawId`）へ
+        // `allowCredentials` を限定し、後続認証を登録した credential / user に拘束する。
+        // サーバ側の challenge / 検証はそのまま（クライアントで選択候補を絞るだけ）。
+        if (requestOptions.publicKey) {
+          requestOptions.publicKey.allowCredentials = [
+            { type: "public-key", id: attestation.rawId },
+          ];
+        }
         const assertion = (await navigator.credentials.get(
           requestOptions,
         )) as PublicKeyCredential | null;

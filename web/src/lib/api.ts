@@ -63,6 +63,15 @@ async function request<T>(
     throw new ApiError(response.status, errorBody);
   }
 
+  // ボディを持たない成功応答（204 No Content / 205 Reset Content）では `response.json()` を
+  // 呼ばない。空ボディに対して `json()` を呼ぶと `SyntaxError: Unexpected end of JSON input`
+  // となり、正常系の chain が誤って失敗するため（例: `POST /api/auth/session` の 204 応答。
+  // パスキーログイン・新規作成の session 合流はこの経路に依存する）。呼び出し側は返り値を
+  // `void` として扱う（`T` が `void`/`undefined` の呼び出しに対して型安全）。
+  if (response.status === 204 || response.status === 205) {
+    return undefined as T;
+  }
+
   return response.json();
 }
 

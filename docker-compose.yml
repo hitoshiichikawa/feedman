@@ -72,8 +72,18 @@ services:
       - COOKIE_DOMAIN=${COOKIE_DOMAIN:-}
       # Native Auth（iOS token 認証 / #163）。未設定なら token / refresh / revoke と
       # Bearer 認証は無効化される（fail-closed。.env.sample の NATIVE_AUTH_JWT_SECRET 参照）。
+      # Web パスキー（#223）の session 合流（POST /api/auth/session）と capability endpoint も
+      # NATIVE_AUTH_JWT_SECRET を必要とする。未設定だと Web はパスキー導線を出さず Google 単体に縮退する。
       - NATIVE_AUTH_JWT_SECRET=${NATIVE_AUTH_JWT_SECRET:-}
       - NATIVE_AUTH_JWT_KID=${NATIVE_AUTH_JWT_KID:-v1}
+      # Passkey / WebAuthn（#216 iOS / #223 Web）。WEBAUTHN_RP_ID と WEBAUTHN_ORIGINS の両方を
+      # 設定するとパスキー機能が有効になる（どちらか欠けると fail-closed で無効）。未設定なら
+      # 既存挙動と等価（Google OAuth のみ）。設定値は .env.sample の Passkey 節を参照。
+      - WEBAUTHN_RP_ID=${WEBAUTHN_RP_ID:-}
+      - WEBAUTHN_RP_DISPLAY_NAME=${WEBAUTHN_RP_DISPLAY_NAME:-Feedman}
+      - WEBAUTHN_ORIGINS=${WEBAUTHN_ORIGINS:-}
+      - WEBAUTHN_IOS_APP_ID=${WEBAUTHN_IOS_APP_ID:-}
+      - PASSKEY_CHALLENGE_TTL_SECONDS=${PASSKEY_CHALLENGE_TTL_SECONDS:-300}
       - SERVER_PORT=8080
       - LOG_RETENTION_DAYS=14
     logging:

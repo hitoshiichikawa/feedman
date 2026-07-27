@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"mime"
 	"net/http"
 
 	"github.com/hitoshi/feedman/internal/auth"
@@ -47,6 +48,11 @@ type NativeAuthHandler struct {
 	cookieDomain    string
 	cookieSecure    bool
 	sessionMaxAge   int
+
+	// allowedOrigin は POST /api/auth/session の CSRF 対策（Issue #223 review #2）で許可する
+	// ブラウザ Origin。空文字のときは Origin 検証をスキップする（後方互換 / 未配線環境）。
+	// 既存 CORS 層と同じ許可オリジン（cfg.CORSAllowedOrigin）を wiring 時に注入する。
+	allowedOrigin string
 }
 
 // NativeAuthHandlerOption は NewNativeAuthHandler の functional option。
@@ -65,6 +71,16 @@ func WithSessionExchange(exchange SessionExchanger, cookieDomain string, cookieS
 		h.cookieDomain = cookieDomain
 		h.cookieSecure = cookieSecure
 		h.sessionMaxAge = sessionMaxAge
+	}
+}
+
+// WithSessionAllowedOrigin は POST /api/auth/session の CSRF 対策で許可する Origin を注入する
+// （Issue #223 review #2）。既存 CORS 層と同じ許可オリジン（cfg.CORSAllowedOrigin）を渡す。
+// 空文字を渡した場合、Session() は Origin 検証をスキップする（後方互換。Content-Type 検証は
+// allowedOrigin の値に関係なく常に有効）。既存 WithSessionExchange と直交する additive Option。
+func WithSessionAllowedOrigin(allowedOrigin string) NativeAuthHandlerOption {
+	return func(h *NativeAuthHandler) {
+		h.allowedOrigin = allowedOrigin
 	}
 }
 
@@ -157,15 +173,41 @@ type sessionRequest struct {
 // 単回消費し、Web 用の Cookie session を発行する。
 //
 //   - 204: 成功。Set-Cookie: session_id=...（既存 Google OAuth Callback と完全同一属性）
-//   - 400 INVALID_REQUEST: JSON 不正・必須フィールド欠落
-//   - 400 INVALID_GRANT:   ErrInvalidGrant に正規化された拒否（未検出 / PKCE 不一致 / used / 期限切れ）
-//   - 500 INTERNAL_ERROR:  上記以外（DB 障害等 / NFR 1.1）
+//   - 400 INVALID_REQUEST:        JSON 不正・必須フィールド欠落
+//   - 400 INVALID_GRANT:          ErrInvalidGrant に正規化された拒否（未検出 / PKCE 不一致 / used / 期限切れ）
+//   - 403 FORBIDDEN_ORIGIN:       Origin ヘッダが許可オリジンと不一致（login CSRF 対策）
+//   - 415 UNSUPPORTED_MEDIA_TYPE: Content-Type が application/json でない（login CSRF 対策）
+//   - 500 INTERNAL_ERROR:         上記以外（DB 障害等 / NFR 1.1）
 //
 // 認証不要グループに登録されるため、セッション / Bearer なしで呼び出される。
 // 既存 sessionExchange.ExchangeAuthCodeForSession は平文 authCode / codeVerifier /
 // sessionID をログ・エラーメッセージに出さないため、本 handler も応答に内部詳細を
 // 反射しない（NFR 1.1）。
+//
+// CSRF 対策（Issue #223 review #2）: 本 endpoint は Cookie セッションを新規発行する
+// browser-facing な副作用を持つため、既存の SameSite=Lax + auth_code 単回消費 + PKCE 束縛に
+// 加えて、以下の 2 段を defense-in-depth で適用する:
+//   - Content-Type: application/json 必須化 — cross-site の HTML form POST（simple request）を
+//     弾き、cross-origin fetch には CORS preflight を強制する。Go の json.Decoder は text/plain
+//     でも JSON をパースするため、明示検証しないと form ベース CSRF が成立し得る。
+//   - Origin allowlist — Origin ヘッダが存在する場合は許可オリジンと一致を要求する。Origin
+//     不在（same-origin proxy 経由でヘッダが落ちる等）や allowedOrigin 未配線時は検証をスキップ
+//     する（false-reject を避けるため、存在時のみ厳格化する pattern）。
 func (h *NativeAuthHandler) Session(w http.ResponseWriter, r *http.Request) {
+	// CSRF 対策（Content-Type / Origin）を JSON decode より前に適用する。
+	if !hasJSONContentType(r) {
+		slog.Info("session exchange rejected: unsupported content-type")
+		middleware.WriteErrorResponse(w, http.StatusUnsupportedMediaType, unsupportedMediaTypeError())
+		return
+	}
+	if origin := r.Header.Get("Origin"); origin != "" && h.allowedOrigin != "" && origin != h.allowedOrigin {
+		// 許可オリジン以外からの cross-site POST を遮断（login CSRF 対策）。
+		// origin 生値はクライアントへ反射しない（固定メッセージのみ / NFR 1.1）。
+		slog.Info("session exchange rejected: disallowed origin")
+		middleware.WriteErrorResponse(w, http.StatusForbidden, forbiddenOriginError())
+		return
+	}
+
 	// JSON 不正・必須フィールド欠落は 400 INVALID_REQUEST に合流する。
 	// ボディ上限超過（MaxBytesReader）も json.Decode のエラーとしてここで合流する。
 	var req sessionRequest
@@ -216,6 +258,44 @@ func (h *NativeAuthHandler) Session(w http.ResponseWriter, r *http.Request) {
 	// 応答ボディは空（204 No Content）。Web は credentials: "include" により自動的に
 	// Cookie を保存し、以降の /auth/me が認証済み状態になる（design.md §NativeAuthHandler.Session）。
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// hasJSONContentType は Content-Type が application/json（charset 等のパラメータ付き含む）
+// であるかを判定する。POST /api/auth/session の CSRF 対策で、simple request な非 JSON POST を
+// 弾くために使う（Issue #223 review #2）。空・非 JSON・パース不能はすべて false。
+func hasJSONContentType(r *http.Request) bool {
+	ct := r.Header.Get("Content-Type")
+	if ct == "" {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		return false
+	}
+	return mediaType == "application/json"
+}
+
+// unsupportedMediaTypeError は 415 UNSUPPORTED_MEDIA_TYPE の固定 APIError を返す。
+// CSRF 対策で application/json 以外を弾いた際に使う（Issue #223 review #2）。
+func unsupportedMediaTypeError() *model.APIError {
+	return &model.APIError{
+		Code:     "UNSUPPORTED_MEDIA_TYPE",
+		Message:  "リクエストの Content-Type が不正です。",
+		Category: "validation",
+		Action:   "Content-Type: application/json を指定してください。",
+	}
+}
+
+// forbiddenOriginError は 403 FORBIDDEN_ORIGIN の固定 APIError を返す。
+// CSRF 対策で許可オリジン以外の cross-site POST を弾いた際に使う（Issue #223 review #2）。
+// origin 生値・許可オリジンをクライアントへ反射しない（NFR 1.1）。
+func forbiddenOriginError() *model.APIError {
+	return &model.APIError{
+		Code:     "FORBIDDEN_ORIGIN",
+		Message:  "許可されていないオリジンからのリクエストです。",
+		Category: "auth",
+		Action:   "同一オリジンのログイン画面からやり直してください。",
+	}
 }
 
 // invalidRequestError は 400 INVALID_REQUEST の固定 APIError を返す。
