@@ -486,6 +486,90 @@ task 単位で記録する。前方伝播（先行 task の learning を後続 t
     Reviewer による整合性確認を推奨（既存「確認事項」節の api.ts 204 課題と同様、
     本 spec の Boundary 制約下では task 内解消不可）。
 
+### Task 10
+
+- **採用方針**: `PasskeyButtons` を capability 判定に基づく null 返却 + mutation 状態表示の
+  純関数コンポーネントとして実装し、`LoginPage` は state 管理 + 3 導線の合成のみを担う薄い
+  親に留める（責務分離 / CLAUDE.md §1）。`PasskeyButtons` は task 9 の `PasskeySignupDialog`
+  と同 idiom で `useEffect` による cancelled reset と `Partial<Record<...>>` 型の
+  `ERROR_MESSAGES` マップを採用し、NFR 1.2（内部詳細反射禁止）を型システム上でも表現した。
+- **重要な判断**:
+  - **`LoginPage.test` の hook モジュールモック方針**: 既存 4 テスト（Google 導線 / href /
+    アプリ名 / 説明文）を `render(<LoginPage />)` の呼び出しを一字一句変えずに維持する
+    ため（Req 6.1 / 6.4）、`use-passkey-capability` / `use-passkey-authentication` /
+    `use-passkey-registration` の 3 hook をモジュール冒頭で `vi.mock` してデフォルトを
+    idle mutation + `available: false` に固定した。これにより QueryClientProvider を
+    render tree に追加する必要がなくなり、既存 test body が完全不変で通る。`ApiError` /
+    `PasskeyAuthError` / `PasskeyRegistrationError` は `vi.importActual` で実物を再 export
+    し、production 同等の instanceof / kind 判定を許容する（既存
+    `passkey-signup-dialog.test.tsx` と同 idiom）。
+  - **React 19 の JSX namespace 非露出への対応**: design.md L719 の Contracts では戻り値
+    型を `JSX.Element | null` と例示しているが、React 19 + TypeScript 5 + Next.js 15 環境
+    では global `JSX` namespace が既定で提供されず `tsc` (Next.js build) が
+    "Cannot find namespace 'JSX'" を throw する。既存 web/ 配下の component も
+    `login-page.tsx` / `passkey-signup-dialog.tsx` / `auth-guard.tsx` すべて明示的な戻り値
+    型を持たない（TS 推論に委ねる）ため、本 file も同慣習に揃えて型注釈を省略した。
+    design.md の contract（`(props: PasskeyButtonsProps) => JSX.Element | null` の意味論）は
+    実装上「null または JSX を返す関数コンポーネント」として厳密に維持されており、
+    `if (isLoading || !available) return null;` の分岐がそれを表現している。
+  - **フック呼び出し順序と early return の分離**: React hooks のルールを守り
+    `usePasskeyCapability` / `usePasskeyAuthentication` / `useEffect`（cancelled reset）を
+    early return より **前**に無条件で呼ぶ。early return は最後の hook 呼び出しの後に
+    置く（Task 9 の `PasskeySignupDialog` と同型の設計）。
+  - **既存 Google 導線の DOM 完全不変**: `<Button asChild>` + `<a>` の nesting、`href` /
+    class / 文言（`Googleアカウントでログイン`）と説明文（「初回ログイン時にアカウントが
+    自動作成されます」）、外側の `flex min-h-screen items-center justify-center` /
+    `w-full max-w-sm space-y-8 text-center` の container 構造をすべて維持し、
+    `<PasskeyButtons>` と `<PasskeySignupDialog>` を Google ボタンブロックの直後に追加
+    する形にした（Req 6.1 / 6.2 / 6.3 / 6.4）。パスキー導線非表示時（capability false）は
+    `PasskeyButtons` が null 返却して DOM に何も残さないため、Google 単体構成の見た目は
+    本 spec 導入前と同一を保つ。
+  - **`ERROR_MESSAGES` 文言の 4 kind 集約**: `session_exchange_failed` / `server_rejected` /
+    `server_error` / `network_error` はいずれも「認証に失敗しました。時間をおいて再度
+    お試しください」の同一汎用文言に集約（tasks.md L250-251 の指定どおり / Req 4.6 / 4.7）。
+    `cancelled` はキー不在で表示なし + `mutation.reset()`（Req 4.5）。design.md
+    §PasskeyButtons Responsibilities L710-712 の「button disabled + 汎用エラー」に忠実に
+    対応。
+  - **テストは QueryClientProvider 不要**: `passkey-buttons.test.tsx` では
+    `usePasskeyCapability` / `usePasskeyAuthentication` を両方 `vi.mock` し、
+    `PasskeyAuthError` は `vi.importActual` で実物を再 export。既存
+    `passkey-signup-dialog.test.tsx` の `buildMutation` / `mockRegistration` / `buildError`
+    と同 idiom で `buildMutation` / `mockCapability` / `mockAuthentication` / `buildError`
+    を組み立て、6 ケース（available true / false / isLoading / mutate 呼出 / onSignupClick
+    呼出 / cancelled で alert 非表示 + reset）を Arrange/Act/Assert 分離・BDD 命名で検証。
+    `container.firstChild === null` の assert で「本当に何も render されない」ことを回帰
+    防止した（tasks.md L263-264 の「null 返却」の意味を厳密に検証）。
+  - **NFR 1.1 遵守**: 本 component は `console.*` を一切呼ばず、`code_verifier` /
+    `auth_code` / assertion 生バイトは `usePasskeyAuthentication` の mutation 内 closure に
+    閉じ込められる（本 component からは触らない）。localStorage / sessionStorage / URL に
+    書き込む経路もない。
+  - **NFR 1.2 遵守**: `PasskeyAuthError` は `kind` の enum のみを DOM に反射させ、
+    `ApiError.body` / `error.message` を一切表示しない（`ERROR_MESSAGES[kind]` の固定文言
+    のみ）。`server_rejected` / `server_error` の内部区別を UI 上で識別不能にしている点も
+    Req 4.6「拒否理由の内部区別を反射しない」を厳密に満たす。
+- **残存課題（Reviewer への確認事項）**:
+  - **design.md contract と TS 型注釈の乖離**: design.md L716-719 の
+    `export function PasskeyButtons(props: PasskeyButtonsProps): JSX.Element | null;` は
+    React 19 + Next.js 15 環境で build 不能のため、実装は明示戻り値型を省略した（既存
+    codebase の component 慣習に合わせた）。design.md の意味論契約は毀損されない（null
+    または JSX を返す）。design.md 本文の Contracts サンプルコード側の update は本 task の
+    Boundary（spec 書き換え禁止）外のため未対応。人間 Reviewer への設計整合性確認を推奨。
+  - **`session_exchange_failed` 発火経路の UX**: `usePasskeyAuthentication` が
+    `session_exchange_failed` を返した場合、本 component では汎用エラー文言を alert 表示
+    するのみで、Signup Dialog 側（task 9 の残存課題）と異なり Dialog 閉じの副作用は無い。
+    ログインフローでは Dialog を扱わないため妥当だが、Reviewer は Req 3.4 の「ログイン画面
+    に復帰」相当の UX が本 spec 内で担保されているかを task 9 の残存課題と併せて確認する
+    こと。
+  - **api.ts の 204 No Content 非対応**（task 7 / task 8 と同一の既知課題）: production
+    統合時に `/api/auth/session` の 204 応答で `request<T>` の `response.json()` が runtime
+    `SyntaxError` を throw する可能性がある。本 task では apiClient を mock している範囲で
+    露出しないが、production 統合前に api.ts の 204 handling を別 spec / PR で追加する
+    必要がある（既存「確認事項」の task 7 追記および task 8 追記を参照）。
+  - **本 task 完了により spec 内の全 10 task が完了**: 追加の未完了マーカーは無く、
+    Web 側パスキー導線導入は task 単位で完結。人間 Reviewer は 10 task 分の commit を
+    まとめてレビューする形になる（本 spec の per-task ループ運用 = commit 単位が最終
+    レビュー単位）。
+
 ## AC トレース
 
 Task 1 で担保した AC は以下:
