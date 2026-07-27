@@ -9,7 +9,7 @@ per-task ループ運用時のテスト境界: 各タスクは実装 + テスト
 同一 commit で完結させる。同 task 内テストが困難な場合のみ `_Requirements_partial:_` を
 明示する（本ドラフトでは全 task が同 task 内テスト完結）。
 
-- [ ] 1. サーバ: `SessionExchangeService` を追加し、auth_code + code_verifier を Cookie session に交換する経路を用意する
+- [x] 1. サーバ: `SessionExchangeService` を追加し、auth_code + code_verifier を Cookie session に交換する経路を用意する
   - `internal/auth/session_exchange.go` を新規追加し、`SessionCreator` interface（`Create` のみ）
     と `SessionExchangeService` を定義する（`AuthCodeConsumer` は既存 `token_service.go` の
     interface を再利用 / interface segregation / CLAUDE.md §5）
