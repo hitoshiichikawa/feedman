@@ -441,6 +441,51 @@ task 単位で記録する。前方伝播（先行 task の learning を後続 t
   - task 10（`PasskeyButtons` / `LoginPage` 統合）は task 9 の Dialog を親から
     open 管理する形になるため、本 hook からは独立に着手可能。
 
+### Task 9
+
+- **採用方針**: `PasskeySignupDialog` を `{open, onOpenChange}` の制御コンポーネント
+  として実装（`DialogTrigger` 未使用）。mutation 状態別分岐を `useEffect` 3 本 +
+  `ERROR_MESSAGES` マップの宣言的パターンで表現し、副作用（Dialog 開閉 / reset）と
+  表示（`role="alert"`）を疎結合にした。入力は username のみで recovery email 欄を
+  設けない（Req 2.4 の「欠落として扱わない」を UI 上で確定）。既存
+  `feed-register-dialog.tsx` の `role="alert"` idiom を踏襲し、shadcn/ui の
+  `Dialog` / `Input` / `Label` / `Button` を再利用（CLAUDE.md §4）。
+- **重要な判断**:
+  - **`useEffect` 依存配列は primitive フィールドのみ**: `mutation` オブジェクト全体を
+    deps に入れず `isSuccess` / `errorKind` / `reset` の primitive・memoized 参照のみを
+    渡すことで、react-query の re-render で `reset()` が無限ループする回帰を防止した。
+    `isSuccess` → `onOpenChange(false)`（Req 3.1/3.2）、`error.kind === "cancelled"`
+    → `mutation.reset()`（Req 2.7）、`error.kind === "session_exchange_failed"`
+    → 文言表示 + `onOpenChange(false)`（Req 3.4）の 3 副作用を各 useEffect に分離。
+  - **kind → 固定文言マップの `Partial<Record<...>>` 型化**: `cancelled` をキー不在に
+    することで「表示なし」を型システム上でも明示（NFR 1.2 の内部詳細反射禁止と整合）。
+    `error.message` / `ApiError.body` は DOM に一切出さず、`kind` 対応の固定文言のみを
+    表示する。`server_rejected` / `server_error` / `network_error` は同一汎用文言に
+    集約（Req 2.8）。
+  - **`session_exchange_failed` の同時表示 + 閉じ**: tasks.md L220-221 / design.md
+    §PasskeySignupDialog の指示（文言表示 + Dialog を閉じる）を素直に実装。Radix
+    Dialog は portal 経由でアンマウントされるため文言は瞬間的にしか可視化されない
+    （下記「残存課題」参照）。
+  - **テスト**: `usePasskeyRegistration` を `vi.mock` で差し替え、`PasskeyRegistrationError`
+    は `vi.importActual` で実物クラスを再 export。tasks.md L226-232 の 6 ケースを
+    Arrange/Act/Assert 分離・BDD 命名で検証（recovery email 欄不在 / mutate 引数 /
+    invalid_username / username_taken / cancelled で汎用文言非表示 + reset 呼出 /
+    isSuccess で onOpenChange(false)）。`npm test` 全体 475 tests pass（Task 8 の
+    469 から +6）、`npm run lint` は新規ファイル由来の警告なし。
+- **残存課題（task 10 に影響）**:
+  - **Signup Dialog のマウント方式**: task 10（LoginPage 統合）で open 管理する際、
+    「閉じたら次回は空欄で開く」UX を担保するためアンマウント方式
+    （`{signupOpen && <PasskeySignupDialog ... />}`）を推奨。内部 `username` state と
+    mutation state が close 時に破棄され、再 open で初期化される。
+  - **`session_exchange_failed` 時の UX 分担**: 現状は Dialog 内で alert 文言を
+    瞬間表示 + close するため、閉じた後のログイン画面には何も残らない。Req 3.4 の
+    「汎用エラーを提示してログイン画面に復帰」の趣旨をより忠実に満たすには、task 10 の
+    LoginPage 統合時に親側 toast 化（`onSessionExchangeFailed?` callback 等の Props
+    拡張）を検討する余地がある。本 task では Props 拡張の裁量を持たなかったため未実装。
+    design.md 本文でも「Dialog を閉じる」以外の UX 責務分担が未記載であり、人間
+    Reviewer による整合性確認を推奨（既存「確認事項」節の api.ts 204 課題と同様、
+    本 spec の Boundary 制約下では task 内解消不可）。
+
 ## AC トレース
 
 Task 1 で担保した AC は以下:
