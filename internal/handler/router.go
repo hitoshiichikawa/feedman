@@ -236,8 +236,14 @@ func NewRouter(deps *RouterDeps) http.Handler {
 			// 既存 native auth 3 route と同じ横断ミドルウェア（unauthIPMW + MaxBodyBytes）を通す。
 			// NativeAuthHandler == nil の場合は本 route も未登録 = 404（fail-closed / NFR 2.2）で
 			// 既存 3 route の縮退挙動と連動する。
-			r.With(unauthIPMW, middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
-				Post("/api/auth/session", deps.NativeAuthHandler.Session)
+			// review #5: SessionExchanger 未注入（WithSessionExchange なしで生成された handler）の
+			// ときは Session() が nil 依存で 500 になるため、readiness（SessionReady）で登録を
+			// gate し、未 ready なら未登録 = 404 に倒す（fail-closed。production wiring では常に
+			// 注入済みのため挙動不変）。
+			if deps.NativeAuthHandler.SessionReady() {
+				r.With(unauthIPMW, middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
+					Post("/api/auth/session", deps.NativeAuthHandler.Session)
+			}
 		}
 
 		// AASA（Issue #216 / Req 5.4: 認証・IP レート制限の外側）。
@@ -272,7 +278,10 @@ func NewRouter(deps *RouterDeps) http.Handler {
 			// 破綻する事故を防ぐ）。404 のとき Web は「非提供」と判定して Google 単体構成へ
 			// 縮退する（既存 passkey route と同じ fail-closed 連動 / NFR 2.1）。
 			// GET なので body 上限 middleware（MaxBodyBytes）は不要。unauthIPMW のみ通す。
-			if deps.NativeAuthHandler != nil {
+			// review #5: session 交換 endpoint と同じ readiness（SessionReady）で gate し、
+			// 「NativeAuthHandler はあるが SessionExchanger 未注入」の部分初期化でも capability と
+			// session の登録有無を厳密に一致させる（capability 200 / session 404 の不整合を排除）。
+			if deps.NativeAuthHandler != nil && deps.NativeAuthHandler.SessionReady() {
 				r.With(unauthIPMW).Get("/api/passkey/capability", deps.PasskeyHandler.Capability)
 			}
 		}

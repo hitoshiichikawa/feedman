@@ -1343,6 +1343,48 @@ func TestNewRouter_NativeAuthSession_NotRegisteredWhenHandlerNil(t *testing.T) {
 	}
 }
 
+// TestNewRouter_SessionAndCapability_NotRegisteredWhenSessionExchangeMissing は
+// NativeAuthHandler が生成されていても SessionExchanger が未注入（WithSessionExchange なし）
+// のとき、POST /api/auth/session と GET /api/passkey/capability の双方が未登録 = 404 に
+// 倒れることを検証する（Issue #223 review #5: 部分初期化で capability だけ 200 になり
+// session が nil 依存で 500 になる不整合を fail-closed で排除する）。token 系は
+// SessionExchanger に依存しないため引き続き登録される（over-gate していないことも確認）。
+func TestNewRouter_SessionAndCapability_NotRegisteredWhenSessionExchangeMissing(t *testing.T) {
+	// Arrange: PasskeyHandler あり + NativeAuthHandler あり だが SessionExchanger 未注入
+	ph := NewPasskeyHandler(&stubPasskeyRouterRegistration{}, &stubPasskeyRouterAuthentication{})
+	deps := newPasskeyRouterDeps(ph, nil)
+	// WithSessionExchange を付けずに生成 → SessionReady() == false（部分初期化）
+	deps.NativeAuthHandler = NewNativeAuthHandler(&alwaysSucceedExchangeService{})
+	router := NewRouter(deps)
+
+	// Act & Assert: POST /api/auth/session は未登録 = 404（nil 依存 500 に到達させない）
+	sessBody := `{"auth_code":"a","code_verifier":"v"}`
+	sessReq := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(sessBody))
+	sessReq.Header.Set("Content-Type", "application/json")
+	sessW := httptest.NewRecorder()
+	router.ServeHTTP(sessW, sessReq)
+	if got := sessW.Result().StatusCode; got != http.StatusNotFound {
+		t.Errorf("POST /api/auth/session status = %d, want 404 (SessionExchanger 未注入で fail-closed / review #5)", got)
+	}
+
+	// Act & Assert: GET /api/passkey/capability も同じ readiness で未登録 = 404
+	capReq := httptest.NewRequest(http.MethodGet, "/api/passkey/capability", nil)
+	capW := httptest.NewRecorder()
+	router.ServeHTTP(capW, capReq)
+	if got := capW.Result().StatusCode; got != http.StatusNotFound {
+		t.Errorf("GET /api/passkey/capability status = %d, want 404 (session と登録有無を一致 / review #5)", got)
+	}
+
+	// Act & Assert: token 系（sessionExchange 不要）は over-gate せず引き続き到達する
+	tokReq := httptest.NewRequest(http.MethodPost, "/api/auth/token", strings.NewReader(sessBody))
+	tokReq.Header.Set("Content-Type", "application/json")
+	tokW := httptest.NewRecorder()
+	router.ServeHTTP(tokW, tokReq)
+	if got := tokW.Result().StatusCode; got == http.StatusNotFound {
+		t.Errorf("POST /api/auth/token status = 404, want 到達 (token は sessionExchange に依存しない / review #5)")
+	}
+}
+
 // TestNewRouter_NativeAuthSession_DoesNotRequireSession は注入時に Cookie 無しでも
 // 401 を返さず handler まで到達することを検証する（Req 3.1 / 4.2: Session middleware 通らない）。
 func TestNewRouter_NativeAuthSession_DoesNotRequireSession(t *testing.T) {

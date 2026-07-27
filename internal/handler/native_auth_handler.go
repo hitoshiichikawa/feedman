@@ -96,6 +96,19 @@ func NewNativeAuthHandler(svc TokenExchangeService, opts ...NativeAuthHandlerOpt
 	return h
 }
 
+// SessionReady は Session 経路（POST /api/auth/session）が実際に処理可能な状態
+// （WithSessionExchange で SessionExchanger が注入済み）かを返す（Issue #223 review #5）。
+//
+// WithSessionExchange は任意 Option のため、`NewNativeAuthHandler(svc)` だけでも handler は
+// 生成できるが、その状態で Session() を呼ぶと sessionExchange が nil で panic（500）になる。
+// router 側はこの readiness で POST /api/auth/session と GET /api/passkey/capability の登録を
+// gate し、「capability は 200 なのに session が nil 依存で 500」という不整合を fail-closed
+// （両 route 未登録 = 404）に倒す。Token / Refresh / Revoke は本 readiness に依存しない
+// （sessionExchange 不要）ため、引き続き NativeAuthHandler != nil のみで登録される。
+func (h *NativeAuthHandler) SessionReady() bool {
+	return h.sessionExchange != nil
+}
+
 // tokenRequest は POST /api/auth/token のリクエストボディ。
 // SERVER.md §1.3 の契約に従い、snake_case で受ける。
 type tokenRequest struct {
