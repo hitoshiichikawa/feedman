@@ -204,7 +204,7 @@ per-task ループ運用時のテスト境界: 各タスクは実装 + テスト
   - _Boundary: hooks/use-passkey-registration_
   - _Depends: 4, 5_
 
-- [ ] 9. Web: `web/src/components/passkey-signup-dialog.tsx` を追加し、username 入力 UI とエラー表示を提供する
+- [x] 9. Web: `web/src/components/passkey-signup-dialog.tsx` を追加し、username 入力 UI とエラー表示を提供する
   - shadcn/ui の `Dialog` / `DialogContent` / `DialogHeader` / `DialogTitle` /
     `DialogDescription` / `Input` / `Label` / `Button` を既存 `components/ui/*` から再利用
     （CLAUDE.md §4「共有 UI の再利用」）
