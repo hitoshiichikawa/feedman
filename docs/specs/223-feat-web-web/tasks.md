@@ -235,7 +235,7 @@ per-task ループ運用時のテスト境界: 各タスクは実装 + テスト
   - _Boundary: components/passkey-signup-dialog_
   - _Depends: 8_
 
-- [ ] 10. Web: `web/src/components/passkey-buttons.tsx` を追加し、`web/src/components/login-page.tsx` にパスキー導線と Signup Dialog を統合する（既存 Google 導線・既存テストを完全不変）
+- [x] 10. Web: `web/src/components/passkey-buttons.tsx` を追加し、`web/src/components/login-page.tsx` にパスキー導線と Signup Dialog を統合する（既存 Google 導線・既存テストを完全不変）
   - `web/src/components/passkey-buttons.tsx` を新規追加:
     - `usePasskeyCapability()` で capability を取得。`isLoading` の間は placeholder（`null` 返却でも可）、
       `available === false` のとき `null` を返し非表示（Requirement 5.1 / 5.2）
