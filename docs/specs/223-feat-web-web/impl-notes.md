@@ -343,6 +343,104 @@ task 単位で記録する。前方伝播（先行 task の learning を後続 t
     見た挙動（authentication mutation loading / error kind 別 UI 表示 / disable
     処理）を検証する。本 hook 単体では UI 挙動を担わない。
 
+### Task 8
+
+- **採用方針**: `usePasskeyRegistration` を `useMutation<void,
+  PasskeyRegistrationError, {username: string}>` として実装し、design.md §Flows
+  「新規作成フロー」の 8 段 chain（PKCE → registration/begin → create →
+  registration/finish → authentication/begin → get → authentication/finish →
+  session 交換）を単一の `mutationFn` 内で closure 変数（`codeVerifier`）を
+  保持したまま実行する。task 7（`use-passkey-authentication.ts`）の
+  `classifyError(err, step)` + `isCancelledError` + `CANCEL_ERROR_NAMES` +
+  step 定数の設計を踏襲し、登録側固有の 2 kind（`invalid_username` /
+  `username_taken`）を classifier に加えた superset として実装した。
+- **重要な判断**:
+  - **task 7 との共有 utility 抽出を見送り本 file 内実装とした根拠**: task 8 の
+    Boundary は `hooks/use-passkey-registration` に限定されており、task 7 の
+    `use-passkey-authentication.ts` を編集して `classifyError` / `isCancelledError`
+    / `CANCEL_ERROR_NAMES` を共有化する変更は boundary 逸脱になる（impl-notes
+    Task 7 の残存課題にも同旨の記載あり）。したがって同 idiom を本 file 内に
+    独立コピーした（CLAUDE.md §4 の共有ヘルパ抽出との緊張関係あり）。両モジュール
+    は実装方針を厳密同一に保ち、後日 spec 別共有化 PR（例:
+    `web/src/hooks/passkey-error.ts` や `web/src/lib/webauthn-cancel.ts` の
+    切り出し）が行いやすいよう関数シグネチャと定数集合を対称化してある。
+    共有化提案は下記「確認事項」節に残す。
+  - **`PasskeyRegistrationErrorKind` の 7 種**: tasks.md L182-193 と
+    design.md §Error Handling L1036-1045 の列挙に厳密従い、7 種
+    （`invalid_username` / `username_taken` / `cancelled` / `server_rejected` /
+    `session_exchange_failed` / `server_error` / `network_error`）として
+    定義した。design.md §Components（use-passkey-registration.ts）の
+    Contracts でも本 7 種が明示されており、task 7 の §Components / §Error
+    Handling 間の非整合（4 種 vs 5 種）と異なり task 8 側は文書間で整合が
+    取れている。
+  - **step index の 8 段設計**: task 7 の 5 段（PKCE / begin / get / finish /
+    session）を、task 8 では登録と認証を分離した 8 段（PKCE /
+    reg_begin / nav_create / reg_finish / auth_begin / nav_get / auth_finish /
+    session_exchange）に拡張した。`classifyError` は `STEP_REG_BEGIN` のみ
+    分岐して `invalid_username` / `username_taken` を返し、`STEP_SESSION_EXCHANGE`
+    は `session_exchange_failed` に振り分け、それ以外の step の `ApiError` は
+    task 7 と同じ `server_rejected` / `server_error` の 2 分類にまとめる。
+    「同じ 400 が step 4（reg_finish）では `server_rejected`、step 8
+    （session）では `session_exchange_failed`」となる分岐を回帰テスト
+    （`server_rejected` ケース + `session_exchange_failed` ケースの並置）で
+    検証済み。
+  - **`extractApiErrorCode` を専用 helper 化**: `ApiError.body.code === "INVALID_USERNAME"`
+    の判定は `body` が任意 shape の `unknown` であるため、`typeof === "object"` /
+    non-null / `"code" in body` / `typeof code === "string"` の 4 段 guard を
+    通す。判定を classifier 本体から `extractApiErrorCode` に切り出すことで
+    `classifyError` の可読性を保ち、code 以外のフィールド（stack / query 等の
+    NFR 1.2 反射禁止対象）を参照しない契約を型システムで明示した。
+  - **authentication chain の `code_challenge` 再送**: 登録 chain と認証 chain
+    は同一の `codeChallenge` を再利用する（step 2 と step 5 で同じ値を送信）。
+    サーバ側 `authentication/finish` は登録 finish で発行された `auth_code` を
+    `MarkUsed` + `VerifyPKCES256Verifier` する経路であり、`code_challenge` の
+    再利用は許容される（サーバ設計 #216 に依存）。code_verifier / code_challenge
+    は mutation 内で 1 度だけ生成し、両 chain で共有することで generatePkcePair
+    の副呼び出しを避けている。
+  - **`navigator.credentials.create` / `.get` の null 集約**: task 7 と同様、
+    WebAuthn 実装依存で throw ではなく `null` を resolve するブラウザケースを
+    考慮し、`if (!cred) throw new PasskeyRegistrationError("cancelled")` を
+    両呼び出し後に配置した（Req 2.7 の網羅性向上）。
+  - **テスト戦略の再利用**: task 7 テスト（`use-passkey-authentication.test.tsx`）と
+    同 idiom で `@/lib/api` / `@/lib/pkce` / `@/lib/webauthn` の 3 モジュールを
+    `vi.mock` で差し替え、`ApiError` は `vi.importActual` で実物を再 export、
+    `navigator.credentials` は `vi.stubGlobal` で `create` / `get` を両方 stub
+    する。`afterEach(vi.unstubAllGlobals)` で teardown。`createWrapper()` +
+    `invalidateQueries` spy も同 idiom。既存 test suite（469 テスト）を破壊
+    せず 6 ケース追加で all-green。
+  - **NFR 1.1 遵守**: 本 hook 実装では `console.*` を一切呼ばず、`codeVerifier` /
+    `authCode` / attestation 生値 / assertion 生値をモジュール変数・storage・
+    URL に一切残さない。mutation 終了で closure が GC 対象になる前提で、明示的
+    な変数 clear は不要（React Query が mutation state を管理）。
+  - **NFR 1.2 遵守**: `PasskeyRegistrationError` は `kind` の enum のみを保持し、
+    `ApiError.body` を保持しない。`invalid_username` / `username_taken` /
+    `server_rejected` の各テストで error.message に "INVALID_USERNAME" /
+    "USERNAME_TAKEN" / "REGISTRATION_FAILED" が反射されないことを assert
+    経由で回帰防止。
+  - **NFR 1.4 遵守**: `apiClient` 経由の相対パス呼び出しで同一オリジン
+    （`API_BASE_URL = ""` / `web/src/lib/api.ts` の既存契約）に閉じる。「正常系」
+    テストで 5 endpoint がいずれも相対パスで呼ばれることを `toHaveBeenNthCalledWith`
+    の URL 引数として assert。
+- **残存課題**:
+  - **error 分類の共有 utility 抽出**: task 7 と task 8 で `classifyError` /
+    `isCancelledError` / `CANCEL_ERROR_NAMES` / step 定数の同種ロジックが 2 file
+    に重複している。Boundary 制約下で本 task では見送り、共有化 PR
+    （例: `web/src/hooks/passkey-error.ts` に共通 base classifier を切り出し
+    task 7 / 8 の hook からそれぞれの kind 型で継承する形）の別 spec 起票を推奨。
+  - **api.ts の 204 No Content 非対応**（task 7 と同一の残存課題）:
+    `web/src/lib/api.ts` の `request<T>` は `response.json()` を無条件で呼ぶため、
+    `/api/auth/session` の 204 No Content 応答で runtime `SyntaxError` を throw
+    する可能性がある。task 8 の Boundary 内では対処できないため、production
+    統合前に api.ts の 204 handling を別 spec / PR で追加する必要がある。
+    task 8 のテストは apiClient を mock して runtime 挙動を回避しており、
+    実装は tasks.md L179 の指定どおり `apiClient.post` を使う。
+  - task 9（`PasskeySignupDialog`）で本 hook を `usePasskeyRegistration().mutate({username})`
+    経由で呼び出し、`isPending` / `isError` の各 `error.kind` 分岐に対応する
+    UI 文言・復帰動作（cancelled は `mutation.reset()`、session_exchange_failed
+    は Dialog を閉じる 等）を実装する。本 hook 単体では UI 挙動を担わない。
+  - task 10（`PasskeyButtons` / `LoginPage` 統合）は task 9 の Dialog を親から
+    open 管理する形になるため、本 hook からは独立に着手可能。
+
 ## AC トレース
 
 Task 1 で担保した AC は以下:
@@ -458,6 +556,68 @@ Task 7 で担保した AC は以下（`web/src/hooks/use-passkey-authentication.
   3 endpoint がいずれも相対パスで呼ばれることを `toHaveBeenNthCalledWith` の URL 引数
   として assert。
 
+Task 8 で担保した AC は以下（`web/src/hooks/use-passkey-registration.test.tsx` の
+6 ケースで検証）:
+
+- **2.1（作成開始操作の提示）**（partial: hook 契約側）: hook は
+  `usePasskeyRegistration().mutate({username})` を作成開始 API として提供する。
+  UI 側の入力欄・作成ボタン提示は task 9（`PasskeySignupDialog`）の責務のため、
+  hook 単体テストでは mutation 契約（`{username: string}` 引数を受け取り実行する）
+  で 2.1 の前提を作る。「正常系」ケースで `mutate({username: "alice"})` の受理と
+  chain 開始が確認できる。
+- **2.2（ブラウザのパスキー作成 UI 起動）**: 「正常系」ケースが
+  PKCE → registration/begin → `navigator.credentials.create` の順序を assert し、
+  `decodeCreationOptions` が begin レスポンスの `options` を受け取ることを
+  `toHaveBeenCalledWith({publicKey: {}})` として検証。
+- **2.3（作成成功後、追加操作なしで合流フローへ）**: 「正常系」ケースで
+  registration/finish 成功後、追加のユーザー操作を挟まずに authentication/begin →
+  get → authentication/finish → session 交換の 5 endpoint が順に呼ばれる
+  ことを `toHaveBeenNthCalledWith` の 3〜5 番目として assert。
+- **2.4（recovery email 未指定を欠落として扱わない）**: 「正常系」ケースが
+  registration/begin 呼び出しの payload に `email: ""` を含むことを
+  `toHaveBeenNthCalledWith(1, "/api/passkey/registration/begin", {username, email: "", code_challenge})`
+  として assert。UI 側は task 9 で email 入力欄を設けない実装で 2.4 を UI で
+  確定させる（本 hook はサーバ契約側で `email: ""` を必ず送る形で担保）。
+- **2.5（username 形式不正の表示）**（partial: 分類側）: 「invalid_username」
+  ケースが registration/begin の 400 with `code: "INVALID_USERNAME"` を
+  `kind === "invalid_username"` に分類することを検証。UI 表示文言は task 9 の
+  責務のため、本 task では kind の分類までを担保。
+- **2.6（username 重複の表示）**（partial: 分類側）: 「username_taken」
+  ケースが registration/begin の 409 を `kind === "username_taken"` に分類する
+  ことを検証。UI 表示文言は task 9 の責務。
+- **2.7（ブラウザ UI キャンセルで復帰）**（partial: 分類側）: 「cancelled」
+  ケースが `navigator.credentials.create` の `NotAllowedError` DOMException を
+  `kind === "cancelled"` に分類することと、以降の registration/finish が
+  呼ばれないことを assert。「画面を壊さず戻す」の UI 実装は task 9 の
+  `mutation.reset()` 経路で確定。
+- **2.8（サーバエラーの汎用表示・内部詳細非反射）**（partial: 分類側）:
+  「server_rejected」ケースが registration/finish の 400 REGISTRATION_FAILED を
+  `kind === "server_rejected"` に分類することと、`error.message` に
+  "REGISTRATION_FAILED" が反射されないことを assert。NFR 1.2 と同時担保。
+- **3.1（追加操作なしで Cookie セッションに到達）**: 「正常系」ケースが
+  `/api/auth/session` を chain の最終 step として呼び、`queryClient.invalidateQueries({queryKey: ["auth", "me"]})`
+  が呼ばれることを spy で検証。
+- **3.2（2 ペイン UI を初期表示）**: `invalidateQueries` の呼び出しにより
+  `AuthGuard` が再判定して認証済み分岐へ遷移する経路を hook 側で作る。
+  実際の 2 ペイン UI 描画は既存 `AuthGuard` / `AppShell` の責務。
+- **3.4（合流失敗時にセッションに到達させない）**: 「session_exchange_failed」
+  ケースが `/api/auth/session` の 400 INVALID_GRANT を step 8 の失敗として
+  `kind === "session_exchange_failed"` に振り分けることを検証。同じ 400 が
+  step 4（reg_finish）では `server_rejected` に振り分けられるという対比を
+  「server_rejected」ケースとの並置で確認。
+- **NFR 1.1（機密情報の非漏出）**: 実装で `console.*` を一切呼ばず、
+  `codeVerifier` / `authCode` / attestation 生値 / assertion 生値を
+  モジュール変数・storage・URL に残さない。テストは encode/decode を mock 化
+  しているため生値の露出経路がない。
+- **NFR 1.2（サーバ内部詳細を UI・console に反射しない）**:
+  `PasskeyRegistrationError` は `kind` の enum のみを持ち、`ApiError.body` を
+  保持しない。「invalid_username」/「username_taken」/「server_rejected」の
+  3 ケースで error.message に "INVALID_USERNAME" / "USERNAME_TAKEN" /
+  "REGISTRATION_FAILED" が反射されないことを assert 経由で回帰防止。
+- **NFR 1.4（同一オリジン限定）**: `apiClient` 経由の相対パス呼び出しで
+  `API_BASE_URL = ""` に閉じる。「正常系」テストで 5 endpoint がいずれも
+  相対パスで呼ばれることを `toHaveBeenNthCalledWith` の URL 引数として assert。
+
 ## 確認事項
 
 - Task 1 時点: 現時点でなし。design.md § SessionExchangeService の Contracts と実装は一致。
@@ -521,5 +681,34 @@ Task 7 で担保した AC は以下（`web/src/hooks/use-passkey-authentication.
     ため、`if (!cred) throw new PasskeyAuthError("cancelled")` で明示的に cancel
     カテゴリに集約している。design.md §Error Handling には明記が無いが、
     Req 4.5「画面を壊さずに戻す」の網羅性向上として実装判断で追加した。
+
+- Task 8 追記:
+  - **task 7 との共有 utility 抽出見送り**: `classifyError` / `isCancelledError` /
+    `CANCEL_ERROR_NAMES` / step 定数の同種ロジックが task 7
+    （`use-passkey-authentication.ts`）と task 8 （`use-passkey-registration.ts`）で
+    2 file に重複している。task 8 の Boundary は `hooks/use-passkey-registration`
+    に限定されており、task 7 の hook file を編集する共有化変更は boundary 逸脱に
+    なるため見送った（impl-notes Task 7 の残存課題にも同旨の記載あり）。共有化
+    PR（例: `web/src/hooks/passkey-error.ts` を新設して task 7 / 8 の hook から
+    継承する形）の別 spec 起票を推奨する。関数シグネチャ・定数集合は対称に
+    保ってあるため、後日の抽出は機械的に行える見込み。
+  - **task 7 の非整合との対比**: task 7 では design.md §Components
+    （use-passkey-authentication.ts）Contracts と §Error Handling の間に kind 数
+    の軽微な非整合（4 vs 5）があったが、task 8 側では design.md §Components
+    （use-passkey-registration.ts）と §Error Handling の kind 列挙が 7 種で整合
+    している。tasks.md L182-193 の 7 種と厳密一致で実装した。
+  - **api.ts の 204 No Content 非対応**（task 7 と同一の残存課題）:
+    `/api/auth/session` の 204 応答で `request<T>` が `response.json()` を無条件
+    に呼ぶことによる runtime `SyntaxError` の可能性は本 task でも解消できていない
+    （Boundary 制約下）。task 7 追記に既に記載した通り、production 統合前に
+    api.ts の 204 handling を別 spec / PR で追加する必要がある。task 9 / 10 では
+    hook を UI から呼び出すが、テストは apiClient を mock している限り露出しない。
+  - **`code_challenge` の再利用**: 登録 chain の step 2（registration/begin）と
+    認証 chain の step 5（authentication/begin）で同じ `codeChallenge` を再送
+    する実装にした。サーバ側 #216 の `authentication/finish` は `MarkUsed` +
+    `VerifyPKCES256Verifier` で `auth_code` に紐づく PKCE 検証を行うため、
+    challenge 再利用が許容されるという解釈に依拠している（design.md §Flows
+    「新規作成フロー」の 8 段 chain と整合）。人間 Reviewer による設計意図の
+    整合性確認を推奨する。
 
 STATUS: complete
