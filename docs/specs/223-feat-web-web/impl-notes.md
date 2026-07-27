@@ -109,6 +109,41 @@ task 単位で記録する。前方伝播（先行 task の learning を後続 t
   wiring（Issue #216 で完了済み）は `PasskeyHandler` を既に注入しており、本 task で
   追加した Capability route も注入済み環境で自動的に有効化される。
 
+### Task 4
+
+- **採用方針**: `web/src/lib/pkce.ts` を純粋 utility として実装し、`generatePkcePair()`
+  と `deriveCodeChallengeS256(codeVerifier)` の 2 関数を export。ヘルパ `bytesToBase64url`
+  はローカル private とし、base64url 共有化は task 5（`web/src/lib/webauthn.ts`）の責務に
+  委ねる（Boundary `lib/pkce` を逸脱しないため）。
+- **重要な判断**:
+  - **SHA-256 の入力はサーバと対称化**: サーバ側 `internal/auth/pkce.go` の
+    `VerifyPKCES256Verifier` は `sha256.Sum256([]byte(verifier))` を計算する。ここで
+    `verifier` は code_verifier "文字列" そのもの（43 文字 ASCII）。したがって Web 側でも
+    生の 32 バイト crypto random を直接 SHA-256 に食わせず、まず base64url 化して
+    code_verifier 文字列（43 文字）を作り、その文字列を `TextEncoder` でエンコードした
+    バイト列を SHA-256 に入力する。これにより Web が生成した challenge がサーバの
+    verifier 検証と一致し、パスキー登録・ログインの合流経路が成立する。RFC 7636
+    Appendix B の既知ベクトル（`dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk` →
+    `E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM`）でこの互換性を回帰テスト化した。
+  - **`deriveCodeChallengeS256` の追加 export**: design.md §pkce.ts の Contracts では
+    `generatePkcePair` + `PkcePair` のみが例示されているが、乱数入力で動く
+    `generatePkcePair` だけでは既知ベクトルによる SHA-256 派生の正しさを検証できない
+    ため、S256 派生を担う純粋関数を同 file から `deriveCodeChallengeS256` として追加
+    export した。Boundary `lib/pkce` 内で完結する testability 向上のみで、design.md
+    契約（`generatePkcePair` の signature / `PkcePair` の shape）は毀損していない。
+  - **base64url 変換のローカル private 化**: task 5 でも同種の変換が必要になるが、
+    本 task の Boundary は `lib/pkce` に限定されており、`web/src/lib/webauthn.ts` を今
+    作成すると task 5 の責務を先取りして boundary 逸脱になる。したがって `bytesToBase64url`
+    は pkce.ts 内の private helper として保持し、task 5 実装時に共有化を検討する運用と
+    した（CLAUDE.md §4 の共有ヘルパ抽出は task 5 の責務）。
+  - **NFR 1.1 遵守**: 生成値は返却値としてのみ渡し、モジュール内変数に保持しない。
+    `console.*` 呼び出しなし、storage / URL への書き込みなし。WebCrypto rejection は
+    握り潰さず呼び出し側に伝播（副作用なし・throw なし方針）。
+- **残存課題**: task 5（`web/src/lib/webauthn.ts`）で base64url ↔ ArrayBuffer 変換の
+  共有化を検討する（同 file 内で `Uint8Array → base64url` を再実装するか、`pkce.ts` の
+  private helper を export に格上げして共有するかは task 5 実装時に判断）。人間 Reviewer
+  による design.md との整合性確認（`deriveCodeChallengeS256` の追加 export）を推奨。
+
 ## AC トレース
 
 Task 1 で担保した AC は以下:
@@ -166,3 +201,10 @@ Task 2 で担保した AC は以下:
   `TokenExchangeService` と同 idiom / testability 向上）。API 契約
   （POST /api/auth/session / Cookie 属性 / status code / error code）および
   fail-closed の連動は不変。人間 Reviewer による design.md との整合性確認を推奨。
+- Task 4 追記: design.md §lib/pkce.ts の Contracts では `generatePkcePair` + `PkcePair`
+  のみが例示されているが、実装では S256 派生を担う純粋関数を `deriveCodeChallengeS256`
+  として追加 export した（Boundary `lib/pkce` 内で完結する testability 向上のため。
+  RFC 7636 Appendix B の既知ベクトルでサーバ `sha256.Sum256([]byte(verifier))` との
+  対称性を回帰テスト化する目的）。`generatePkcePair` の signature と `PkcePair` の
+  shape は design.md 契約と厳密一致で毀損なし。人間 Reviewer による design.md との
+  整合性確認を推奨。
