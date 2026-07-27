@@ -167,7 +167,7 @@ per-task ループ運用時のテスト境界: 各タスクは実装 + テスト
   - _Boundary: hooks/use-passkey-authentication_
   - _Depends: 4, 5_
 
-- [ ] 8. Web: `web/src/hooks/use-passkey-registration.ts` を追加し、新規作成 mutation（登録 → 認証 → session の連鎖）を提供する
+- [x] 8. Web: `web/src/hooks/use-passkey-registration.ts` を追加し、新規作成 mutation（登録 → 認証 → session の連鎖）を提供する
   - `usePasskeyRegistration()` を `useMutation<void, PasskeyRegistrationError, {username: string}>`
     で実装。内部 chain は design.md §Flows「新規作成フロー」に準拠:
     1. `generatePkcePair()`
