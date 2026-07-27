@@ -263,6 +263,86 @@ task 単位で記録する。前方伝播（先行 task の learning を後続 t
     本 hook を直接呼び出さないが、`PasskeyButtons` 経由で gating される前提
     （design.md §Preconditions: `usePasskeyCapability().available === true`）。
 
+### Task 7
+
+- **採用方針**: `usePasskeyAuthentication` を `useMutation<void, PasskeyAuthError, void>`
+  として実装し、design.md §Flows「ログインフロー」の 5 段 chain（PKCE →
+  begin → navigator.credentials.get → finish → session）を単一の `mutationFn`
+  内で closure 変数（`codeVerifier`）を保持したまま実行する。step index を数値
+  カウンタで追跡し、catch では `classifyError(err, step)` に集約して `PasskeyAuthError`
+  へ変換する（step 5 の失敗のみ `session_exchange_failed` に振り分けるロジックを
+  一箇所に閉じ込めるため）。
+- **重要な判断**:
+  - **`PasskeyAuthErrorKind` に `session_exchange_failed` を追加**: design.md
+    §Components（use-passkey-authentication.ts）の Contracts では 4 種のみ
+    （`cancelled` / `server_error` / `server_rejected` / `network_error`）が
+    例示されていたが、tasks.md L155（`POST /api/auth/session` の 400/500 →
+    `session_exchange_failed`）および design.md §Error Handling L1042 の
+    「System Errors」で明示的に列挙された `session_exchange_failed` を含めた
+    5 種として実装した。design.md §Components と §Error Handling の間に軽微な
+    非整合があるが、tasks.md（実装レベルの正本）と §Error Handling が同期
+    しているため後者を採用（下記「確認事項」に記載）。
+  - **`PasskeyAuthError` はカスタム Error クラス**: CLAUDE.md §「エラーは
+    独自 Error クラスで wrap」に従い、`kind` プロパティを持つ具象 class として
+    定義。`readonly kind` として immutable にし、UI 側は enum 判別のみで文言・
+    復帰動作を決定できる。`ApiError.body` の内部詳細は message に反射しない
+    （NFR 1.2）ため、`server_rejected` テストで `error.message` に
+    "AUTHENTICATION_FAILED" が含まれないことを assert して回帰防止。
+  - **step index による分類の一元化**: 「同じ 400 ApiError でも step 4
+    （finish）なら server_rejected、step 5（session）なら session_exchange_failed」
+    という要件を満たすため、catch を分割せず 1 箇所の `try` 内で step 番号を
+    incremental に更新し、単一 catch で `classifyError(err, step)` を呼ぶ形に
+    集約した。分岐が catch 側の 1 関数に閉じ、chain 本体の可読性を保てる。
+    テストの `session_exchange_failed` ケースで「同じ 400 が step 4 では
+    `server_rejected` に、step 5 では `session_exchange_failed` に振り分けられる」
+    ことを別ケースの対比で確認済み。
+  - **`navigator.credentials.get` null 返却時の cancel 集約**: 一部のブラウザは
+    キャンセル時に throw ではなく `null` を resolve するケースがある（WebAuthn 仕様上、
+    実装依存の余地あり）ため、`if (!cred) throw new PasskeyAuthError("cancelled")`
+    で明示的に cancel カテゴリに集約する（Req 4.5「画面を壊さずに戻す」の網羅性向上）。
+  - **DOMException 判別のフォールバック**: jsdom / 本番ブラウザ双方で DOMException が
+    存在する前提だが、SSR / 古いランタイムで `typeof DOMException === "undefined"` の
+    ケースを想定し、`err instanceof DOMException` に加えて `err instanceof Error &&
+    CANCEL_ERROR_NAMES.has(err.name)` を fallback として持たせた（NFR 3.1 の
+    「外部ネットワーク依存なしに検証可能」を jsdom で安定させる副次効果）。
+  - **依存モジュールの mock 戦略**: `apiClient` / `generatePkcePair` / `webauthn`
+    encode/decode の 3 モジュールを `vi.mock` で差し替え、`navigator.credentials`
+    のみ `vi.stubGlobal("navigator", { credentials: { get: mockGet } })` で
+    差し込む。jsdom は WebAuthn 実装を持たないため実物を呼ぶ意義が薄く、mock 化が
+    NFR 3.1 の「外部ネットワーク・ブラウザ依存なしに検証可能」を満たす最短経路。
+    `ApiError` は `vi.importActual` で実物を再 export し、hook 側の `instanceof
+    ApiError` 判定がリアルな型で通ることを保証。
+  - **`afterEach` での `vi.unstubAllGlobals()`**: 各テストで `vi.stubGlobal` した
+    navigator を次テストへ漏らさないため、`use-passkey-capability.test.tsx` /
+    `passkey-capability.test.ts` と同 idiom で teardown する。
+  - **`invalidateQueries` の spy**: `createWrapper()` から `queryClient` を
+    返却し、`vi.spyOn(queryClient, "invalidateQueries")` で `["auth", "me"]` の
+    invalidate を assert する（既存 `use-manual-refresh.test.tsx` と同 idiom）。
+  - **NFR 1.1 遵守**: hook 実装では `console.*` を一切呼ばず、`code_verifier` /
+    `auth_code` / assertion 生値をモジュール変数・storage・URL に一切残さない。
+    mutation 終了で closure が GC 対象になる前提で、明示的な変数 clear は不要
+    （React Query が mutation state を管理）。
+  - **NFR 1.4 遵守**: `apiClient` 経由の相対パス呼び出しで同一オリジン
+    （`API_BASE_URL = ""`）に閉じる。テストの mock 検証で 3 endpoint への
+    call がすべて相対パスであることを assert 経由で確認。
+- **残存課題**:
+  - **api.ts の 204 レスポンス非対応**: `web/src/lib/api.ts` の `request<T>` は
+    `response.json()` を無条件で呼ぶため、`/api/auth/session` の 204 No Content
+    応答（design.md L859 で規定）に対して runtime で `SyntaxError` を throw する
+    可能性がある。Task 7 の Boundary は `hooks/use-passkey-authentication` に
+    限定されており api.ts 側を修正できないため、実装は tasks.md L147 の指定
+    どおり `apiClient.post` を使い、テストは apiClient を mock して runtime 挙動
+    を回避している。production 統合前に api.ts の 204 handling を別 spec / PR
+    で追加する必要がある（下記「確認事項」に記載）。
+  - task 8（`use-passkey-registration`）は同ファイルの `PasskeyAuthError` /
+    `classifyError` パターンを踏襲するのが自然だが、Boundary
+    `hooks/use-passkey-registration` を逸脱しないため、共有 utility 抽出は
+    task 8 側で判断する（error kind の superset に `invalid_username` /
+    `username_taken` が追加される想定）。
+  - task 10（`PasskeyButtons` / `LoginPage` 統合）で本 hook の呼び出し側から
+    見た挙動（authentication mutation loading / error kind 別 UI 表示 / disable
+    処理）を検証する。本 hook 単体では UI 挙動を担わない。
+
 ## AC トレース
 
 Task 1 で担保した AC は以下:
@@ -339,6 +419,45 @@ Task 6 で担保した AC は以下:
   既存契約に依存）。テストの mock 検証で `expect(apiClient.get).toHaveBeenCalledWith("/api/passkey/capability")`
   として絶対 URL を用いていないことを回帰的に assert（正常系ケース）。
 
+Task 7 で担保した AC は以下（`web/src/hooks/use-passkey-authentication.test.tsx` の
+5 ケースで検証）:
+
+- **4.1（ブラウザのパスキー選択 UI 起動 / username 不要）** / **4.2（成功で追加操作なく
+  Cookie セッションに到達）** / **4.3（既存機能一式）** / **4.4（iOS 由来パスキーでも
+  同一経路）**: 「正常系」ケースが PKCE → begin → get → finish → session の順序を assert し、
+  `queryClient.invalidateQueries({queryKey: ["auth", "me"]})` の呼び出しを spy で検証。
+  hook は username を送らず discoverable login として `authentication/begin` を
+  `{code_challenge}` のみで呼ぶ（4.1 の「username 入力不要」を実装契約で担保）。4.4 は
+  同一 endpoint 経由のため個別ケース不要（サーバ側 `AuthenticationService` が iOS 由来
+  credential も同一 flow で解決する）。
+- **4.5（ブラウザ UI キャンセルで復帰）**: 「cancelled」ケースが `navigator.credentials.get`
+  の `NotAllowedError` DOMException を `PasskeyAuthError.kind === "cancelled"` に分類する
+  ことを検証。以降の finish / session が呼ばれないことも assert し、認証状態に到達
+  させない挙動を担保。
+- **4.6（サーバ拒否理由の内部区別を反射せず汎用エラー）**: 「server_rejected」ケースが
+  authentication/finish の 400 AUTHENTICATION_FAILED を `kind === "server_rejected"` に
+  分類することと、`error.message` に "AUTHENTICATION_FAILED" 文字列が含まれないことを
+  assert（NFR 1.2 の反射禁止と同時担保）。
+- **4.7（サーバエラー時に認証状態に到達させない）**: 「server_error」ケースが
+  authentication/begin の 500 を `kind === "server_error"` に分類し、以降の endpoint が
+  呼ばれないことを assert。
+- **3.4（合流失敗時に認証状態に到達させない）**（partial: session 側の合流失敗判別に該当）:
+  「session_exchange_failed」ケースが `/api/auth/session` の 400 INVALID_GRANT を step 5 の
+  失敗として `kind === "session_exchange_failed"` に振り分けることを検証。同じ 400 が
+  step 4（finish）では `server_rejected` に振り分けられるという対比を「server_rejected」
+  ケースとの並置で確認。
+- **NFR 1.1（機密情報の非漏出）**: 実装で `console.*` を一切呼ばず、`code_verifier` /
+  `auth_code` / assertion 生値をモジュール変数・storage・URL に残さない。テストは
+  encode/decode を mock 化しているため生値の露出経路がない。runtime 挙動としては
+  mutation の closure が終了時に GC 対象になる前提。
+- **NFR 1.2（サーバ内部詳細を UI・console に反射しない）**: `PasskeyAuthError` は
+  `kind` の enum のみを持ち、`ApiError.body` を保持しない。「server_rejected」テストで
+  error.message に "AUTHENTICATION_FAILED" が反射されないことを assert 経由で回帰防止。
+- **NFR 1.4（同一オリジン限定）**: `apiClient` 経由の相対パス呼び出しで
+  `API_BASE_URL = ""`（`web/src/lib/api.ts` の既存契約）に閉じる。「正常系」テストで
+  3 endpoint がいずれも相対パスで呼ばれることを `toHaveBeenNthCalledWith` の URL 引数
+  として assert。
+
 ## 確認事項
 
 - Task 1 時点: 現時点でなし。design.md § SessionExchangeService の Contracts と実装は一致。
@@ -377,5 +496,30 @@ Task 6 で担保した AC は以下:
   Requirement 5.2「サーバ非提供構成での縮退」の趣旨（fail-closed / 縮退時の
   Google 単体構成到達を保証）と整合的と解釈している。人間 Reviewer による
   design.md との整合性確認を推奨。
+
+- Task 7 追記:
+  - **`PasskeyAuthErrorKind` の kinds 数**: design.md §Components
+    （use-passkey-authentication.ts）の Contracts では 4 種のみが例示されているが、
+    実装は tasks.md L155（`POST /api/auth/session` の 400/500 →
+    `session_exchange_failed`）と design.md §Error Handling L1042 の「System Errors」
+    列挙に従い、5 種（`cancelled` / `server_error` / `server_rejected` /
+    `network_error` / `session_exchange_failed`）として実装した。design.md 内で
+    §Components と §Error Handling の間に軽微な非整合があるため、人間 Reviewer に
+    よる整合性確認を推奨する（実装は tasks.md 側の要件を満たす形）。
+  - **api.ts の 204 No Content 非対応**: `web/src/lib/api.ts` の `request<T>` は
+    `response.json()` を無条件で呼ぶため、design.md L859 で規定された
+    `/api/auth/session` の 204 No Content 応答に対して runtime で `SyntaxError` を
+    throw する可能性がある。Task 7 の Boundary は `hooks/use-passkey-authentication`
+    に限定されており api.ts 側を修正できないため、実装は tasks.md L147 の指定どおり
+    `apiClient.post` を使用し、テストは apiClient を mock して runtime 挙動を回避
+    している。**production 統合前に api.ts の 204 handling を別 spec / PR で追加する
+    必要がある**（例: `request<T>` が `response.status === 204` のときに
+    `undefined as unknown as T` を返す分岐を追加）。task 8（新規作成 mutation）でも
+    同じ endpoint を呼ぶため、同時に修正することを推奨。
+  - **`navigator.credentials.get` null 返却時の cancel 扱い**: WebAuthn 仕様上、
+    キャンセル時に throw ではなく `null` を resolve するブラウザ実装の余地がある
+    ため、`if (!cred) throw new PasskeyAuthError("cancelled")` で明示的に cancel
+    カテゴリに集約している。design.md §Error Handling には明記が無いが、
+    Req 4.5「画面を壊さずに戻す」の網羅性向上として実装判断で追加した。
 
 STATUS: complete
