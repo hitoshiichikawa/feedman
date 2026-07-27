@@ -614,4 +614,89 @@ describe("usePasskeyRegistration", () => {
     expect(result.current.error?.kind).toBe("server_rejected");
     expect(result.current.error?.registered).toBe(false);
   });
+
+  it("review #3: registration/finish が network_error（応答喪失）で失敗したとき、完了不明として registered=true に倒れログイン復旧へ誘導すること", async () => {
+    // Arrange: create は成功、finish の応答が fetch reject（TypeError）で失われる。
+    // サーバが commit 済みかは不明なため、再作成（username_taken 誘発）に戻さず
+    // ログイン復旧導線へ誘導する（registered=true）。
+    const attestationCred = makeCredential("attestation-id");
+    const credentialsCreate = vi.fn().mockResolvedValue(attestationCred);
+    const credentialsGet = vi.fn();
+    vi.stubGlobal("navigator", {
+      credentials: { create: credentialsCreate, get: credentialsGet },
+    });
+
+    vi.mocked(apiClient.post).mockImplementation(
+      (async (url: string) => {
+        if (url === "/api/passkey/registration/begin") {
+          return { challenge_id: "reg-chal-1", options: { publicKey: {} } };
+        }
+        if (url === "/api/passkey/registration/finish") {
+          // fetch reject（ネットワーク断 / 応答喪失）を再現する
+          throw new TypeError("Failed to fetch");
+        }
+        throw new Error(`unexpected URL: ${url}`);
+      }) as typeof apiClient.post,
+    );
+
+    const { Wrapper } = createWrapper();
+    const { result } = renderHook(() => usePasskeyRegistration(), {
+      wrapper: Wrapper,
+    });
+
+    // Act
+    await act(async () => {
+      result.current.mutate({ username: "alice" });
+    });
+
+    // Assert
+    await waitFor(() => {
+      expect(result.current.isError).toBe(true);
+    });
+    expect(result.current.error?.kind).toBe("network_error");
+    // review #3: 完了不明は作成済み側へ倒す（ログイン復旧導線へ誘導）
+    expect(result.current.error?.registered).toBe(true);
+    // 認証 chain には進まない（finish で中断）
+    expect(credentialsGet).not.toHaveBeenCalled();
+  });
+
+  it("review #3: registration/finish が 500（応答喪失の可能性）で失敗したとき、完了不明として registered=true に倒れること", async () => {
+    // Arrange: create は成功、finish が 500 を返す。サーバが commit 後に 5xx を返し得るため
+    // 完了不明として registered=true に倒す（review #3）。
+    const attestationCred = makeCredential("attestation-id");
+    const credentialsCreate = vi.fn().mockResolvedValue(attestationCred);
+    vi.stubGlobal("navigator", {
+      credentials: { create: credentialsCreate, get: vi.fn() },
+    });
+
+    vi.mocked(apiClient.post).mockImplementation(
+      (async (url: string) => {
+        if (url === "/api/passkey/registration/begin") {
+          return { challenge_id: "reg-chal-1", options: { publicKey: {} } };
+        }
+        if (url === "/api/passkey/registration/finish") {
+          throw new ApiError(500, { code: "INTERNAL_ERROR" });
+        }
+        throw new Error(`unexpected URL: ${url}`);
+      }) as typeof apiClient.post,
+    );
+
+    const { Wrapper } = createWrapper();
+    const { result } = renderHook(() => usePasskeyRegistration(), {
+      wrapper: Wrapper,
+    });
+
+    // Act
+    await act(async () => {
+      result.current.mutate({ username: "alice" });
+    });
+
+    // Assert
+    await waitFor(() => {
+      expect(result.current.isError).toBe(true);
+    });
+    expect(result.current.error?.kind).toBe("server_error");
+    // review #3: finish の 5xx は完了不明 → 作成済み側へ倒す
+    expect(result.current.error?.registered).toBe(true);
+  });
 });

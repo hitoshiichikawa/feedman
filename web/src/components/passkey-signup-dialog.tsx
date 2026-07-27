@@ -110,15 +110,22 @@ export function PasskeySignupDialog({
     }
   }, [isSuccess, onOpenChange]);
 
-  // review #6 / Requirement 3.4: アカウント作成後の失敗（session 合流失敗・作成後の
-  // WebAuthn キャンセル等）は、Dialog を閉じて親のログイン画面へ復旧を委譲する。同じ
-  // ユーザー名での再作成に戻すと `username_taken` になるため、reset せず親へ通知する。
+  // review #3 / #6 / Requirement 3.4: アカウント作成後の失敗（session 合流失敗・作成後の
+  // WebAuthn キャンセル等）は、Dialog を閉じて親のログイン画面へ復旧を委譲する。親へ通知して
+  // Dialog を閉じた **後に** mutation state を reset する。
+  //
+  // review #3: reset しないと isError/registered が残留し、次に「アカウント新規作成」を
+  // 押して Dialog を再度開いた瞬間、本 effect が再発火して即座に閉じてしまう（再操作破綻）。
+  // reset 後は isError=false となり本 effect のガード（isError && registered）を満たさなくなる
+  // ため、再発火・二重通知は起きない。reset は「作成後失敗の後始末」であり、作成前失敗の
+  // 再入力フォームへ戻すもの（旧 review #6 で回避していた挙動）とは意味が異なる。
   useEffect(() => {
     if (isError && registered) {
       onAccountCreatedNeedsLogin?.();
       onOpenChange(false);
+      reset();
     }
-  }, [isError, registered, onAccountCreatedNeedsLogin, onOpenChange]);
+  }, [isError, registered, onAccountCreatedNeedsLogin, onOpenChange, reset]);
 
   // Requirement 2.7: 作成前の cancelled は「画面を壊さず戻す」— エラー表示を出さず
   // mutation state を初期化する。作成後（registered）の cancelled は上の効果で扱う。

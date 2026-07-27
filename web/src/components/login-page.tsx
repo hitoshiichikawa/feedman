@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { PasskeyButtons } from "@/components/passkey-buttons";
 import { PasskeySignupDialog } from "@/components/passkey-signup-dialog";
@@ -28,10 +28,18 @@ export function LoginPage() {
     useState(false);
 
   // 新規作成をやり直すために Dialog を開くときは、古い復旧バナーを消してから開く。
-  const openSignup = () => {
+  // review #3: Dialog の effect 依存に渡る callback を安定化させ、親の再 render で
+  // effect が不必要に再発火するのを防ぐ（`onAccountCreatedNeedsLogin` も同様）。
+  const openSignup = useCallback(() => {
     setAccountCreatedNeedsLogin(false);
     setSignupOpen(true);
-  };
+  }, []);
+
+  // review #3: inline arrow を毎 render 生成すると、Dialog の effect 依存が render ごとに
+  // 変わり effect が再発火し得る。useCallback で参照を安定化する。
+  const handleAccountCreatedNeedsLogin = useCallback(() => {
+    setAccountCreatedNeedsLogin(true);
+  }, []);
 
   return (
     <div className="flex min-h-screen items-center justify-center">
@@ -51,14 +59,16 @@ export function LoginPage() {
             初回ログイン時にアカウントが自動作成されます
           </p>
 
-          {/* アカウント作成後・ログイン未完了時の復旧バナー（review #6 / Requirement 3.4） */}
+          {/* アカウント作成後・ログイン未完了時の復旧バナー（review #3 / #6 / Requirement 3.4）。
+              Req 3.4 の「汎用的な失敗表示」として、作成は完了した一方でログイン処理に失敗した
+              旨を汎用文言で提示し、復旧導線（パスキーでログイン）へ誘導する。 */}
           {accountCreatedNeedsLogin && (
             <div
               className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm"
               role="alert"
             >
               <p className="font-medium text-destructive">
-                アカウントを作成しました。下の「パスキーでログイン」からログインしてください。
+                アカウントは作成されましたが、ログイン処理に問題が発生しました。下の「パスキーでログイン」からログインしてください。
               </p>
             </div>
           )}
@@ -71,7 +81,7 @@ export function LoginPage() {
         <PasskeySignupDialog
           open={signupOpen}
           onOpenChange={setSignupOpen}
-          onAccountCreatedNeedsLogin={() => setAccountCreatedNeedsLogin(true)}
+          onAccountCreatedNeedsLogin={handleAccountCreatedNeedsLogin}
         />
       </div>
     </div>

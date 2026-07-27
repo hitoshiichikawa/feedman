@@ -205,13 +205,14 @@ describe("PasskeySignupDialog", () => {
       expect(onAccountCreatedNeedsLogin).toHaveBeenCalledTimes(1);
     });
     expect(onOpenChange).toHaveBeenCalledWith(false);
-    // 再作成に戻す reset は呼ばない（username_taken 誘発を防ぐ / review #6）
-    expect(reset).not.toHaveBeenCalled();
+    // review #3: Dialog を閉じた後に mutation state を reset し、残留 error による
+    // 「再度開いた瞬間に閉じる」再操作破綻を防ぐ（旧 review #6 の「reset しない」から変更）。
+    expect(reset).toHaveBeenCalled();
     // Dialog 内のインライン汎用エラーは表示しない（案内はログイン画面のバナーへ移す）
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("アカウント作成後の cancelled（registered=true）は reset せず、Dialog を閉じてログイン画面へ復帰させること（review #6）", async () => {
+  it("アカウント作成後の cancelled（registered=true）は Dialog を閉じ reset してログイン画面へ復帰させること（review #3 / #6）", async () => {
     // Arrange
     const onOpenChange = vi.fn();
     const onAccountCreatedNeedsLogin = vi.fn();
@@ -233,11 +234,12 @@ describe("PasskeySignupDialog", () => {
       />,
     );
 
-    // Assert: 作成後キャンセルは再作成フォームへ戻さない（reset 不発）
+    // Assert: 作成後キャンセルは Dialog を閉じてログイン画面へ復帰させる
     await waitFor(() => {
       expect(onAccountCreatedNeedsLogin).toHaveBeenCalledTimes(1);
     });
     expect(onOpenChange).toHaveBeenCalledWith(false);
-    expect(reset).not.toHaveBeenCalled();
+    // review #3: 閉じた後に reset して残留 state を消す（再操作破綻の防止）
+    expect(reset).toHaveBeenCalled();
   });
 });

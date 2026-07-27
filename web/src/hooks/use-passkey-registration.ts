@@ -121,6 +121,33 @@ function extractApiErrorCode(err: ApiError): string | null {
 }
 
 /**
+ * 「サーバがアカウント作成（registration/finish）を commit した可能性があるか」を判定する。
+ * UI はこの値で作成前失敗（再入力・再試行）と作成後失敗（ログイン復旧導線）を分ける。
+ *
+ * - step が STEP_REG_FINISH（4）より後 = 認証・session 合流フェーズ → 常に作成済み（review #6）
+ * - step が STEP_REG_FINISH ちょうど（registration/finish の応答待ち中）で、応答が失われた
+ *   可能性のある失敗 = fetch reject（`TypeError`）または 5xx（サーバが commit 後にエラー
+ *   応答を返し得る）→ **「完了不明」を作成済み側へ倒す**（review #3）。
+ *   理由: サーバが実際に commit 済みなら、再作成へ戻すと `username_taken` で詰むため、
+ *   安全側としてログイン復旧導線へ誘導する。一方 finish の 400/409（サーバが明示的に拒否
+ *   = 未 commit）は作成前失敗として扱い、再作成・再試行を許容する。
+ */
+function isPossiblyRegistered(err: unknown, step: number): boolean {
+  if (step > STEP_REG_FINISH) {
+    return true;
+  }
+  if (step === STEP_REG_FINISH) {
+    if (err instanceof TypeError) {
+      return true;
+    }
+    if (err instanceof ApiError && err.status >= 500) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * 内部例外を `PasskeyRegistrationError` に分類する。step index に基づき、
  *
  * - step 2（registration/begin）の 400 with `code: "INVALID_USERNAME"` → `invalid_username`
@@ -134,10 +161,10 @@ function extractApiErrorCode(err: ApiError): string | null {
  * に振り分ける（tasks.md L182-193 / Req 2.5, 2.6, 2.7, 2.8, 3.4）。
  */
 function classifyError(err: unknown, step: number): PasskeyRegistrationError {
-  // registration/finish（step 4）完了後に発生した失敗は「アカウント作成済み」を意味する
-  // （step が STEP_AUTH_BEGIN=5 以降 = 認証・session 合流フェーズ）。この区別で UI は
-  // 作成前失敗（再入力・再試行）と作成後失敗（ログインへ誘導する復旧導線）を分ける（review #6）。
-  const registered = step > STEP_REG_FINISH;
+  // registration/finish（step 4）完了後に発生した失敗、および finish の応答喪失（完了不明）は
+  // 「アカウント作成済みの可能性」を意味する。この区別で UI は作成前失敗（再入力・再試行）と
+  // 作成後失敗（ログインへ誘導する復旧導線）を分ける（review #3 / #6）。
+  const registered = isPossiblyRegistered(err, step);
   if (err instanceof PasskeyRegistrationError) {
     // 手動 throw（create/get の null 解決 = cancelled）にも step 由来の registered を付与し直す。
     // create の null は step 3（作成前）、get の null は step 6（作成後）で意味が異なる。
