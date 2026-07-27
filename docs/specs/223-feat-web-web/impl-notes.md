@@ -207,6 +207,62 @@ task 単位で記録する。前方伝播（先行 task の learning を後続 t
     みに保持されて storage / console に漏れないこと（NFR 1.1）を hook 側テストで
     別途担保する必要がある（本 file はあくまで純粋変換のみで、保持責務は持たない）。
 
+### Task 6
+
+- **採用方針**: 3 モジュールを同一 task で追加し、責務を明確に分離する。
+  `web/src/types/passkey.ts` は 8 型を snake_case で定義（サーバ DTO と対称）、
+  `web/src/lib/passkey-capability.ts` は `isPasskeyBrowserSupported()` を純粋
+  関数として export（副作用なし・throw なし・boolean のみ）、
+  `web/src/hooks/use-passkey-capability.ts` は TanStack Query の `useQuery` で
+  server capability と browser support を合成した `PasskeyCapability` を返す。
+- **重要な判断**:
+  - **queryFn は 404 / reject を catch して server=false に集約**: capability
+    endpoint は fail-closed で「未登録 = 404 = サーバがパスキー機能を未提供」を
+    意味する（task 3 で確定）。この 404 を React Query の `isError` に落とすと
+    「エラー状態」表現が Google 単体構成の正常な縮退経路（Requirement 5.2 / 5.3）
+    と一致しないため、queryFn 内で `ApiError`（4xx/5xx）と `TypeError`（fetch 失敗
+    相当）の両方を catch し `server=false` を返して query 自体を success として
+    扱う設計にした。予期しない例外も安全側に false へ集約（NFR 2.1 縮退時挙動の
+    維持を優先）。結果として消費側の `isError` 分岐は不要になり、`isLoading` /
+    `available` の 2 フィールドだけで導線表示ロジックが書ける。
+  - **queryKey は `["passkey", "capability"]` の 2 要素配列**: 既存 `use-auth.ts`
+    の `["auth", "me"]` と同じ domain-scoped 命名慣習を踏襲。将来 passkey 系の
+    他 query（credential list 等）を追加する際も namespace が衝突しない。
+  - **`retry: false` / `staleTime: Infinity` / `gcTime: Infinity`**: capability は
+    env 由来の不変値（tab セッションを跨いで安定）。retry しても 404 → 404 で
+    無意味、staleTime/gcTime を無限にして同一 tab 内では再問い合わせを起こさない
+    設計（design.md §use-passkey-capability.ts と一致）。
+  - **`browserSupported = isPasskeyBrowserSupported()` は render ごとに呼ぶ**: 実
+    ブラウザ環境では戻り値が unchanging だが、テスト（module mock で戻り値を
+    切り替え）や SSR / hydration 境界で環境が変化するケースを含めて素直に render
+    時に評価する。純粋関数のため副作用なし・パフォーマンス懸念なし。
+  - **テスト方針は「実物 integration」+「戦略的 mock」の使い分け**:
+    - `passkey-capability.test.ts` は `vi.stubGlobal("PublicKeyCredential", ...)` /
+      `vi.stubGlobal("window", undefined)` でブラウザ環境を制御し実物関数を呼ぶ
+      （4 ケース: function 存在 / undefined / object / SSR）。`afterEach` で
+      `vi.unstubAllGlobals()` により副作用を漏らさない。
+    - `use-passkey-capability.test.tsx` は 2 軸（サーバ応答 × ブラウザ対応）を
+      独立制御したいため `@/lib/passkey-capability`（`isPasskeyBrowserSupported`）
+      と `@/lib/api`（`apiClient.get`）の両モジュールを `vi.mock` で差し替える。
+      `ApiError` は実物を `vi.importActual` で再 export し、404 相当の catch 経路
+      をリアルな型で通す。既存 `use-feeds.test.tsx` / `use-auth.test.tsx` の
+      `createWrapper()` idiom（`QueryClient` with `retry: false`）を踏襲。
+  - **NFR 1.4 遵守**: `apiClient.get("/api/passkey/capability")` は相対パスで
+    同一オリジンに閉じる（`API_BASE_URL=""` の `web/src/lib/api.ts` を経由）。
+    絶対 URL は書かない。
+  - **NFR 1.1 系（機密情報の非漏出）**: capability 応答は `{available: boolean}`
+    のみで機密情報を含まない。本モジュール群は `console.*` を一切呼ばず、
+    localStorage / sessionStorage / URL への書き込みも無い。
+- **残存課題**:
+  - task 10（`PasskeyButtons` / `LoginPage` 統合）で `usePasskeyCapability()` の
+    `isLoading` 中 / `available === false` の表示戦略（`null` 返却で非表示）を
+    実装する。タイミング的には「初回 mount で isLoading=true → 200/404 解決後に
+    available が確定」の 1 tick 遷移で、`PasskeyButtons` は `isLoading` 中も
+    `null` を返してちらつきを防ぐ想定（tasks.md L263 の指定）。
+  - task 7 / 8（`use-passkey-authentication` / `use-passkey-registration`）は
+    本 hook を直接呼び出さないが、`PasskeyButtons` 経由で gating される前提
+    （design.md §Preconditions: `usePasskeyCapability().available === true`）。
+
 ## AC トレース
 
 Task 1 で担保した AC は以下:
@@ -254,6 +310,35 @@ Task 2 で担保した AC は以下:
   `_SameShapeAsExistingRoutes` で `unauthIPMW` の閾値超過時の 429 応答が既存
   `/health` 429 応答と body / header レベルで同一形式であることを assert。
 
+Task 6 で担保した AC は以下:
+
+- **5.1（ブラウザ非対応時の導線縮退）**: `isPasskeyBrowserSupported()` の 4 ケース
+  （`window.PublicKeyCredential` = function / undefined / object / SSR 環境相当）を
+  `web/src/lib/passkey-capability.test.ts` で担保。関数の boolean 出力が
+  `use-passkey-capability` の `available` に AND として反映される（消費側の
+  `PasskeyButtons` は task 10 で `available === false` を `null` 返却に落とし込む
+  想定）。
+- **5.2（サーバ非提供時の導線縮退）**: `usePasskeyCapability` が
+  `GET /api/passkey/capability` の 404 (`ApiError`) を catch して server=false を
+  返し、`available: false` に集約することを `use-passkey-capability.test.tsx` の
+  「サーバ 404 + browser あり → available: false」ケースで担保。fetch reject
+  （`TypeError`）も同経路で false に落ちることを別ケースで assert し、Web は
+  サーバ非提供構成を Google 単体構成に静かに縮退する。
+- **5.3（縮退時も Google 導線は不変）**: 本 hook は `PasskeyButtons` の gating に
+  のみ関与し、Google 導線を制御しない。実装は `available === false` を導線非表示
+  の trigger にする形で、Google 導線側は無関係（task 10 で `LoginPage` 統合時に
+  最終確認）。本 task 内では hook が `available` boolean を過不足なく返すことで
+  5.3 の前提を作る。
+- **5.4（導線無効環境で試行しても Google 案内に留まる）**: 5.1 / 5.2 の 4 ケース
+  全てで `available === false` が確定するため、消費側は「導線をレンダしない」
+  経路を選択できる。パスキー処理の起動は `PasskeyButtons` の onClick 経由に
+  限定される設計で、`available === false` 時は button 自体が render されないため
+  試行不能（task 10 で最終確認）。
+- **NFR 1.4（同一オリジン限定）**: `apiClient.get("/api/passkey/capability")` は
+  `API_BASE_URL=""` の相対パス経由で同一オリジンに閉じる（`web/src/lib/api.ts` の
+  既存契約に依存）。テストの mock 検証で `expect(apiClient.get).toHaveBeenCalledWith("/api/passkey/capability")`
+  として絶対 URL を用いていないことを回帰的に assert（正常系ケース）。
+
 ## 確認事項
 
 - Task 1 時点: 現時点でなし。design.md § SessionExchangeService の Contracts と実装は一致。
@@ -285,3 +370,12 @@ Task 2 で担保した AC は以下:
   加えて base64url 変換ヘルパは `lib/pkce.ts` の private `bytesToBase64url` と重複
   実装になっているため（Boundary `lib/webauthn` 制約下での判断）、共有化 PR
   （`web/src/lib/base64url.ts` 新設）の別 spec 起票を推奨する。
+- Task 6 時点: design.md § types/passkey.ts / lib/passkey-capability.ts /
+  use-passkey-capability.ts の 3 セクションと実装は厳密一致（新規追加関数・追加
+  export・型追加は無し）。`queryFn` 内で予期しない例外（`ApiError` / `TypeError`
+  以外）も安全側に false へ集約している点は design.md 本文の明記対象外だが、
+  Requirement 5.2「サーバ非提供構成での縮退」の趣旨（fail-closed / 縮退時の
+  Google 単体構成到達を保証）と整合的と解釈している。人間 Reviewer による
+  design.md との整合性確認を推奨。
+
+STATUS: complete
