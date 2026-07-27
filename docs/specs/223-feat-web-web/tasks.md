@@ -86,7 +86,7 @@ per-task ループ運用時のテスト境界: 各タスクは実装 + テスト
   - _Requirements: 2.2, 4.2, NFR 1.1_
   - _Boundary: lib/pkce_
 
-- [ ] 5. Web: `web/src/lib/webauthn.ts` を追加し、base64url ↔ ArrayBuffer 変換と WebAuthn options / response の JSON 相互変換を実装する
+- [x] 5. Web: `web/src/lib/webauthn.ts` を追加し、base64url ↔ ArrayBuffer 変換と WebAuthn options / response の JSON 相互変換を実装する
   - `base64urlToArrayBuffer(s: string): ArrayBuffer` と `arrayBufferToBase64url(buf: ArrayBuffer | Uint8Array): string`
     をブラウザ標準 `atob` / `btoa` で実装（`+/=` の base64 → base64url 変換 / padding 除去）
   - `decodeCreationOptions(raw: unknown): CredentialCreationOptions` を実装。
