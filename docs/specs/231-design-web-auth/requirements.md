@@ -178,8 +178,9 @@ I want 「登録が確定した／されていない」を単純な二値で誤�
 
 #### Acceptance Criteria
 
-1. When 登録 finish のリクエスト送出後に確定的な pre-commit の 4xx 応答を得られなかった
-   （ネットワーク断・timeout・送出後 Abort・応答なしの 5xx・commit 済みを示唆する 2xx だが
+1. When 登録 finish の `fetch()` 呼出し後に確定的な pre-commit の 4xx 応答を得られなかった
+   （実送達可否を判定できないネットワーク断・timeout・fetch 中 Abort・5xx 応答・
+   commit 済みを示唆する 2xx だが
    応答 body が欠損／途中切断／parse 不能）とき, the Web Passkey Registration Flow shall
    そのケースを「登録成功」「登録失敗」のいずれとも断定せず、「登録が確定したかどうか判別
    できない」旨の第 3 の完了不明状態としてユーザーに提示する
@@ -189,8 +190,8 @@ I want 「登録が確定した／されていない」を単純な二値で誤�
    同列に並置せず、この確認ログインが失敗した後にのみ提示する
 3. If 完了不明状態のユーザーが discoverable なパスキーログインを試行して成功したとき,
    the Web App shall 通常の Cookie セッション認証状態に到達し 2 ペイン UI を提示する
-4. If 完了不明状態のユーザーが discoverable なパスキーログインを試行して一律の認証失敗
-   （AUTHENTICATION_FAILED）で拒否されたとき, the Web Passkey Registration Flow shall
+4. If 完了不明状態のユーザーが discoverable なパスキーログインを試行し、authentication finish が
+   HTTP 400 `AUTHENTICATION_FAILED` で拒否されたとき, the Web Passkey Registration Flow shall
    内部理由（credential 未解決等）を区別して提示せず、その一律失敗の後にはじめてユーザーに
    再度新規作成を試みる導線を提示する
 5. The Web Passkey Registration Flow shall 完了不明状態の表示テキストにサーバの内部詳細
@@ -297,12 +298,14 @@ I want `.env.sample` と `docker-compose.yml` の変更を PR #229 に正式な�
   `WEBAUTHN_RP_ID`+`WEBAUTHN_ORIGINS` / `NATIVE_AUTH_JWT_SECRET` / `CORS_ALLOWED_ORIGIN`）
 - **完了不明状態の UI 実現方式（旧 Open Question / design で確定）**: Requirement 5.1 / 5.2 の
   「第 3 状態」は **既存 `passkey-signup-dialog.tsx` 内の状態分岐**（専用完了画面を新設しない）で
-  提示する。提示順序は「discoverable ログインで確認 → 一律 `AUTHENTICATION_FAILED` の後にのみ
-  再作成導線」に固定する（design.md §Delta 5 §状態遷移図で確定）。未決事項として残さない
+  提示する。提示順序は「discoverable ログインで確認 → authentication finish の HTTP 400
+  `AUTHENTICATION_FAILED` の後にのみ再作成導線」に固定する
+  （design.md §Delta 5 §状態遷移図で確定）。未決事項として残さない
 - **完了不明状態と Requirement 3.4 の関係（旧 Open Question / design で確定）**: 直接 session 化に
   より registration 経路の「session 交換段の失敗」は消滅するため、#223 Requirement 3.4（合流
   失敗時のログイン画面復帰）と本 spec Requirement 5 は **finish 応答が確定したか否か**で分岐する
-  （2xx=成功 / 確定 4xx=拒否 / それ以外=uncertain）。両者の状態遷移は design.md §Delta 5 §状態
+  （parse 可能な期待形の 2xx=成功 / 確定 4xx=拒否 / それ以外=uncertain）。両者の状態遷移は
+  design.md §Delta 5 §状態
   遷移図に統合済みで、表示重複は生じない。未決事項として残さない
 
 ## 関連

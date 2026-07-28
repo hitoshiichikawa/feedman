@@ -70,15 +70,15 @@ tasks.md は書き換えない**）へ差分を反映する。
   （上記 + PKCE 単回 60s TTL）を **分離** して明記し、PKCE が直接登録を防御しないことを述べる。
   既存 `/api/auth/session`（login）の Origin 検証も **Origin 不在・不一致・許可 Origin 未設定を
   拒否** する fail-closed へ補正する。
-- **Delta 5（Requirement 5）— 完了不明状態**: 「finish dispatch 後に確定的な pre-commit 4xx を
-  得られない」ケース（network reject / timeout / 送出後 Abort / 5xx / commit 済みを示唆する 2xx だが
+- **Delta 5（Requirement 5）— 完了不明状態**: 「finish の `fetch()` 呼出し後に確定的な pre-commit 4xx を
+  得られない」ケース（送達可否不明の network reject / timeout / fetch 中 Abort / 5xx / commit 済みを示唆する 2xx だが
   body 欠損・途中切断・parse 不能）を **第 3 の完了不明状態** `registration_uncertain` として定義する。
   この判別を成立させるため **API 層（`api.ts`）で dispatch 前の request preparation 失敗を
   `RequestPreparationError`、fetch 成功後の 2xx body parse 失敗を `ResponseParseError`（status 付き）に
   正規化**し、`fetch()` reject の plain `TypeError` を含む 3 起点を機械的に区別できるようにする（Blocker #1）。
-  さらに **discoverable ログインの一律 `AUTHENTICATION_FAILED` を auth hook の machine-readable kind に正規化**
+  さらに **discoverable ログインの finish 400 `AUTHENTICATION_FAILED` を auth hook の machine-readable kind に正規化**
   し（Blocker #3）、復旧は「**discoverable なパスキーログイン**（ユーザー名入力なし）で確認 → 成功なら完了 →
-  一律の `AUTHENTICATION_FAILED` の後にのみ再作成導線」に統一する。
+  finish の 400 `AUTHENTICATION_FAILED` の後にのみ再作成導線」に統一する。
 - **Delta 6（Requirement 6）— 運用 config 統合**: `.env.sample` / `docker-compose.yml` の記述差分を
   PR #229 のスコープに統合する（別 prerequisite PR に分離しない）。`CORS_ALLOWED_ORIGIN` の
   **既定を空へ変更**し、config が「明示設定された exact Origin のみを Web パスキーで信頼する」
@@ -223,8 +223,8 @@ Vitest）をそのまま使用する。session ID 生成は既存 `internal/auth
 | [N] | `internal/auth/session_factory.go` | 共有 session factory（ID + 単一 now + CreatedAt + ExpiresAt）。`SessionExchangeService` と RegistrationService が共有 |
 | [N] | `internal/auth/session_factory_test.go` | factory の ID / CreatedAt / ExpiresAt / 単一 now / generator 失敗を検証 |
 | [U] | `internal/auth/service.go` | `generateSessionID`（**unexported**）を本ファイルに定義済みのまま再利用。`session_factory.go` が同一 package（`internal/auth`）からそのまま参照するため #231 変更なし。旧 File Plan の「session_exchange.go から export」は誤りで、**薄い public `NewSessionID` は追加しない**（Blocker #2） |
-| [E] | `internal/auth/session_exchange.go` | session 構築を新 factory 呼び出しに差し替え（`SessionExchangeService` の外部契約・挙動は不変 / 差分等価） |
-| [E] | `internal/auth/session_exchange_test.go` | factory 差し替え後も既存アサーションが pass することを確認（CreatedAt / ExpiresAt 検証を追加） |
+| [E] | `internal/auth/session_exchange.go` | `now` / `sessionTTL` fields と TTL constructor 引数を `SessionFactoryFunc` 注入へ置換し、session 構築を factory 呼び出しに差し替え（auth_code 交換の外部挙動は不変） |
+| [E] | `internal/auth/session_exchange_test.go` | fake factory の userID 呼出し・生成 session 保存・factory failure 時の非保存を検証し、既存交換アサーションも維持 |
 | [E] | `internal/passkey/registration_service.go` | `FinishRegistrationNew` を既存 tx クロージャ内 session INSERT + `issueWebSession bool` + `*model.Session` 返却に拡張。session factory / session writer を注入、`WebSessionReady()` 追加 |
 | [E] | `internal/passkey/registration_service_test.go` | 新シグネチャ追従 + Web/iOS branch + 全 rollback + session の ID/CreatedAt/ExpiresAt 検証 |
 | [E] | `internal/handler/passkey_handler.go` | `allowedOrigin` + Cookie 設定 Option 注入、`RegistrationFinish` の mode 判定 / JSON Content-Type / readiness fail-closed / commit 後 `Set-Cookie`、`webRegistrationReady()` |
@@ -239,8 +239,8 @@ Vitest）をそのまま使用する。session ID 生成は既存 `internal/auth
 | [U] | `internal/handler/router_unauth_ratelimit_test.go` | PR #229 で追加済み。#231 変更なし（記録） |
 | [E] | `internal/handler/passkey_e2e_db_test.go` | 実 PostgreSQL で 3 行 commit / session 失敗時の全 rollback + Set-Cookie なし |
 | [E] | `internal/config/config.go` | `WebPasskeyAllowedOrigin`（`CORS_ALLOWED_ORIGIN` を **trim + strict exact-Origin validation** した値。未設定/空/malformed → `""` の fail-closed）を追加。`CORSAllowedOrigin` 既定は不変（新規 env は追加しない / Blocker #6） |
-| [E] | `internal/config/config_test.go` | `CORS_ALLOWED_ORIGIN` の set / unset / empty / **malformed（前後空白・末尾スラッシュ・path/query/fragment 付き・複数 origin）** での `WebPasskeyAllowedOrigin`（valid のみ採用 / それ以外 `""`）を検証。`CORSAllowedOrigin` は既定 localhost:3000 を維持（Blocker #6） |
-| [E] | `internal/app/app.go` | RegistrationService へ session writer / session factory / TTL を注入、PasskeyHandler へ `WebPasskeyAllowedOrigin` + Cookie 設定を注入（`NATIVE_AUTH_JWT_SECRET` 非依存で `WEBAUTHN_*` 設定時に配線） |
+| [E] | `internal/config/config_test.go` | `CORS_ALLOWED_ORIGIN` の set / 前後空白付き set（trim 後に valid）/ unset / empty / **malformed（内部空白・末尾スラッシュ・path/query/fragment/userinfo 付き・複数 origin）** での `WebPasskeyAllowedOrigin`（valid のみ正規化して採用 / それ以外 `""`）を検証。`CORSAllowedOrigin` は既定 localhost:3000 を維持（Blocker #6） |
+| [E] | `internal/app/app.go` | `SessionFactory` を 1 インスタンス生成し、`SessionExchangeService` と RegistrationService の双方へ共有注入。RegistrationService へ session writer、PasskeyHandler へ `WebPasskeyAllowedOrigin` + Cookie 設定も注入（registration 側は `NATIVE_AUTH_JWT_SECRET` 非依存で `WEBAUTHN_*` 設定時に配線） |
 
 ### Web（TypeScript）
 
@@ -248,19 +248,19 @@ Vitest）をそのまま使用する。session ID 生成は既存 `internal/auth
 |---|---|---|
 | [E] | `web/src/lib/api.ts` | 2xx の `response.json()` 失敗を status 付き `ResponseParseError` へ、dispatch 前の request preparation 失敗（`JSON.stringify` / URL 構築）を `RequestPreparationError` へ **それぞれ正規化**し、`fetch()` reject の plain `TypeError` と機械的に区別可能にする（Blocker #1） |
 | [E] | `web/src/lib/api.test.ts` | 2xx body 欠損/途中切断/parse 不能 → `ResponseParseError`（status 2xx）、request preparation 失敗 → `RequestPreparationError`、fetch reject → plain `TypeError` の 3 者が区別されることを検証（Blocker #1） |
-| [E] | `web/src/types/passkey.ts` | `PasskeyRegistrationErrorKind` に `"registration_uncertain"` を追加。authentication error 種別に「finish の一律 `AUTHENTICATION_FAILED` のみを表す machine-readable kind」を追加（Blocker #3。raw body / 内部理由は保持しない）。`RegistrationFinishResponse` は `{user_id}` のまま（auth_code を追加しない） |
-| [E] | `web/src/hooks/use-passkey-registration.ts` | chain を「begin → create → finish → invalidateQueries」に短縮（二度目 ceremony / 登録用 `/api/auth/session` を除去）。finish の error を uncertain / rejected（全 4xx）/ server_error（`RequestPreparationError`）に分類（Blocker #1） |
+| [U] | `web/src/types/passkey.ts` | PR #229 追加済みの API DTO 定義を維持。`RegistrationFinishResponse` は `{user_id}` のまま（auth_code を追加しない）。domain error kind は実在する各 hook 内で定義されているため本ファイルへ移動・重複定義しない |
+| [E] | `web/src/hooks/use-passkey-registration.ts` | 本ファイルで定義済みの `PasskeyRegistrationErrorKind` に `"registration_uncertain"` を追加。chain を「begin → create → finish → invalidateQueries」に短縮（二度目 ceremony / 登録用 `/api/auth/session` を除去）し、finish の error を uncertain / rejected（全 4xx）/ server_error（`RequestPreparationError`）に分類（Blocker #1） |
 | [E] | `web/src/hooks/use-passkey-registration.test.tsx` | 二度目 ceremony 不在回帰 + uncertain 4 サブケース + 全 4xx=rejected 回帰 + `RequestPreparationError`=server_error（ファイル拡張子は `.test.tsx` / PR #229 実体に一致） |
-| [E] | `web/src/hooks/use-passkey-authentication.ts` | discoverable ログイン復旧で再利用。**finish の一律 `AUTHENTICATION_FAILED` を表す machine-readable kind** を追加し、begin 拒否 / cancel / network / 5xx / session 交換失敗を別 kind に保つ（Blocker #3。内部理由・raw body は UI に渡さない） |
-| [E] | `web/src/hooks/use-passkey-authentication.test.tsx` | 一律 `AUTHENTICATION_FAILED` kind の付与と、begin 拒否 / cancel / network / 5xx / session 交換失敗が別 kind になる negative test（Blocker #3） |
-| [E] | `web/src/components/passkey-signup-dialog.tsx` | 完了不明状態 UI + discoverable ログイン復旧導線（段階提示） |
-| [E] | `web/src/components/passkey-signup-dialog.test.tsx` | uncertain 見出し / 段階提示 / 一律 `AUTHENTICATION_FAILED` 後のみ再作成 / 内部詳細非漏出の回帰 |
+| [E] | `web/src/hooks/use-passkey-authentication.ts` | 本ファイルで定義済みの `PasskeyAuthErrorKind` に、**authentication finish の 400 `AUTHENTICATION_FAILED` のみ**を表す machine-readable kind を追加。begin 拒否 / cancel / network / 5xx / session 交換失敗を別 kind に保つ（Blocker #3。内部理由・raw body は UI に渡さない） |
+| [E] | `web/src/hooks/use-passkey-authentication.test.tsx` | finish + 400 + `AUTHENTICATION_FAILED` の完全一致でのみ kind を付与し、begin の同一 code / finish の異なる status・code / cancel / network / 5xx / session 交換失敗は別 kind になる negative test（Blocker #3） |
+| [E] | `web/src/components/passkey-signup-dialog.tsx` | 完了不明状態 UI + discoverable ログイン復旧導線（段階提示）。legacy `registered` 自動 close より uncertain を優先 |
+| [E] | `web/src/components/passkey-signup-dialog.test.tsx` | uncertain 見出し / 初期の自動 close・callback・reset 不在 / 段階提示 / finish 400 `AUTHENTICATION_FAILED` 後のみ再作成 / 再作成時の registration・auth 両 mutation reset / 内部詳細非漏出の回帰 |
 | [E] | `web/src/components/login-page-recovery.test.tsx` | uncertain → discoverable ログイン成功 → 2 ペイン到達の recovery 整合 |
 | [U] | `web/src/hooks/use-passkey-authentication.contract.test.tsx` | PR #229 追加済み。#231 変更なし（記録） |
 | [U] | `web/src/components/login-page.tsx` | PR #229 追加済み。#231 変更なし |
 | [U] | `web/src/components/login-page.test.tsx` | PR #229 追加済み。#231 変更なし |
-| [U] | `web/src/components/passkey-buttons.tsx` | PR #229 追加済み。#231 変更なし |
-| [U] | `web/src/components/passkey-buttons.test.tsx` | PR #229 追加済み。#231 変更なし |
+| [E] | `web/src/components/passkey-buttons.tsx` | 新しい `authentication_failed` kind を既存 `server_rejected` と同じ generic 固定文言へ map し、通常の「パスキーでログイン」導線でエラー表示が消える回帰を防ぐ |
+| [E] | `web/src/components/passkey-buttons.test.tsx` | 通常ログインの `authentication_failed` が既存 generic 文言を表示し、`AUTHENTICATION_FAILED` や raw body を DOM に反射しない回帰テスト |
 | [U] | `web/src/hooks/use-passkey-capability.ts` | PR #229 追加済み。#231 変更なし |
 | [U] | `web/src/hooks/use-passkey-capability.test.tsx` | PR #229 追加済み。#231 変更なし |
 | [U] | `web/src/lib/webauthn.ts` | PR #229 追加済み。#231 変更なし |
@@ -296,7 +296,7 @@ Vitest）をそのまま使用する。session ID 生成は既存 `internal/auth
 | 1.2 | 二度目 ceremony を実装として採用しない | Delta 1 §Before → After |
 | 1.3 | 3 行単一 tx → commit → Set-Cookie（iOS は 2 行・Cookie なし） | Delta 1 §3 行トランザクション / §Set-Cookie / §iOS 契約維持 |
 | 1.4 | 2 ペイン UI 初期表示 | Delta 1 §Sequence（invalidateQueries → AuthGuard） |
-| 1.5 | ログイン導線への影響なし | Delta 1 §影響範囲（`use-passkey-authentication` 未変更） |
+| 1.5 | ログイン導線への影響なし | Delta 1 §影響範囲（auth hook の分類追加 + `PasskeyButtons` の generic 表示を含め、既存ログイン flow / 成功契約は不変） |
 | 2.1 | api.ts / api.test.ts を変更対象に明示 | File Structure Plan §Web |
 | 2.2 | .env.sample / docker-compose.yml を変更対象に明示 | File Structure Plan §運用 config |
 | 2.3 | needs-iteration 1 回で完結する粒度のタスク | tasks.md 全体 |
@@ -409,10 +409,11 @@ handler は challenge consume / DB mutation より **前** に、`Origin` ヘッ
 
 #### 共有 session factory（`internal/auth/session_factory.go` / New / Blocker #2 対応）
 
-login session 発行（`Service.createSession` / `SessionExchangeService`）と registration direct session が
-**同一の session 構築ロジック**（ID 生成 + 単一 `now` + `CreatedAt=now` + `ExpiresAt=now+TTL`）を
-共有するための最小 factory を新設する。RegistrationService には具体型ではなく最小 interface を
-注入する（interface segregation / テスト可能性）:
+パスキーログインの `SessionExchangeService` と registration direct session が
+**同一 factory インスタンスの session 構築ロジック**（ID 生成 + 単一 `now` + `CreatedAt=now` +
+`ExpiresAt=now+TTL`）を共有するための最小 factory を新設する。`Service.createSession`（Google OAuth）は
+既存実装を維持し、本 factory へ移行しない。RegistrationService と SessionExchangeService には具体型ではなく
+最小 interface を注入する（interface segregation / テスト可能性）:
 
 ```go
 // internal/auth/session_factory.go（New）
@@ -441,17 +442,25 @@ func (f *SessionFactory) NewSession(userID string) (*model.Session, error) {
     return &model.Session{ID: id, UserID: userID, CreatedAt: now, ExpiresAt: now.Add(f.ttl)}, nil
 }
 
-// RegistrationService が受ける最小 IF（interface segregation）
+// RegistrationService と SessionExchangeService が受ける最小 IF（interface segregation）
 type SessionFactoryFunc interface {
     NewSession(userID string) (*model.Session, error)
 }
 ```
 
-- `SessionExchangeService` は現在の inline 構築（`generateSessionID` + `now` + `CreatedAt` + `ExpiresAt`）を
-  `SessionFactory.NewSession` 呼び出しに差し替える（外部契約・挙動は不変 / 差分等価）
-- `Service.createSession`（Google OAuth login）も同 factory 採用が望ましいが、最小差分として
-  少なくとも `SessionExchangeService` と registration direct session の 2 経路で factory を共有する
-  （review Blocker #2 の要求「at least existing SessionExchangeService and registration direct session」）
+- `SessionExchangeService` は `now` / `sessionTTL` fields を `sessionFactory SessionFactoryFunc` に置き換え、
+  constructor を `NewSessionExchangeService(authCodes, sessions, sessionFactory)` に変更する。現在の inline
+  構築（`generateSessionID` + `now` + `CreatedAt` + `ExpiresAt`）は
+  `sessionFactory.NewSession(stored.UserID)` 呼び出しへ差し替える。auth_code 交換の外部挙動は不変
+- `app.go` は `sessionTTL := time.Duration(cfg.SessionMaxAge) * time.Second` と
+  `sessionFactory := auth.NewSessionFactory(sessionTTL)` を **`NATIVE_AUTH_JWT_SECRET` 条件の外で一度だけ**
+  構築する。NATIVE secret 設定時の `SessionExchangeService` と、WEBAUTHN 設定時の
+  `RegistrationService` の双方へ **同じ pointer** を注入する。これにより registration の direct session
+  発行は NATIVE secret の有無に依存しない
+- `Service.createSession`（Google OAuth login）は既存の独立した生成処理を維持する。共有対象は
+  `SessionExchangeService` と registration direct session の 2 経路であり、Google OAuth まで同一 factory
+  instance を共有するとはしない（review Blocker #2 の要求
+  「at least existing SessionExchangeService and registration direct session」）
 - `generateSessionID` は **`internal/auth/service.go`** に **unexported** で定義されている（旧 File Plan の
   「`session_exchange.go` から export」は誤り）。`session_factory.go` は同一 package（`internal/auth`）のため
   この unexported 関数を既定 `newID` としてそのまま参照でき、**`service.go` の変更も薄い public `NewSessionID` の
@@ -561,14 +570,15 @@ async function mutationFn({ username }: { username: string }) {
 
 - 変更: `RegistrationService.FinishRegistrationNew` / `PasskeyHandler.RegistrationFinish` /
   session repo `CreateExec` / 共有 session factory / 共有 Cookie builder /
-  `use-passkey-registration.ts` / `api.ts` / `passkey-signup-dialog.tsx` / `config.go` / `app.go`
+  `use-passkey-registration.ts` / `use-passkey-authentication.ts` / `api.ts` /
+  `passkey-signup-dialog.tsx` / `passkey-buttons.tsx` / `config.go` / `app.go`
 - **無変更で維持**:
   - #230 の `RegistrationTx` / `RegistrationTxBeginner` / `txBeginner` / user・credential Exec 変種 /
     `internal/repository/tx.go`（session ステップの追加以外は既存フローそのまま）
-  - `AuthenticationService` / `PasskeyButtons`（ログイン導線の**挙動**は影響を受けない / Req 1.5）。
-    `use-passkey-authentication.ts` は discoverable ログイン復旧で再利用しつつ、**復旧判定用に finish 一律
-    `AUTHENTICATION_FAILED` を表す machine-readable kind を追加する**のみで、既存ログイン flow の挙動・契約は不変
-    （Blocker #3 / Delta 5 §auth hook 判定）
+  - `AuthenticationService`（サーバの認証 ceremony は不変）。Web の
+    `use-passkey-authentication.ts` には復旧判定用の machine-readable kind を追加し、
+    `PasskeyButtons` にはその kind の generic 固定文言 mapping を追加するが、既存ログイン flow /
+    成功契約・ユーザー向け拒否文言の意味は不変（Req 1.5 / Blocker #3 / Delta 5 §auth hook 判定）
   - `SessionExchangeService` の外部契約（login の auth_code 交換として不変。session 構築のみ factory 化 /
     Delta 4 で Origin 検証の fail-closed 補正）
   - iOS 用 `registration/*` / `authentication/*`（#216 契約不変 / NFR 3.2）
@@ -778,7 +788,7 @@ fetch ベースの Web app では十分。残余リスクは同一オリジン X
 現行 `api.ts` の `request<T>` は、(a) request 送出前の `JSON.stringify(body)` / URL 構築で **plain `TypeError`** を、
 (b) `fetch()` の reject でも **plain `TypeError`** を、(c) 2xx（204/205 以外）末尾の `response.json()` 失敗で
 **plain `SyntaxError`** を投げ得る。(a) と (b) はどちらも plain `TypeError` のため、呼出側は「dispatch 前の
-request preparation 失敗（commit 不成立が確定）」と「dispatch 後の fetch reject（commit 済みの可能性が残る）」を
+request preparation 失敗（commit 不成立が確定）」と「fetch reject（実送達可否が不明で commit 済みの可能性も残る）」を
 発生位置の推測なしに区別できない。これは round3 item 1 が指摘した contract 不成立である。
 
 そこで `api.ts` で **2 種類の専用型** を導入し、3 つの失敗起点を機械的に分離する（「plain `TypeError` の発生
@@ -800,7 +810,7 @@ export class ResponseParseError extends Error {
 //   let init: RequestInit;
 //   try { init = buildInit(body); /* JSON.stringify / URL 構築を含む */ }
 //   catch (e) { throw new RequestPreparationError(e); }        // (a) dispatch 前 = commit 不成立が確定
-//   const response = await fetch(url, init);                   // (b) reject は plain TypeError（dispatch 後 = 不確定）
+//   const response = await fetch(url, init);                   // (b) reject は plain TypeError（送達可否不明 = 不確定）
 //   ... status handling / 204,205 分岐 ...
 //   try { return await response.json(); }
 //   catch { throw new ResponseParseError(response.status); }   // (c) 2xx だが body 不能 = 不確定
@@ -808,7 +818,8 @@ export class ResponseParseError extends Error {
 
 - これにより呼出側は 3 起点を確実に弁別できる:
   - `RequestPreparationError` = **dispatch 前**の serialize / URL 構築失敗 → **commit 不成立が確定** → `server_error`
-  - plain `TypeError`（`fetch()` の reject）= **dispatch 後**のネットワーク断 → **commit 済みの可能性が残る** → `registration_uncertain`
+  - plain `TypeError`（`fetch()` の reject）= fetch 呼出し後の transport 失敗。request が wire へ出たかは
+    ブラウザから判定不能で、**未送達・送達済みの双方があり得る** → commit 結果不明 → `registration_uncertain`
   - `ResponseParseError`（status 2xx）= **dispatch 後**の 2xx body 不能 → **commit 済み示唆だが確定不能** → `registration_uncertain`
 - `credentials: "include"` / 204/205 分岐など既存挙動は不変（request preparation を try/catch で囲み、末尾 json parse を
   try/catch で囲む差分等価。`fetch()` reject の plain `TypeError` はそのまま透過させる）
@@ -816,12 +827,12 @@ export class ResponseParseError extends Error {
 ### 状態定義（Req 5.1）
 
 `PasskeyRegistrationErrorKind` に **新規 kind** `registration_uncertain` を追加する。本 kind は
-「`registration/finish` の request dispatch **後**に確定的な pre-commit 4xx を得られなかった」場合に
+「`registration/finish` の `fetch()` 呼出し後に、commit 不成立を確定できる 4xx を得られなかった」場合に
 のみ設定される。具体条件:
 
-- fetch reject（`fetch()` が投げる plain `TypeError` = dispatch 後のネットワーク断 / 接続断 / DNS 失敗。
-  dispatch 前の `RequestPreparationError` とは別起点）
-- 送出後の Abort（`DOMException.name === "AbortError"`）/ timeout
+- fetch reject（`fetch()` が投げる plain `TypeError` = ネットワーク断 / 接続断 / DNS 失敗等。
+  request の実送達有無は不明であり、dispatch 前に確定する `RequestPreparationError` とは別起点）
+- finish の fetch 呼出し中の Abort（`DOMException.name === "AbortError"`）/ timeout（実送達可否は不明）
 - 5xx 応答（サーバが受理・commit した可能性があるが応答段で失敗）
 - **commit 済みを示唆する 2xx だが body 不能**（`ResponseParseError`。Set-Cookie は付いた可能性があり、
   成否をクライアント側で確定できない）
@@ -849,7 +860,7 @@ stateDiagram-v2
     Pending --> Cancelled: create DOMException (NotAllowed/Abort)
     Pending --> ServerRejected: finish 任意の 4xx（REGISTRATION_FAILED 等）
     Pending --> Uncertain: finish reject / timeout / AbortError / 5xx / ResponseParseError(2xx)
-    Pending --> Success: finish 2xx (Set-Cookie 受理)
+    Pending --> Success: finish の parse 可能な期待形 2xx (Set-Cookie 受理)
     Uncertain --> ConfirmLogin: user が「ログインで確認する」を選ぶ
     ConfirmLogin --> [*]: discoverable ログイン成功 → 2 ペイン UI
     ConfirmLogin --> UncertainFailed: 一律 AUTHENTICATION_FAILED
@@ -869,51 +880,60 @@ try {
   if (err instanceof RequestPreparationError) throw new PasskeyRegistrationError("server_error", err);
   if (err instanceof ResponseParseError) throw new PasskeyRegistrationError("registration_uncertain", err); // 2xx body 不能
   if (err instanceof DOMException && err.name === "AbortError")
-    throw new PasskeyRegistrationError("registration_uncertain", err);                                       // 送出後 Abort
+    throw new PasskeyRegistrationError("registration_uncertain", err);                                       // fetch 中 Abort（送達可否不明）
   if (err instanceof ApiError) {
     if (err.status >= 500) throw new PasskeyRegistrationError("registration_uncertain", err);                // 5xx
     if (err.status >= 400) throw new PasskeyRegistrationError("server_rejected", err);                       // 全 4xx = 拒否確定
     throw new PasskeyRegistrationError("server_error", err);
   }
-  // 残る plain TypeError は fetch() の reject（dispatch 後）のみ（preparation は上で分岐済み）→ uncertain
-  if (err instanceof TypeError) throw new PasskeyRegistrationError("registration_uncertain", err);           // fetch reject（送出後）
+  // 残る plain TypeError は fetch() の reject のみ（preparation は上で分岐済み）。
+  // wire への送達有無を判定できないため安全側に uncertain
+  if (err instanceof TypeError) throw new PasskeyRegistrationError("registration_uncertain", err);           // fetch reject（送達可否不明）
   throw new PasskeyRegistrationError("server_error", err);                                                   // その他の想定外
 }
 ```
 
-**安全側 fail 原則**: finish 送出後に「拒否が確定（4xx）」でない限り、commit 済みの可能性を排除できないため
+**安全側 fail 原則**: finish の fetch 呼出し後に「拒否が確定（4xx）」でない限り、commit 済みの可能性を排除できないため
 uncertain に倒す。dispatch 前の失敗は commit 不成立が確定するため uncertain にしない。`api.ts` が
 **dispatch 前の request preparation 失敗を `RequestPreparationError`、fetch 成功後の 2xx parse 失敗を
 `ResponseParseError`（status 2xx）** に正規化するため、hook は「plain `TypeError` の発生位置」を推測せずに
-「dispatch 前（`RequestPreparationError` → server_error）/ fetch reject（plain `TypeError` → uncertain）/
+「dispatch 前（`RequestPreparationError` → server_error）/ 送達可否不明の fetch reject
+（plain `TypeError` → uncertain）/
 2xx parse 失敗（`ResponseParseError` → uncertain）」を機械的に振り分けられる（Blocker #1）。
 
 ### discoverable ログイン結果の machine-readable 判定（`use-passkey-authentication.ts` / Blocker #3）
 
-完了不明状態の復旧は「discoverable ログイン → **一律 `AUTHENTICATION_FAILED` の後にのみ再作成導線**」に
+完了不明状態の復旧は「discoverable ログイン → **finish の 400 `AUTHENTICATION_FAILED` の後にのみ再作成導線**」に
 固定する（Req 5.4）。ところが PR #229 head の `usePasskeyAuthentication` は begin / finish の 400 / 409 を
-すべて `server_rejected` に畳み、status / code / phase を捨てるため、Dialog は「finish の一律
+すべて `server_rejected` に畳み、status / code / phase を捨てるため、Dialog は「finish の 400
 `AUTHENTICATION_FAILED`」を他の失敗（begin 拒否 / cancel / network / 5xx / session 交換失敗）から区別できない。
 File Plan で当該 hook を [U]（不変）としていたことと合わせ、そのままでは Req 5.4 を満たせない（Blocker #3）。
 
-そこで `usePasskeyAuthentication` に **authentication finish の一律 `AUTHENTICATION_FAILED` のみを表す
-machine-readable な error kind**（例: `authentication_failed`）を追加する。判定は既存の response から得られる
-status / code のみで行い、**raw body / 内部理由（credential 未解決 等）は UI に渡さない**（NFR 2.1）。他の失敗は
-既存 kind を保つ:
+そこで `usePasskeyAuthentication` 内で定義済みの `PasskeyAuthErrorKind` に
+**authentication finish の 400 `AUTHENTICATION_FAILED` のみ**を表す machine-readable な error kind
+`authentication_failed` を追加する。分類 predicate は
+`step === STEP_AUTH_FINISH && err instanceof ApiError && err.status === 400 &&
+extractApiErrorCode(err) === "AUTHENTICATION_FAILED"` の **完全一致**とする。code は安全な shape guard で
+文字列だけを読むが、**raw body / 内部理由（credential 未解決 等）は error や UI に渡さない**（NFR 2.1）。
+他の失敗は既存 kind を保つ:
 
 | discoverable ログインの失敗 | error kind（例） | 再作成導線 |
 |---|---|---|
-| finish の一律 `AUTHENTICATION_FAILED` | `authentication_failed`（**NEW**） | **提示する**（Req 5.4） |
-| begin の拒否（400 / 409 等） | 既存の begin 系 kind（`server_rejected` 等） | 提示しない |
+| finish の **400** `AUTHENTICATION_FAILED` | `authentication_failed`（**NEW**） | **提示する**（Req 5.4） |
+| begin の拒否（同じ 400/code を含む） | 既存の begin 系 kind（`server_rejected` 等） | 提示しない |
 | ユーザー cancel（`NotAllowedError` / `AbortError`） | `cancelled` | 提示しない |
 | ネットワーク断（fetch reject） | `network_error` | 提示しない |
-| 5xx | `server_error` | 提示しない |
+| finish の 400 以外（同じ code を持つ 5xx を含む） | 既存の `server_rejected` / `server_error` | 提示しない |
 | session 交換段（`/api/auth/session`）失敗 | 既存の交換系 kind（`session_exchange_failed` 等） | 提示しない |
 
-- Dialog は復旧ログインの結果 error の kind が `authentication_failed`（finish 一律失敗）**のときにのみ**
+- Dialog は復旧ログインの結果 error の kind が `authentication_failed`
+  （finish の 400 `AUTHENTICATION_FAILED`）**のときにのみ**
   「再度作成する」を提示する（Req 5.4）。上表の他 kind では再作成を出さない（Blocker #3 の negative 条件）
-- 本 kind は「finish の一律失敗」という **観察可能な単一事実** のみを表し、内部理由の細分は行わない
+- 本 kind は「finish の 400 uniform failure」という **観察可能な単一事実** のみを表し、内部理由の細分は行わない
   （Req 5.4 の「内部理由を区別して提示しない」と NFR 2.1 を同時に満たす）
+- 通常ログイン UI の `PasskeyButtons` は `authentication_failed` を既存 `server_rejected` と同じ
+  generic 固定文言へ明示 map する。`ERROR_MESSAGES` が `Partial<Record<...>>` のため、mapping を省くと
+  通常ログインでエラー表示自体が消えることを防ぐ。raw code / body は DOM に反射しない
 - 本補正により File Plan の `use-passkey-authentication.ts` / `use-passkey-authentication.test.tsx` は
   [U]→[E] に更新する（§File Structure Plan §Web）
 
@@ -938,11 +958,20 @@ status / code のみで行い、**raw body / 内部理由（credential 未解決
   1. 初期: 「ログインで確認する」ボタンのみ。押下で `usePasskeyAuthentication` の **discoverable ログイン**
      （`navigator.credentials.get()` を allowCredentials 空で実行 / ユーザー名入力なし）を起動する（Req 5.2）
   2. 成功: 通常の Cookie セッション認証に到達し 2 ペイン UI（Req 5.3）
-  3. 復旧ログインの結果 error kind が `authentication_failed`（finish 一律 `AUTHENTICATION_FAILED` /
+  3. 復旧ログインの結果 error kind が `authentication_failed`（finish の 400 `AUTHENTICATION_FAILED` /
      §auth hook 判定。内部理由を区別しない）の失敗: **その後にはじめて**「再度作成する」導線を提示する
-     （Req 5.4）。再作成は `mutation.reset()` で Idle に戻す。登録済みなら再試行時に `username_taken` になる旨も併記可
+     （Req 5.4）。再作成は registration mutation と recovery authentication mutation の **双方を reset**
+     して Idle に戻す（auth 側の古い `authentication_failed` を次の uncertain 表示へ持ち越さない）。
+     登録済みなら再試行時に `username_taken` になる旨も併記可
   - 再作成導線は **復旧ログインの kind が `authentication_failed` のときのみ**提示する。begin 拒否 / cancel /
     network / 5xx / session 交換失敗 / uncertain の初期画面には再作成を出さない（Blocker #3 / Blocker #8 の負ケース）
+- **既存 `registered` 自動 close との優先順位**: PR #229 の Dialog には
+  `isError && error.registered` で `onAccountCreatedNeedsLogin` / `onOpenChange(false)` / `reset()` を実行する
+  legacy effect がある。`registration_uncertain` はこの effect より **優先して専用 UI に留める**ため、
+  当該 kind を明示除外する（例: `registered && errorKind !== "registration_uncertain"`）。
+  初期 uncertain 表示では `onAccountCreatedNeedsLogin`、`onOpenChange(false)`、`mutation.reset()` の
+  いずれも呼ばない。直接 session 化で旧 post-finish ceremony / session-exchange 経路は消えるが、
+  legacy `registered` field / callback を残す場合もこの precedence を必須とする
 
 ### 秘密情報の非漏出（Req 5.5 / NFR 2.1）
 
@@ -990,8 +1019,9 @@ status / code のみで行い、**raw body / 内部理由（credential 未解決
   `WebPasskeyAllowedOrigin string` を **新設**し、`os.Getenv("CORS_ALLOWED_ORIGIN")` の値を
   **trim + strict exact-Origin validation** に通した結果を用いる（下記 §exact Origin validation）。
   **生値の `!= ""` だけで readiness を成立させない**（Blocker #6）: trim 後に空、または exact Origin として
-  invalid（scheme/host を欠く / path・query・fragment・userinfo を持つ / 末尾スラッシュ / 空白や複数 origin を
-  含む 等）な値は **`WebPasskeyAllowedOrigin = ""` に倒す**（= capability 404 / Origin 検証 403 の fail-closed）。
+  invalid（scheme/host を欠く / path・query・fragment・userinfo を持つ / 末尾スラッシュ / trim 後の内部空白や
+  複数 origin を含む 等）な値は **`WebPasskeyAllowedOrigin = ""` に倒す**
+  （= capability 404 / Origin 検証 403 の fail-closed）。前後空白だけは trim して正規化する。
   localhost へは default しない。パスキー系の Origin fail-closed 判定はすべて `WebPasskeyAllowedOrigin` を参照する
 - `docker-compose.yml`: `api` の `CORS_ALLOWED_ORIGIN=${CORS_ALLOWED_ORIGIN:-http://localhost:3000}` を
   `${CORS_ALLOWED_ORIGIN:-}` に変更。理由: 未設定の運用者にはコンテナへ **空文字** が渡り、
@@ -1009,22 +1039,25 @@ CORS ミドルウェアの既定挙動（localhost:3000）まで空に倒れ Goo
 ### exact Origin validation（`WebPasskeyAllowedOrigin` の readiness 判定 / Blocker #6）
 
 `WebPasskeyAllowedOrigin` は「Web パスキーが信頼する **唯一の exact Origin**」であり、単なる非空判定では
-malformed 値（末尾空白・path 付き・複数 origin 等）を 200 で通してしまい、capability=200 なのに実 finish が
+malformed 値（path 付き・複数 origin 等）を 200 で通してしまい、capability=200 なのに実 finish が
 Origin mismatch で ceremony 後に 500 / 403 破綻する（Req 3.6 違反）。これを避けるため、config load 時に
 `os.Getenv("CORS_ALLOWED_ORIGIN")` を以下で検証し、**valid な単一 exact Origin のみ**を採用する:
 
-1. **trim**: 前後空白（`" \t\r\n"`）を除去する
+1. **trim / normalize**: 前後空白（`" \t\r\n"`）を除去し、以後は trim 済み値を検証・採用する。
+   したがって `" https://example.com "` は valid で `https://example.com` に正規化される
 2. **非空**: trim 後が空なら invalid（→ `""`）
 3. **単一 origin**: 内部に空白・カンマを含む（複数 origin 列挙）なら invalid
 4. **scheme + host を持つ exact Origin**: `url.Parse` で scheme（`http` / `https`）と host（非空）を持ち、
-   **path が空**（`""` のみ許容。`"/"` や任意 path は不可）、**query / fragment / userinfo を持たない** こと。
-   末尾スラッシュ（`https://example.com/`）は path を持つため invalid
+   `User == nil` / `Opaque == ""` / `Path == ""` / `RawPath == ""` / `RawQuery == ""` /
+   `Fragment == ""` / `ForceQuery == false` をすべて満たすこと。さらに trim 済み入力が
+   **`scheme://host` の canonical serialization と完全一致**すること。`"/"` を含む末尾スラッシュ、
+   `?`、`#`、userinfo、path はすべて invalid
 5. 上記いずれか不成立なら **`WebPasskeyAllowedOrigin = ""`（fail-closed。capability 404 / Origin 検証 403）** とする
 
 - **fail-closed へ倒す（既定）**: invalid 値は起動を止めず `""` に正規化し、Web はパスキー導線を出さず Google
   単体へ縮退する。この結果 capability=404 となり「capability だけ 200 で signup 500」の不整合（Req 3.6）を
-  構造的に発生させない。運用者向けには invalid を検知した旨を **秘密値を含めず** ログ warn する（生 Origin 値は
-  設定ミスの調査に必要な範囲でのみ出し、session_id / secret は出さない / NFR 2.2）
+  構造的に発生させない。運用者向けには invalid を検知した旨だけを generic にログ warn し、
+  **生 Origin 値は一切出さない**（userinfo 等を誤設定した場合の資格情報漏出も防ぐ / NFR 2.2）
 - **代替（起動エラー）**: より厳格な運用では invalid 時に起動を fail させる選択も可能。本設計は既存の
   「未設定 → 空 → fail-closed」方針と一貫させるため **`""` 正規化を既定** とし、起動エラーは採らない
   （挙動を tasks / config test で固定する）
@@ -1073,15 +1106,17 @@ WebAuthn passthrough（`WEBAUTHN_*` / `PASSKEY_CHALLENGE_TTL_SECONDS`）は PR #
   既存 defer Rollback 後に handler へ返し、`ErrRegistrationFailed` は 400 REGISTRATION_FAILED、それ以外は
   500 INTERNAL_ERROR にマップ。応答・ログに内部詳細 / session ID 生値を反射しない（NFR 2.1）
 - **Web（API 層）**: `api.ts` は 2xx の body parse 失敗を `ResponseParseError`（status 付き）に正規化し、
-  dispatch 前失敗（plain `TypeError`）と区別可能にする（Delta 5）
+  dispatch 前失敗を `RequestPreparationError` に正規化して、送達可否不明の fetch reject
+  （plain `TypeError`）と区別可能にする（Delta 5）
 - **Web（hook）**: `PasskeyRegistrationErrorKind` に `registration_uncertain` を追加し、Dialog の段階提示に対応
 
 ## Security Considerations
 
 Delta 4 §主防御要素表・§WebAuthn の防御性質の正確化・§残余リスク・§決定記録 を参照。追加事項として、
-直接 session 発行は既存 Google OAuth Callback / `SessionExchangeService` と **同一の session factory
-（ID 生成器・now・TTL）・同一 Cookie 属性**（canonical builder 共有）を用いるため、session の秘匿性・
-属性は既存経路と一貫する。
+直接 session 発行と `SessionExchangeService` は **同一の session factory instance**
+（ID 生成器・now・TTL）を共有する。Google OAuth の `Service.createSession` は独立した既存生成処理を維持するが、
+同じ `generateSessionID` と TTL semantics を使う。3 経路の Cookie 属性は canonical builder を共有するため、
+session の秘匿性・属性は既存経路と一貫する。
 
 ## Testing Strategy
 
@@ -1114,9 +1149,11 @@ Delta 4 §主防御要素表・§WebAuthn の防御性質の正確化・§残余
 - **Unit（`native_auth_handler_test.go`）**: `/api/auth/session` の Origin 不在・不一致・許可 Origin
   未設定で 403（Delta 4 fail-closed 補正の回帰）
 - **Unit（`config_test.go`）**: `CORS_ALLOWED_ORIGIN` valid set → `WebPasskeyAllowedOrigin=正規化値` /
-  unset・empty・**malformed（前後空白 `" https://x "` / 末尾スラッシュ `https://x/` / path・query・fragment 付き /
-  複数 origin `a,b`）→ `WebPasskeyAllowedOrigin=""`（fail-closed）**、`CORSAllowedOrigin` は既定 localhost:3000 を
-  維持（Blocker #6 / Blocker #8）
+  前後空白付き valid（`" https://x "`）→ trim 済み `https://x` / unset・empty・whitespace-only →
+  `""` / **malformed（内部空白 / 末尾スラッシュ `https://x/` / path・query・fragment・userinfo・opaque・
+  ForceQuery 付き / 複数 origin `a,b`）→ `WebPasskeyAllowedOrigin=""`（fail-closed）**、
+  `CORSAllowedOrigin` は既定 localhost:3000 を維持し、invalid warn に生値を含めない
+  （Blocker #6 / Blocker #8）
 - **Integration（`router_test.go`）**: fail-closed 表 行 1〜5 の各 endpoint（列 A〜E）登録有無。特に
   行 2（W✓ N✗ C✓）で iOS registration/*・authentication/* が 200・capability が 404、
   行 3（W✓ N✓ C✗）で capability 404、partial wiring（webRegistrationReady 未充足）で capability が
@@ -1133,7 +1170,7 @@ Delta 4 §主防御要素表・§WebAuthn の防御性質の正確化・§残余
 - **Unit（`use-passkey-registration.test.tsx`）**:
   1. 正常系: begin → create → finish の 3 呼び出しのみ。`authentication/*` / 登録用 `/api/auth/session` が
      呼ばれない（二度目 ceremony 除去の回帰）
-  2. `registration_uncertain` × fetch reject（送出後 `TypeError`）
+  2. `registration_uncertain` × fetch reject（実送達可否不明の `TypeError`）
   3. `registration_uncertain` × 5xx
   4. `registration_uncertain` × AbortError
   5. `registration_uncertain` × `ResponseParseError`（2xx body 不能）
@@ -1143,19 +1180,26 @@ Delta 4 §主防御要素表・§WebAuthn の防御性質の正確化・§残余
      fetch reject の plain `TypeError`（uncertain）と取り違えられない（Blocker #1）
   8. begin 段の `invalid_username` / `username_taken` / `cancelled` は既存挙動維持
 - **Unit（`use-passkey-authentication.test.tsx` / Blocker #3）**:
-  1. discoverable ログインの finish 一律 `AUTHENTICATION_FAILED` が machine-readable kind
-     （例: `authentication_failed`）に分類される
-  2. begin 拒否 / cancel（`NotAllowedError`）/ network（fetch reject）/ 5xx / session 交換段
-     （`/api/auth/session`）失敗が **`authentication_failed` 以外の別 kind** になる（negative: 再作成条件に該当しない）
+  1. discoverable ログインの **finish + status 400 + code `AUTHENTICATION_FAILED`** の完全一致だけが
+     `authentication_failed` に分類される
+  2. begin の同一 400/code、finish の異なる status/code、cancel（`NotAllowedError`）、
+     network（fetch reject）、5xx（同じ code を含む）、session 交換段（`/api/auth/session`）失敗が
+     **`authentication_failed` 以外の別 kind** になる（negative: 再作成条件に該当しない）
   3. 内部理由 / raw body を error に含めない（NFR 2.1）
+- **Component（`passkey-buttons.test.tsx`）**: 通常ログインで `authentication_failed` が既存
+  `server_rejected` と同じ generic 文言を表示し、`AUTHENTICATION_FAILED` / raw body を DOM に出さない
 - **Component（`passkey-signup-dialog.test.tsx`）**:
   1. `registration_uncertain` で見出し「登録が完了したかどうかを確認できませんでした」が表示され、
-     初期に「再度作成する」が **表示されない**（同列並置しない / Req 5.2）
+     初期に「再度作成する」が **表示されない**。同時に legacy `registered=true` であっても
+     `onAccountCreatedNeedsLogin` / `onOpenChange(false)` / `mutation.reset()` が呼ばれず Dialog が開いたまま
+     である（同列並置・自動 close なし / Req 5.2）
   2. 「ログインで確認する」押下で discoverable ログイン（`usePasskeyAuthentication`）が起動
-  3. discoverable ログインが一律失敗した後に「再度作成する」が表示され、押下で `mutation.reset()`
+  3. discoverable ログインが finish の 400 `AUTHENTICATION_FAILED` になった後に
+     「再度作成する」が表示され、押下で registration / recovery authentication の両 mutation が reset される。
+     次に再び uncertain になっても古い auth error により再作成導線が初期表示されない
   4. 復旧ログインの kind が `authentication_failed` のときのみ「再度作成する」が出る。begin 拒否 / cancel /
-     network / 5xx / session 交換失敗では初期画面にも失敗後にも「再度作成する」が出ない（一律
-     `AUTHENTICATION_FAILED` の後のみ / Blocker #3 / Blocker #8）
+     network / 5xx / session 交換失敗では初期画面にも失敗後にも「再度作成する」が出ない
+     （finish の 400 `AUTHENTICATION_FAILED` の後のみ / Blocker #3 / Blocker #8）
   5. 文言中にサーバ内部詳細 / 他 kind の代表文言が含まれない（Req 5.5 / 5.6 回帰）
 - **Recovery（`login-page-recovery.test.tsx`）**: `registration_uncertain` → 「ログインで確認する」→
   discoverable ログイン成功 → 2 ペイン UI 到達（Req 5.3。unit で組めない場合は E2E 側へ委譲する旨を明記）
