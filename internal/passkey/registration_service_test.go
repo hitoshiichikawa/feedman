@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/webauthn"
 
+	"github.com/hitoshi/feedman/internal/auth"
 	"github.com/hitoshi/feedman/internal/model"
 	"github.com/hitoshi/feedman/internal/repository"
 )
@@ -252,6 +253,58 @@ func (b *stubRegistrationTxBeginner) BeginTx(ctx context.Context) (RegistrationT
 	return tx, nil
 }
 
+// stubSessionWriter は SessionWriter interface（session repo の tx 変種 CreateExec）を
+// 差し替えるスタブ（Issue #231 §Delta 1）。session INSERT の呼び出し順・同一 tx querier・
+// 失敗注入を検証するために呼び出しを記録する。
+type stubSessionWriter struct {
+	createExecFn func(ctx context.Context, q repository.DBTX, s *model.Session) error
+
+	createExecCalled int
+	lastCreated      *model.Session
+	lastQuerier      repository.DBTX
+}
+
+func (w *stubSessionWriter) CreateExec(ctx context.Context, q repository.DBTX, s *model.Session) error {
+	w.createExecCalled++
+	w.lastCreated = s
+	w.lastQuerier = q
+	if w.createExecFn != nil {
+		return w.createExecFn(ctx, q, s)
+	}
+	return nil
+}
+
+// stubSessionFactory は auth.SessionFactoryFunc を差し替えるスタブ（Issue #231 §Delta 1）。
+// err を設定すると NewSession が失敗し、session 生成失敗時の全 Rollback を検証できる。
+// session を設定すると当該 session を返す（未設定なら userID 由来の決定的 session を返す）。
+type stubSessionFactory struct {
+	session    *model.Session
+	err        error
+	calls      int
+	lastUserID string
+}
+
+func (f *stubSessionFactory) NewSession(userID string) (*model.Session, error) {
+	f.calls++
+	f.lastUserID = userID
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.session != nil {
+		return f.session, nil
+	}
+	fixed := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	return &model.Session{
+		ID:        "factory-session-id",
+		UserID:    userID,
+		CreatedAt: fixed,
+		ExpiresAt: fixed.Add(24 * time.Hour),
+	}, nil
+}
+
+// compile-time interface check（stubSessionFactory が auth.SessionFactoryFunc を充足する）
+var _ auth.SessionFactoryFunc = (*stubSessionFactory)(nil)
+
 // stubDBTX は repository.DBTX を充足する sentinel。実際にクエリを実行することは
 // なく、tx.Querier() が返した値と *Exec に渡された値が同一であることの検証にのみ使う。
 // stub 内の *Exec 実装で呼ばれない前提のため、全メソッドは panic する。
@@ -294,8 +347,36 @@ func newRegistrationServiceFixture(t *testing.T) (
 	creds := &stubCredentialWriter{}
 	txBeginner := &stubRegistrationTxBeginner{querier: &stubDBTX{label: "tx-querier"}}
 	now := func() time.Time { return time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC) }
-	svc := NewRegistrationService(adapter, challenges, users, creds, txBeginner, now)
+	// Issue #231: session writer / factory の既定（no-op writer + 動作する factory）を注入する。
+	// iOS mode（issueWebSession=false）のテストでは session writer は呼ばれない。Web mode の
+	// session 挙動は newRegistrationServiceFixtureWithSession でアクセス可能な stub を用いて検証する。
+	svc := NewRegistrationService(adapter, challenges, users, creds, txBeginner,
+		&stubSessionWriter{}, &stubSessionFactory{}, now)
 	return svc, adapter, challenges, users, creds, txBeginner
+}
+
+// newRegistrationServiceFixtureWithSession は Web mode の直接 session 発行
+// （Issue #231 §Delta 1）を検証するため、session writer / factory の stub も返す拡張版。
+func newRegistrationServiceFixtureWithSession(t *testing.T) (
+	*RegistrationService,
+	*stubChallengeStoreForRegistration,
+	*stubUserWriter,
+	*stubCredentialWriter,
+	*stubRegistrationTxBeginner,
+	*stubSessionWriter,
+	*stubSessionFactory,
+) {
+	t.Helper()
+	adapter := &stubWebAuthnAdapter{}
+	challenges := &stubChallengeStoreForRegistration{}
+	users := &stubUserWriter{}
+	creds := &stubCredentialWriter{}
+	txBeginner := &stubRegistrationTxBeginner{querier: &stubDBTX{label: "tx-querier"}}
+	sessions := &stubSessionWriter{}
+	factory := &stubSessionFactory{}
+	now := func() time.Time { return time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC) }
+	svc := NewRegistrationService(adapter, challenges, users, creds, txBeginner, sessions, factory, now)
+	return svc, challenges, users, creds, txBeginner, sessions, factory
 }
 
 // ------------------------------------------------------------
@@ -491,13 +572,13 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		}
 	}
 
-	t.Run("成功: user 行と credential 行を単一 tx で作成し Commit / userID を返す (Req 1.1 / Req 1.6 / Issue #230 Req 1.1・1.2)", func(t *testing.T) {
+	t.Run("成功 (iOS mode / issueWebSession=false): user 行と credential 行を単一 tx で作成し Commit / userID を返す / session なし (Req 1.1 / Req 1.6 / Issue #230 Req 1.1・1.2 / Issue #231 iOS 契約)", func(t *testing.T) {
 		// Arrange
 		svc, adapter, challenges, users, creds, txBeginner := newRegistrationServiceFixture(t)
 		challenges.consumeFn = newConsumedFn()
 
-		// Act
-		userID, err := svc.FinishRegistrationNew(ctx, "challenge-id", []byte("attestation-body"))
+		// Act: issueWebSession=false（iOS/native mode）
+		userID, webSession, err := svc.FinishRegistrationNew(ctx, "challenge-id", []byte("attestation-body"), false)
 
 		// Assert
 		if err != nil {
@@ -505,6 +586,10 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		}
 		if userID != pendingUserID {
 			t.Errorf("userID = %q, want %q (pending UUID promoted to users.id)", userID, pendingUserID)
+		}
+		// iOS mode: session を作らない（webSession=nil / #216 差分等価 / NFR 3.2）。
+		if webSession != nil {
+			t.Errorf("webSession = %+v, want nil (iOS mode は session を発行しない)", webSession)
 		}
 		// tx 契約: BeginTx が 1 回、Commit が 1 回、Rollback は defer no-op（既 commit 済み）
 		if txBeginner.beginCalled != 1 {
@@ -573,7 +658,7 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		}
 
 		// Act
-		_, err := svc.FinishRegistrationNew(ctx, "expired-id", []byte("body"))
+		_, _, err := svc.FinishRegistrationNew(ctx, "expired-id", []byte("body"), false)
 
 		// Assert
 		if !errors.Is(err, ErrRegistrationFailed) {
@@ -598,7 +683,7 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		}
 
 		// Act
-		_, err := svc.FinishRegistrationNew(ctx, "id", []byte("bad-body"))
+		_, _, err := svc.FinishRegistrationNew(ctx, "id", []byte("bad-body"), false)
 
 		// Assert
 		if !errors.Is(err, ErrRegistrationFailed) {
@@ -624,7 +709,7 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		}
 
 		// Act
-		_, err := svc.FinishRegistrationNew(ctx, "id", []byte("body"))
+		_, _, err := svc.FinishRegistrationNew(ctx, "id", []byte("body"), false)
 
 		// Assert
 		if !errors.Is(err, ErrRegistrationFailed) {
@@ -656,7 +741,7 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		}
 
 		// Act
-		_, err := svc.FinishRegistrationNew(ctx, "id", []byte("body"))
+		_, _, err := svc.FinishRegistrationNew(ctx, "id", []byte("body"), false)
 
 		// Assert
 		if !errors.Is(err, ErrRegistrationFailed) {
@@ -692,7 +777,7 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		}
 
 		// Act
-		_, err := svc.FinishRegistrationNew(ctx, "id", []byte("body"))
+		_, _, err := svc.FinishRegistrationNew(ctx, "id", []byte("body"), false)
 
 		// Assert
 		if err == nil {
@@ -731,7 +816,7 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		txBeginner.beginErr = beginErr
 
 		// Act
-		_, err := svc.FinishRegistrationNew(ctx, "id", []byte("body"))
+		_, _, err := svc.FinishRegistrationNew(ctx, "id", []byte("body"), false)
 
 		// Assert
 		if err == nil {
@@ -763,7 +848,7 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		}
 
 		// Act
-		_, err := svc.FinishRegistrationNew(ctx, "id", []byte("body"))
+		_, _, err := svc.FinishRegistrationNew(ctx, "id", []byte("body"), false)
 
 		// Assert
 		if !errors.Is(err, ErrRegistrationFailed) {
@@ -790,7 +875,7 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		}
 
 		// Act
-		_, err := svc.FinishRegistrationNew(ctx, "id", []byte("body"))
+		_, _, err := svc.FinishRegistrationNew(ctx, "id", []byte("body"), false)
 
 		// Assert
 		if !errors.Is(err, ErrRegistrationFailed) {
@@ -801,6 +886,170 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		}
 		if txBeginner.beginCalled != 0 {
 			t.Errorf("BeginTx must not be called on malformed session")
+		}
+	})
+}
+
+// ------------------------------------------------------------
+// 新規登録 Web mode の直接 session 発行 (Issue #231 §Delta 1)
+// ------------------------------------------------------------
+
+func TestRegistrationService_FinishRegistrationNew_WebSession(t *testing.T) {
+	ctx := context.Background()
+	pendingUserID := "pending-uuid-123"
+	pendingUsername := "alice"
+
+	sessionJSON, err := json.Marshal(webauthn.SessionData{UserID: []byte(pendingUserID)})
+	if err != nil {
+		t.Fatalf("marshal session fixture: %v", err)
+	}
+	consumedFn := func(ctx context.Context, challengeID string,
+		expectedKind model.PasskeyChallengeKind,
+	) (*model.PasskeyChallenge, error) {
+		pend := pendingUsername
+		return &model.PasskeyChallenge{
+			ID:              challengeID,
+			Kind:            expectedKind,
+			PendingUsername: &pend,
+			SessionData:     sessionJSON,
+		}, nil
+	}
+
+	t.Run("成功 (Web mode / issueWebSession=true): user → credential → session の 3 行を同一 tx で作成し Commit / webSession に factory 生成値", func(t *testing.T) {
+		// Arrange
+		svc, challenges, users, creds, txBeginner, sessions, factory := newRegistrationServiceFixtureWithSession(t)
+		challenges.consumeFn = consumedFn
+		want := &model.Session{
+			ID:        "web-direct-session-id",
+			UserID:    pendingUserID,
+			CreatedAt: time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC),
+			ExpiresAt: time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC).Add(24 * time.Hour),
+		}
+		factory.session = want
+
+		// Act
+		userID, webSession, err := svc.FinishRegistrationNew(ctx, "challenge-id", []byte("attestation-body"), true)
+
+		// Assert
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if userID != pendingUserID {
+			t.Errorf("userID = %q, want %q", userID, pendingUserID)
+		}
+		// webSession は factory が生成した session そのもの
+		if webSession != want {
+			t.Errorf("webSession = %+v, want factory-built %+v", webSession, want)
+		}
+		// factory が newUser.ID で 1 回呼ばれる
+		if factory.calls != 1 || factory.lastUserID != pendingUserID {
+			t.Errorf("factory calls = %d / lastUserID = %q, want 1 / %q", factory.calls, factory.lastUserID, pendingUserID)
+		}
+		// session INSERT が同一 tx querier で 1 回、factory 生成 session で呼ばれる
+		if sessions.createExecCalled != 1 {
+			t.Errorf("session.CreateExec called %d times, want 1", sessions.createExecCalled)
+		}
+		if sessions.lastCreated != want {
+			t.Errorf("session.CreateExec called with %+v, want factory-built session", sessions.lastCreated)
+		}
+		if sessions.lastQuerier != txBeginner.querier {
+			t.Errorf("session.CreateExec の querier が tx.Querier() と一致しない")
+		}
+		// 3 行 atomic: user → credential → session の順で、いずれも同一 tx。Commit 1 回・Rollback 0 回。
+		if users.createUserOnlyExecCalled != 1 || creds.createExecCalled != 1 {
+			t.Errorf("user/credential Exec calls = %d/%d, want 1/1", users.createUserOnlyExecCalled, creds.createExecCalled)
+		}
+		if txBeginner.lastTx == nil || txBeginner.lastTx.commitCalled != 1 || txBeginner.lastTx.rollbackCalled != 0 {
+			t.Errorf("tx contract not met: %+v", txBeginner.lastTx)
+		}
+	})
+
+	t.Run("session INSERT 失敗は 3 行すべて Rollback / webSession=nil / エラー伝播", func(t *testing.T) {
+		// Arrange
+		svc, challenges, users, creds, txBeginner, sessions, _ := newRegistrationServiceFixtureWithSession(t)
+		challenges.consumeFn = consumedFn
+		infraErr := errors.New("session insert failed")
+		sessions.createExecFn = func(ctx context.Context, q repository.DBTX, s *model.Session) error {
+			return infraErr
+		}
+
+		// Act
+		userID, webSession, err := svc.FinishRegistrationNew(ctx, "challenge-id", []byte("body"), true)
+
+		// Assert: infra エラーを wrap（uniform 化しない）。user/credential も Rollback で残らない。
+		if err == nil || !errors.Is(err, infraErr) {
+			t.Fatalf("err = %v, want wrap of %v", err, infraErr)
+		}
+		if errors.Is(err, ErrRegistrationFailed) {
+			t.Errorf("session infra error must not be re-mapped to ErrRegistrationFailed: %v", err)
+		}
+		if userID != "" || webSession != nil {
+			t.Errorf("userID/webSession = %q/%+v, want ''/nil on failure", userID, webSession)
+		}
+		// user / credential は tx 上で INSERT 済みだが Commit されず Rollback される（3 行 atomic）。
+		if users.createUserOnlyExecCalled != 1 || creds.createExecCalled != 1 || sessions.createExecCalled != 1 {
+			t.Errorf("Exec calls user/cred/session = %d/%d/%d, want 1/1/1",
+				users.createUserOnlyExecCalled, creds.createExecCalled, sessions.createExecCalled)
+		}
+		if txBeginner.lastTx == nil || txBeginner.lastTx.commitCalled != 0 || txBeginner.lastTx.rollbackCalled != 1 {
+			t.Errorf("tx must Rollback (not Commit) on session INSERT failure: %+v", txBeginner.lastTx)
+		}
+	})
+
+	t.Run("session factory の ID 生成失敗は Rollback / session INSERT 未到達 / webSession=nil", func(t *testing.T) {
+		// Arrange
+		svc, challenges, users, creds, txBeginner, sessions, factory := newRegistrationServiceFixtureWithSession(t)
+		challenges.consumeFn = consumedFn
+		factoryErr := errors.New("session id generation failed")
+		factory.err = factoryErr
+
+		// Act
+		userID, webSession, err := svc.FinishRegistrationNew(ctx, "challenge-id", []byte("body"), true)
+
+		// Assert
+		if err == nil || !errors.Is(err, factoryErr) {
+			t.Fatalf("err = %v, want wrap of %v", err, factoryErr)
+		}
+		if userID != "" || webSession != nil {
+			t.Errorf("userID/webSession = %q/%+v, want ''/nil", userID, webSession)
+		}
+		// factory 失敗時は session INSERT に到達しない。
+		if sessions.createExecCalled != 0 {
+			t.Errorf("session.CreateExec calls = %d, want 0 (factory 失敗時は INSERT しない)", sessions.createExecCalled)
+		}
+		// user / credential は tx 上で INSERT 済みだが Rollback される。
+		if users.createUserOnlyExecCalled != 1 || creds.createExecCalled != 1 {
+			t.Errorf("user/credential Exec calls = %d/%d, want 1/1", users.createUserOnlyExecCalled, creds.createExecCalled)
+		}
+		if txBeginner.lastTx == nil || txBeginner.lastTx.commitCalled != 0 || txBeginner.lastTx.rollbackCalled != 1 {
+			t.Errorf("tx must Rollback on factory failure: %+v", txBeginner.lastTx)
+		}
+	})
+
+	t.Run("Web mode でも user UNIQUE 衝突は ErrRegistrationFailed / session 未作成", func(t *testing.T) {
+		// Arrange
+		svc, challenges, users, _, txBeginner, sessions, factory := newRegistrationServiceFixtureWithSession(t)
+		challenges.consumeFn = consumedFn
+		users.createUserOnlyExecFn = func(ctx context.Context, q repository.DBTX, u *model.User) error {
+			return repository.ErrUsernameTaken
+		}
+
+		// Act
+		_, webSession, err := svc.FinishRegistrationNew(ctx, "challenge-id", []byte("body"), true)
+
+		// Assert
+		if !errors.Is(err, ErrRegistrationFailed) {
+			t.Fatalf("expected ErrRegistrationFailed, got %v", err)
+		}
+		if webSession != nil {
+			t.Errorf("webSession = %+v, want nil", webSession)
+		}
+		// user 衝突は credential/session/factory に到達する前に Rollback される。
+		if factory.calls != 0 || sessions.createExecCalled != 0 {
+			t.Errorf("factory/session must not be reached on user conflict: %d/%d", factory.calls, sessions.createExecCalled)
+		}
+		if txBeginner.lastTx == nil || txBeginner.lastTx.rollbackCalled != 1 {
+			t.Errorf("tx must Rollback on user conflict: %+v", txBeginner.lastTx)
 		}
 	})
 }

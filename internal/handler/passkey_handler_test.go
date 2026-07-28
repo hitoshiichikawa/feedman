@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/hitoshi/feedman/internal/middleware"
+	"github.com/hitoshi/feedman/internal/model"
 	"github.com/hitoshi/feedman/internal/passkey"
 )
 

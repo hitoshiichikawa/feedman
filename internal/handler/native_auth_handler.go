@@ -49,9 +49,10 @@ type NativeAuthHandler struct {
 	cookieSecure    bool
 	sessionMaxAge   int
 
-	// allowedOrigin は POST /api/auth/session の CSRF 対策（Issue #223 review #2）で許可する
-	// ブラウザ Origin。空文字のときは Origin 検証をスキップする（後方互換 / 未配線環境）。
-	// 既存 CORS 層と同じ許可オリジン（cfg.CORSAllowedOrigin）を wiring 時に注入する。
+	// allowedOrigin は POST /api/auth/session の CSRF 対策で許可する唯一のブラウザ Origin。
+	// Issue #231 §Delta 4 で fail-closed に補正し、wiring 時に注入する値は
+	// cfg.WebPasskeyAllowedOrigin（strict validation 済みの exact Origin）とする。
+	// 空文字（未設定）のときは Session() が全リクエストを 403 に倒す（検証不能なら発行しない）。
 	allowedOrigin string
 }
 
@@ -75,9 +76,10 @@ func WithSessionExchange(exchange SessionExchanger, cookieDomain string, cookieS
 }
 
 // WithSessionAllowedOrigin は POST /api/auth/session の CSRF 対策で許可する Origin を注入する
-// （Issue #223 review #2）。既存 CORS 層と同じ許可オリジン（cfg.CORSAllowedOrigin）を渡す。
-// 空文字を渡した場合、Session() は Origin 検証をスキップする（後方互換。Content-Type 検証は
-// allowedOrigin の値に関係なく常に有効）。既存 WithSessionExchange と直交する additive Option。
+// （Issue #223 review #2 / Issue #231 §Delta 4）。Web パスキー専用の exact Origin
+// （cfg.WebPasskeyAllowedOrigin）を渡す。空文字を渡した場合、Session() は Origin 検証を
+// fail-closed とし全リクエストを 403 に倒す（検証不能なら発行しない）。Content-Type 検証は
+// allowedOrigin の値に関係なく常に有効。既存 WithSessionExchange と直交する additive Option。
 func WithSessionAllowedOrigin(allowedOrigin string) NativeAuthHandlerOption {
 	return func(h *NativeAuthHandler) {
 		h.allowedOrigin = allowedOrigin
@@ -188,7 +190,7 @@ type sessionRequest struct {
 //   - 204: 成功。Set-Cookie: session_id=...（既存 Google OAuth Callback と完全同一属性）
 //   - 400 INVALID_REQUEST:        JSON 不正・必須フィールド欠落
 //   - 400 INVALID_GRANT:          ErrInvalidGrant に正規化された拒否（未検出 / PKCE 不一致 / used / 期限切れ）
-//   - 403 FORBIDDEN_ORIGIN:       Origin ヘッダが許可オリジンと不一致（login CSRF 対策）
+//   - 403 FORBIDDEN_ORIGIN:       allowedOrigin 未設定 / Origin 不在 / 不一致（fail-closed / login CSRF 対策）
 //   - 415 UNSUPPORTED_MEDIA_TYPE: Content-Type が application/json でない（login CSRF 対策）
 //   - 500 INTERNAL_ERROR:         上記以外（DB 障害等 / NFR 1.1）
 //
@@ -203,9 +205,10 @@ type sessionRequest struct {
 //   - Content-Type: application/json 必須化 — cross-site の HTML form POST（simple request）を
 //     弾き、cross-origin fetch には CORS preflight を強制する。Go の json.Decoder は text/plain
 //     でも JSON をパースするため、明示検証しないと form ベース CSRF が成立し得る。
-//   - Origin allowlist — Origin ヘッダが存在する場合は許可オリジンと一致を要求する。Origin
-//     不在（same-origin proxy 経由でヘッダが落ちる等）や allowedOrigin 未配線時は検証をスキップ
-//     する（false-reject を避けるため、存在時のみ厳格化する pattern）。
+//   - Origin allowlist（Issue #231 §Delta 4 で fail-closed へ補正）— 許可オリジン
+//     （cfg.WebPasskeyAllowedOrigin）との exact 一致を要求する。allowedOrigin 未設定・Origin
+//     不在・不一致はすべて 403 に倒す（検証不能なら session を発行しない）。Origin ヘッダを
+//     落とす same-origin proxy 構成では CORS_ALLOWED_ORIGIN の設定と Origin フォワードが前提。
 func (h *NativeAuthHandler) Session(w http.ResponseWriter, r *http.Request) {
 	// CSRF 対策（Content-Type / Origin）を JSON decode より前に適用する。
 	if !hasJSONContentType(r) {
@@ -213,9 +216,13 @@ func (h *NativeAuthHandler) Session(w http.ResponseWriter, r *http.Request) {
 		middleware.WriteErrorResponse(w, http.StatusUnsupportedMediaType, unsupportedMediaTypeError())
 		return
 	}
-	if origin := r.Header.Get("Origin"); origin != "" && h.allowedOrigin != "" && origin != h.allowedOrigin {
-		// 許可オリジン以外からの cross-site POST を遮断（login CSRF 対策）。
-		// origin 生値はクライアントへ反射しない（固定メッセージのみ / NFR 1.1）。
+	if h.allowedOrigin == "" || r.Header.Get("Origin") != h.allowedOrigin {
+		// Issue #231 §Delta 4: Origin 検証を fail-closed に補正する。
+		//   - allowedOrigin 未設定（"" = WebPasskeyAllowedOrigin 未設定）→ 全リクエスト 403
+		//   - Origin 不在 → 403（browser fetch は cross-origin で Origin を必ず送る前提）
+		//   - Origin != allowedOrigin → 403
+		//   - Origin == allowedOrigin（allowedOrigin != ""）のみ通過
+		// origin 生値・許可オリジンはクライアントへ反射しない（固定メッセージのみ / NFR 1.1）。
 		slog.Info("session exchange rejected: disallowed origin")
 		middleware.WriteErrorResponse(w, http.StatusForbidden, forbiddenOriginError())
 		return

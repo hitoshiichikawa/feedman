@@ -236,17 +236,23 @@ func runServe(cfg *config.Config) error {
 	//
 	// jwtVerifier は interface 型のため secret 設定時のみ非 nil の具象
 	// （*auth.JWTVerifier）を代入する（typed-nil を作らない）。
+	// Issue #231 §Delta 1: パスキーログインの SessionExchangeService と Web 直接登録 session
+	// （RegistrationService）が同一の session 構築ロジック（generateSessionID + 単一 now + TTL）を
+	// 共有するための factory を、NATIVE_AUTH_JWT_SECRET 条件の外で 1 インスタンスだけ構築する。
+	// これにより registration の direct session 発行は NATIVE secret の有無に依存しない。
+	// Google OAuth の auth.Service.createSession は既存の独立実装を維持し、本 factory へは移さない。
+	sessionTTL := time.Duration(cfg.SessionMaxAge) * time.Second
+	sessionFactory := auth.NewSessionFactory(sessionTTL)
+
 	var nativeAuthHandler *handler.NativeAuthHandler
 	var jwtVerifier middleware.JWTVerifier
 	if cfg.NativeAuthJWTSecret != "" {
 		jwtIssuer := auth.NewJWTIssuer([]byte(cfg.NativeAuthJWTSecret), cfg.NativeAuthJWTKid)
 		nativeTokenService := auth.NewTokenService(authCodeRepo, refreshTokenRepo, jwtIssuer)
-		// Web パスキー導線用 Session 交換サービス（Issue #223 / task 2）: 既存 authCodeRepo /
-		// sessionRepo を再利用する（interface segregation の SessionCreator は SessionRepo が
-		// 構造的に充足する）。sessionTTL は既存 SessionMaxAge（秒 int）を time.Duration 化して
-		// 渡す（design.md §SessionExchangeService の Contracts / task 2 impl-notes.md 参照）。
-		sessionTTL := time.Duration(cfg.SessionMaxAge) * time.Second
-		sessionExchangeService := auth.NewSessionExchangeService(authCodeRepo, sessionRepo, sessionTTL)
+		// Web パスキー導線用 Session 交換サービス（Issue #223 / task 2 / Issue #231 §Delta 1）:
+		// 既存 authCodeRepo / sessionRepo を再利用し、session 構築は共有 sessionFactory に委譲する
+		// （registration direct session と同一ロジックを共有）。auth_code 交換の外部挙動は不変。
+		sessionExchangeService := auth.NewSessionExchangeService(authCodeRepo, sessionRepo, sessionFactory)
 		// Cookie 属性は既存 Google OAuth Callback（handler.AuthHandlerConfig）と厳密一致させる
 		// ため、CookieDomain / CookieSecure / SessionMaxAge を同じ cfg 値から注入する。
 		nativeAuthHandler = handler.NewNativeAuthHandler(
@@ -257,9 +263,10 @@ func runServe(cfg *config.Config) error {
 				cfg.CookieSecure,
 				cfg.SessionMaxAge,
 			),
-			// CSRF 対策（Issue #223 review #2）: /api/auth/session の Origin 検証で許可する
-			// ブラウザオリジン。既存 CORS 層と同じ cfg.CORSAllowedOrigin を共有する。
-			handler.WithSessionAllowedOrigin(cfg.CORSAllowedOrigin),
+			// CSRF 対策（Issue #231 §Delta 4）: /api/auth/session の Origin fail-closed 検証で
+			// 許可する exact Origin。Web パスキー専用の cfg.WebPasskeyAllowedOrigin を注入する
+			// （strict validation 済み。未設定なら "" で全リクエスト 403 = fail-closed）。
+			handler.WithSessionAllowedOrigin(cfg.WebPasskeyAllowedOrigin),
 		)
 		// 検証は発行と同一の env 値（署名鍵）を共用する（#169 Req 4.1）。
 		jwtVerifier = auth.NewJWTVerifier([]byte(cfg.NativeAuthJWTSecret))
@@ -307,14 +314,29 @@ func runServe(cfg *config.Config) error {
 		// を 1 tx で INSERT するため、退会 tx と同じ *repository.SQLTxBeginner を
 		// passkeyRegistrationTxBeginnerAdapter 経由で注入する（DB 接続は共有）。
 		passkeyRegTxBeginner := newPasskeyRegistrationTxBeginner(txBeginner)
+		// Issue #231 §Delta 1: 新規パスキー登録 finish の Web mode（Origin 一致）で user /
+		// credential / session の 3 行を単一 tx で INSERT するため、session repo（SessionWriter）と
+		// 共有 sessionFactory を注入する。NATIVE secret の有無に依存せず、WEBAUTHN_* 設定時は常時配線
+		// される（iOS mode は issueWebSession=false で session を作らない / NFR 3.2）。
 		registrationSvc := passkey.NewRegistrationService(
 			webAuthnAdapter, challengeStore, userRepo, passkeyCredentialRepo,
-			passkeyRegTxBeginner, nil,
+			passkeyRegTxBeginner, sessionRepo, sessionFactory, nil,
 		)
 		authenticationSvc := passkey.NewAuthenticationService(
 			webAuthnAdapter, challengeStore, passkeyCredentialRepo, userRepo, authCodeRepo, nil,
 		)
-		passkeyHandler = handler.NewPasskeyHandler(registrationSvc, authenticationSvc)
+		// Issue #231 §Delta 1 / §Delta 3: Web mode の直接 session 発行に必要な exact Origin と
+		// Cookie 属性を注入する。Cookie 属性は既存 Google OAuth Callback と一致させる。
+		// WebPasskeyAllowedOrigin 未設定なら allowedOrigin="" で Web mode は成立せず fail-closed。
+		passkeyHandler = handler.NewPasskeyHandler(
+			registrationSvc, authenticationSvc,
+			handler.WithWebRegistrationSession(
+				cfg.WebPasskeyAllowedOrigin,
+				cfg.CookieDomain,
+				cfg.CookieSecure,
+				cfg.SessionMaxAge,
+			),
+		)
 		slog.Info("passkey handlers enabled",
 			slog.String("rp_id", cfg.WebAuthnRPID),
 			slog.Int("origins", len(cfg.WebAuthnOrigins)),
@@ -371,6 +393,10 @@ func runServe(cfg *config.Config) error {
 		// /.well-known/apple-app-site-association 404 / NFR 2.2）。
 		PasskeyHandler: passkeyHandler,
 		AASAHandler:    aasaHandler,
+
+		// Web パスキー導線が信頼する exact Origin（Issue #231 §Delta 3）。GET
+		// /api/passkey/capability の登録条件に `!= ""` を追加で課す（未設定 = capability 404）。
+		WebPasskeyAllowedOrigin: cfg.WebPasskeyAllowedOrigin,
 
 		FeedService:         feedService,
 		SubscriptionDeleter: subDeleterAdapter,

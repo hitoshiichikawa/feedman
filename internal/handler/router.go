@@ -80,6 +80,12 @@ type RouterDeps struct {
 	// WEBAUTHN_ORIGINS 未設定環境で NativeAuthHandler と同じ縮退パターン / NFR 2.2）。
 	PasskeyHandler *PasskeyHandler
 
+	// WebPasskeyAllowedOrigin は Web パスキー導線が信頼する exact Origin
+	// （cfg.WebPasskeyAllowedOrigin / Issue #231 §Delta 3）。GET /api/passkey/capability の
+	// 登録条件に `!= ""` を追加で課す（未設定 = fail-closed で capability 404）。空文字（未設定）
+	// のとき Web パスキー導線は成立せず Google 単体構成へ縮退する。
+	WebPasskeyAllowedOrigin string
+
 	// AASAHandler は `/.well-known/apple-app-site-association` を配信する（Issue #216 / Req 5.1〜5.4）。
 	// nil のときは AASA route を登録しない（fail-closed。WEBAUTHN_IOS_APP_ID 未設定環境で
 	// AASA だけ独立に無効化される。PasskeyHandler と独立して nil 判定される点に注意）。
@@ -281,7 +287,13 @@ func NewRouter(deps *RouterDeps) http.Handler {
 			// review #5: session 交換 endpoint と同じ readiness（SessionReady）で gate し、
 			// 「NativeAuthHandler はあるが SessionExchanger 未注入」の部分初期化でも capability と
 			// session の登録有無を厳密に一致させる（capability 200 / session 404 の不整合を排除）。
-			if deps.NativeAuthHandler != nil && deps.NativeAuthHandler.SessionReady() {
+			// Issue #231 §Delta 3: session 合流（列 B）の readiness に加えて、direct-registration の
+			// 発行 readiness（列 C）も揃っていることを登録条件に足す。exact Origin（列 A の C 軸）と
+			// webRegistrationReady()（session writer / factory / txBeginner 配線）を追加で要求し、
+			// 「capability だけ 200 で signup が 500 になる部分配線」を排除する（Blocker #3）。
+			// SessionReady() は維持し弱めない。3 者いずれか欠落で 404（Req 3.6）。
+			if deps.NativeAuthHandler != nil && deps.NativeAuthHandler.SessionReady() &&
+				deps.WebPasskeyAllowedOrigin != "" && deps.PasskeyHandler.webRegistrationReady() {
 				r.With(unauthIPMW).Get("/api/passkey/capability", deps.PasskeyHandler.Capability)
 			}
 		}

@@ -206,12 +206,24 @@ func (h *PasskeyHandler) RegistrationBegin(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-// RegistrationFinish は POST /api/passkey/registration/finish を処理する（Req 1.2, 1.3, 1.6, 1.7）。
+// RegistrationFinish は POST /api/passkey/registration/finish を処理する
+// （Req 1.2, 1.3, 1.6, 1.7、Issue #231 §Delta 1 の Web/iOS mode 判定）。
 //
-//   - 200: {user_id}
-//   - 400 INVALID_REQUEST:      JSON 不正・必須フィールド欠落・ボディ上限超過
-//   - 400 REGISTRATION_FAILED:  ErrRegistrationFailed に正規化された拒否（Req 1.7）
-//   - 500 INTERNAL_ERROR:       上記以外
+//   - 200: {user_id}（Web mode は加えて Set-Cookie: session_id=...）
+//   - 400 INVALID_REQUEST:         JSON 不正・必須フィールド欠落・ボディ上限超過
+//   - 403 FORBIDDEN_ORIGIN:        Origin 非空・不一致、または allowedOrigin 未設定（fail-closed）
+//   - 415 UNSUPPORTED_MEDIA_TYPE:  Web mode で Content-Type が application/json でない
+//   - 400 REGISTRATION_FAILED:     ErrRegistrationFailed に正規化された拒否（Req 1.7）
+//   - 500 INTERNAL_ERROR:          上記以外 / Web mode の readiness 未充足（fail-closed）
+//
+// mode 判定は challenge consume / DB mutation より **前** に `Origin` ヘッダで行う
+// （Issue #231 §Delta 1 §mode 判定表）:
+//   - Origin 不在（`""`）           → native/iOS mode（issueWebSession=false / #216 差分等価）
+//   - Origin == allowedOrigin       → Web mode（JSON Content-Type + readiness を mutation 前に検証）
+//   - Origin 非空不一致 / 未設定     → 403 FORBIDDEN_ORIGIN（consume / mutation なし / fail-closed）
+//
+// iOS はネイティブ HTTP クライアントで Origin を送らないため native mode に落ち、session /
+// Cookie を作らず `{user_id}` のみを返す（#216 契約不変 / NFR 3.2）。
 func (h *PasskeyHandler) RegistrationFinish(w http.ResponseWriter, r *http.Request) {
 	var req registrationFinishRequest
 	if !decodeRequest(w, r, &req, "passkey registration finish") {
@@ -223,10 +235,50 @@ func (h *PasskeyHandler) RegistrationFinish(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	userID, err := h.registration.FinishRegistrationNew(r.Context(), req.ChallengeID, req.Credential)
+	// Origin ベースの mode 判定（challenge consume / mutation より前 / Issue #231 §Delta 1）。
+	// Web mode の追加検証（Content-Type / readiness）も mutation 前に実施し fail-closed する。
+	issueWebSession := false
+	switch origin := r.Header.Get("Origin"); {
+	case origin == "":
+		// native/iOS mode: 既存 #216 挙動。JSON Content-Type 追加検証を課さない（NFR 3.2）。
+		issueWebSession = false
+	case h.allowedOrigin != "" && origin == h.allowedOrigin:
+		// Web mode: JSON Content-Type 必須 → readiness 確認 → session 発行。
+		if !hasJSONContentType(r) {
+			slog.Info("passkey registration finish rejected: unsupported content-type (web mode)")
+			middleware.WriteErrorResponse(w, http.StatusUnsupportedMediaType, unsupportedMediaTypeError())
+			return
+		}
+		if !h.webRegistrationReady() {
+			// direct-registration session 発行の依存が未配線（部分配線）。mutation 前に
+			// fail-closed する（Issue #231 §Delta 3 §capability readiness）。生 Origin は反射しない。
+			slog.Error("passkey registration finish rejected: web session dependencies not ready")
+			middleware.WriteInternalServerError(w)
+			return
+		}
+		issueWebSession = true
+	default:
+		// Origin 非空・不一致、または allowedOrigin 未設定（"" のとき任意の非空 Origin を拒否）。
+		// consume / mutation を行わずに fail-closed（login/registration CSRF 対策 / Delta 4）。
+		slog.Info("passkey registration finish rejected: disallowed origin")
+		middleware.WriteErrorResponse(w, http.StatusForbidden, forbiddenOriginError())
+		return
+	}
+
+	userID, webSession, err := h.registration.FinishRegistrationNew(r.Context(), req.ChallengeID, req.Credential, issueWebSession)
 	if err != nil {
 		h.writeRegistrationError(w, err, "passkey registration finish failed")
 		return
+	}
+
+	// Web mode で session が発行された場合のみ、既存 Google OAuth Callback と完全同一属性の
+	// Cookie を canonical builder（session_cookie.go）で Set-Cookie する。session ID 生値は
+	// Set-Cookie ヘッダ経由でのみクライアントへ渡し、ログには残さない（NFR 2.1）。
+	if webSession != nil {
+		http.SetCookie(w, buildSessionCookie(
+			sessionCookieName, webSession.ID,
+			h.cookieDomain, h.cookieSecure, h.cookieMaxAge,
+		))
 	}
 
 	writeJSON(w, http.StatusOK, registrationFinishNewResponse{UserID: userID})

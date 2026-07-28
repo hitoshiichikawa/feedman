@@ -20,6 +20,7 @@ import (
 	"github.com/hitoshi/feedman/internal/auth"
 	"github.com/hitoshi/feedman/internal/database"
 	"github.com/hitoshi/feedman/internal/middleware"
+	"github.com/hitoshi/feedman/internal/model"
 	"github.com/hitoshi/feedman/internal/passkey"
 	"github.com/hitoshi/feedman/internal/repository"
 )
@@ -114,10 +115,24 @@ func setupPasskeyE2EDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// newPasskeyE2ERouter は real passkey / native auth service を wire した router を構築する。
-// PasskeyHandler + NativeAuthHandler を同 router に載せて、passkey 認証成功 →
-// 既存 token 交換 endpoint への合流までを 1 経路で検証できるようにする。
+// e2ePasskeySessionMaxAge は Web 直接登録 session の Cookie Max-Age（秒）。
+const e2ePasskeySessionMaxAge = 7 * 24 * 3600
+
+// newPasskeyE2ERouter は real passkey / native auth service を wire した router を構築する
+// （既定の実 SessionFactory を使う）。PasskeyHandler + NativeAuthHandler を同 router に載せて、
+// passkey 認証成功 → 既存 token 交換 endpoint への合流までを 1 経路で検証できるようにする。
+// Issue #231 §Delta 1: Web mode（Origin 一致）の直接 session 発行も配線するため、iOS mode
+// （Origin 不在）と Web mode の双方を同一 router で検証できる。
 func newPasskeyE2ERouter(t *testing.T, db *sql.DB) (http.Handler, string) {
+	t.Helper()
+	sessionFactory := auth.NewSessionFactory(time.Duration(e2ePasskeySessionMaxAge) * time.Second)
+	return buildPasskeyE2ERouter(t, db, sessionFactory)
+}
+
+// buildPasskeyE2ERouter は session factory を差し替え可能な形で router を構築する
+// （Issue #231 §Delta 1）。session INSERT 失敗による 3 行 rollback を検証する際は、
+// 固定 ID を返す factory を注入して PK 衝突を意図的に発生させる。
+func buildPasskeyE2ERouter(t *testing.T, db *sql.DB, sessionFactory auth.SessionFactoryFunc) (http.Handler, string) {
 	t.Helper()
 
 	// 全 repo を real 実装で組む
@@ -143,9 +158,11 @@ func newPasskeyE2ERouter(t *testing.T, db *sql.DB) (http.Handler, string) {
 	// *repository.SQLTx は passkey.RegistrationTx を構造的に充足するため、
 	// e2eRealPasskeyRegTxBeginner で戻り値型を interface に一致させる（本ファイル末尾に定義）。
 	regTxBeginner := &e2ePasskeyRegTxBeginner{beginner: repository.NewSQLTxBeginner(db)}
+	// Issue #231 §Delta 1: Web mode の 3 行 tx（user → credential → session）に必要な
+	// session writer（sessionRepo）と共有 sessionFactory を注入する。
 	registrationSvc := passkey.NewRegistrationService(
 		webAuthnAdapter, challengeStore, userRepo, passkeyCredRepo,
-		regTxBeginner, nil,
+		regTxBeginner, sessionRepo, sessionFactory, nil,
 	)
 	authenticationSvc := passkey.NewAuthenticationService(
 		webAuthnAdapter, challengeStore, passkeyCredRepo, userRepo, authCodeRepo, nil,
@@ -157,7 +174,11 @@ func newPasskeyE2ERouter(t *testing.T, db *sql.DB) (http.Handler, string) {
 		RateLimiter:       middleware.NewRateLimiter(middleware.DefaultRateLimiterConfig()),
 		NativeAuthHandler: NewNativeAuthHandler(tokenService),
 		JWTVerifier:       verifier,
-		PasskeyHandler:    NewPasskeyHandler(registrationSvc, authenticationSvc),
+		// Issue #231 §Delta 1 / §Delta 3: Web mode の直接 session 発行に必要な exact Origin と
+		// Cookie 属性を注入する（Cookie Domain は空、Secure は false = テスト用）。
+		PasskeyHandler: NewPasskeyHandler(registrationSvc, authenticationSvc,
+			WithWebRegistrationSession(e2ePasskeyRP.Origin, "", false, e2ePasskeySessionMaxAge)),
+		WebPasskeyAllowedOrigin: e2ePasskeyRP.Origin,
 		// 保護 API 到達を確認するための最小 stub。userID 連動 fixture で JWT sub の
 		// 解決を可視化する（native_auth_e2e_db_test.go と同方針）。
 		SubscriptionService: &mockSubscriptionService{
@@ -166,7 +187,7 @@ func newPasskeyE2ERouter(t *testing.T, db *sql.DB) (http.Handler, string) {
 			},
 		},
 	}
-	return NewRouter(deps), "https://example.com"
+	return NewRouter(deps), e2ePasskeyRP.Origin
 }
 
 // e2ePasskeyPostJSON は JSON POST を送り Recorder を返す共通ヘルパ。
@@ -248,6 +269,18 @@ func TestE2E_PasskeyFullFlow_DBBacked(t *testing.T) {
 	}
 	if credCount != 1 {
 		t.Errorf("passkey_credentials after registration: got %d, want 1", credCount)
+	}
+	// Issue #231 iOS mode: Origin なし（e2ePasskeyPostJSON は Origin を送らない）で finish した
+	// ため session は発行されない（2 行のみ / Set-Cookie なし / #216 差分等価）。
+	var sessionCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions WHERE user_id = $1`, regFinishResp.UserID).Scan(&sessionCount); err != nil {
+		t.Fatalf("sessions COUNT: %v", err)
+	}
+	if sessionCount != 0 {
+		t.Errorf("sessions after iOS-mode registration: got %d, want 0 (iOS は session を発行しない)", sessionCount)
+	}
+	if sc := w.Result().Header.Get("Set-Cookie"); sc != "" {
+		t.Errorf("iOS-mode registration/finish set a cookie (%q), want none", sc)
 	}
 
 	// --- step 4: passkey 認証 begin ---
@@ -364,6 +397,151 @@ func TestE2E_PasskeyFullFlow_DBBacked(t *testing.T) {
 	if !strings.Contains(wRec.Body.String(), "sub-of-"+regFinishResp.UserID) {
 		t.Errorf("Bearer API body %q does not contain %q (passkey 由来 JWT sub 解決失敗)",
 			wRec.Body.String(), "sub-of-"+regFinishResp.UserID)
+	}
+}
+
+// e2ePasskeyPostJSONWithOrigin は JSON + Origin ヘッダ付きで POST する（Web mode 検証用 / Issue #231）。
+func e2ePasskeyPostJSONWithOrigin(router http.Handler, path, body, origin string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", origin)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	return w
+}
+
+// e2ePasskeyRegisterBeginAndAttest は登録 begin → synthetic attestation 生成までを実行し、
+// finish に渡す challenge_id と credential JSON（生 attestation response）を返す。
+func e2ePasskeyRegisterBeginAndAttest(t *testing.T, router http.Handler, username string) (string, string) {
+	t.Helper()
+	regBeginBody := fmt.Sprintf(`{"username":%q,"code_challenge":%q}`, username, e2ePasskeyCodeChallenge())
+	w := e2ePasskeyPostJSON(router, "/api/passkey/registration/begin", regBeginBody)
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("registration/begin status = %d (body=%s)", w.Result().StatusCode, w.Body.String())
+	}
+	var resp passkeyBeginResponse
+	if err := json.NewDecoder(w.Result().Body).Decode(&resp); err != nil {
+		t.Fatalf("registration/begin decode: %v", err)
+	}
+	authenticator := virtualwebauthn.NewAuthenticator()
+	cred := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
+	attOpts, err := virtualwebauthn.ParseAttestationOptions(string(resp.Options))
+	if err != nil {
+		t.Fatalf("ParseAttestationOptions: %v", err)
+	}
+	attResp := virtualwebauthn.CreateAttestationResponse(e2ePasskeyRP, authenticator, cred, *attOpts)
+	return resp.ChallengeID, attResp
+}
+
+// TestE2E_PasskeyWebModeRegistration_ThreeRow_DBBacked は Web mode（Origin 一致）の登録 finish で
+// users / passkey_credentials / sessions の **3 行が単一 tx で commit** され、Set-Cookie が付き、
+// session の CreatedAt / ExpiresAt が Cookie の Max-Age（= SessionMaxAge）と整合することを検証する
+// （Issue #231 §Delta 1 / Task 3）。
+func TestE2E_PasskeyWebModeRegistration_ThreeRow_DBBacked(t *testing.T) {
+	db := setupPasskeyE2EDB(t)
+	defer db.Close()
+	ctx := context.Background()
+	router, origin := newPasskeyE2ERouter(t, db)
+
+	challengeID, attResp := e2ePasskeyRegisterBeginAndAttest(t, router, "e2e-web-alice")
+	finishBody := fmt.Sprintf(`{"challenge_id":%q,"credential":%s}`, challengeID, attResp)
+	w := e2ePasskeyPostJSONWithOrigin(router, "/api/passkey/registration/finish", finishBody, origin)
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("web registration/finish status = %d, want 200 (body=%s)", w.Result().StatusCode, w.Body.String())
+	}
+	var resp registrationFinishNewResponse
+	if err := json.NewDecoder(w.Result().Body).Decode(&resp); err != nil {
+		t.Fatalf("web registration/finish decode: %v", err)
+	}
+	if resp.UserID == "" {
+		t.Fatal("web registration/finish returned empty user_id")
+	}
+	// Web mode: Set-Cookie session_id（HttpOnly / SameSite=Lax）が付く。
+	sc := w.Result().Header.Get("Set-Cookie")
+	if !strings.Contains(sc, sessionCookieName+"=") {
+		t.Errorf("Set-Cookie = %q, want %s=...", sc, sessionCookieName)
+	}
+	if !strings.Contains(sc, "HttpOnly") {
+		t.Errorf("Set-Cookie must include HttpOnly: %q", sc)
+	}
+	// 3 行 commit
+	var users, creds, sessions int
+	db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE id=$1`, resp.UserID).Scan(&users)
+	db.QueryRowContext(ctx, `SELECT COUNT(*) FROM passkey_credentials WHERE user_id=$1`, resp.UserID).Scan(&creds)
+	db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions WHERE user_id=$1`, resp.UserID).Scan(&sessions)
+	if users != 1 || creds != 1 || sessions != 1 {
+		t.Errorf("3-row commit: users/creds/sessions = %d/%d/%d, want 1/1/1", users, creds, sessions)
+	}
+	// session の TTL（ExpiresAt - CreatedAt）が Max-Age と整合
+	var createdAt, expiresAt time.Time
+	if err := db.QueryRowContext(ctx, `SELECT created_at, expires_at FROM sessions WHERE user_id=$1`, resp.UserID).Scan(&createdAt, &expiresAt); err != nil {
+		t.Fatalf("session times: %v", err)
+	}
+	gotTTL := expiresAt.Sub(createdAt)
+	wantTTL := time.Duration(e2ePasskeySessionMaxAge) * time.Second
+	if gotTTL < wantTTL-time.Second || gotTTL > wantTTL+time.Second {
+		t.Errorf("session TTL = %v, want ~%v (= SessionMaxAge)", gotTTL, wantTTL)
+	}
+}
+
+// e2eFixedSessionFactory は常に固定 ID の session を返す test factory（Issue #231 §Delta 1）。
+// 事前挿入した同一 ID の session と PK 衝突させ、session INSERT 失敗時の 3 行 rollback を検証する。
+type e2eFixedSessionFactory struct {
+	id string
+}
+
+func (f *e2eFixedSessionFactory) NewSession(userID string) (*model.Session, error) {
+	now := time.Now()
+	return &model.Session{ID: f.id, UserID: userID, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}, nil
+}
+
+// TestE2E_PasskeyWebModeRegistration_SessionInsertFailureRollback_DBBacked は Web mode で
+// session INSERT が失敗（PK 衝突）したとき、users / passkey_credentials も含めて **全 rollback** され、
+// Set-Cookie が付かず 500 を返すことを検証する（Issue #231 §Delta 1 / 3 行 atomic / Task 3）。
+func TestE2E_PasskeyWebModeRegistration_SessionInsertFailureRollback_DBBacked(t *testing.T) {
+	db := setupPasskeyE2EDB(t)
+	defer db.Close()
+	ctx := context.Background()
+	const collisionID = "e2e-collision-session-id"
+
+	// 事前に collisionID を占有する user + session を挿入し、登録 finish の 3 行目 session INSERT を
+	// PK 衝突で失敗させる。
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO users (id, email, username, username_normalized) VALUES ($1, '', 'collide', 'collide')`,
+		"collide-user-id"); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO sessions (id, user_id, data, expires_at, created_at) VALUES ($1, $2, '{}', now() + interval '1 hour', now())`,
+		collisionID, "collide-user-id"); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	router, origin := buildPasskeyE2ERouter(t, db, &e2eFixedSessionFactory{id: collisionID})
+	challengeID, attResp := e2ePasskeyRegisterBeginAndAttest(t, router, "e2e-rollback-user")
+	finishBody := fmt.Sprintf(`{"challenge_id":%q,"credential":%s}`, challengeID, attResp)
+	w := e2ePasskeyPostJSONWithOrigin(router, "/api/passkey/registration/finish", finishBody, origin)
+
+	// session INSERT の PK 衝突 → 500（infra エラー）。Set-Cookie は付かない。
+	if w.Result().StatusCode != http.StatusInternalServerError {
+		t.Fatalf("finish status = %d, want 500 (session INSERT PK conflict → rollback) body=%s", w.Result().StatusCode, w.Body.String())
+	}
+	if sc := w.Result().Header.Get("Set-Cookie"); sc != "" {
+		t.Errorf("rollback path set a cookie (%q), want none", sc)
+	}
+	// 3 行 atomic rollback: 新 user / credential は残らない。sessions は事前挿入の 1 行のみ。
+	var newUsers, creds, sessions int
+	db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE username_normalized = 'e2e-rollback-user'`).Scan(&newUsers)
+	db.QueryRowContext(ctx, `SELECT COUNT(*) FROM passkey_credentials`).Scan(&creds)
+	db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&sessions)
+	if newUsers != 0 {
+		t.Errorf("rolled-back user persisted: got %d, want 0 (3 行 atomic)", newUsers)
+	}
+	if creds != 0 {
+		t.Errorf("rolled-back credential persisted: got %d, want 0 (3 行 atomic)", creds)
+	}
+	if sessions != 1 {
+		t.Errorf("sessions = %d, want 1 (事前挿入の 1 行のみ / 新 session は rollback)", sessions)
 	}
 }
 

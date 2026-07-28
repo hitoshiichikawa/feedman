@@ -67,13 +67,40 @@ func newSessionExchangeAuthCode(userID string) *model.AuthCode {
 
 // newSessionExchangeSvcWithMocks は固定 now + 固定 sessionTTL の
 // SessionExchangeService と 2 つの mock 参照を返す。
+//
+// Issue #231 §Delta 1: session 構築は共有 SessionFactory に委譲される。テストは
+// 固定 now + 既定 newID（generateSessionID）を持つ factory を in-package で直接構築して
+// 注入し、生成 session の ID（64 文字 hex）/ CreatedAt=now / ExpiresAt=now+TTL の整合を維持する。
 func newSessionExchangeSvcWithMocks(t *testing.T) (*SessionExchangeService, *mockAuthCodes, *mockSessionCreator) {
 	t.Helper()
 	authCodes := &mockAuthCodes{}
 	sessions := &mockSessionCreator{}
-	svc := NewSessionExchangeService(authCodes, sessions, sessionExchangeTestTTL)
-	svc.now = func() time.Time { return fixedSessionExchangeIssuedAt }
+	factory := &SessionFactory{
+		ttl:   sessionExchangeTestTTL,
+		now:   func() time.Time { return fixedSessionExchangeIssuedAt },
+		newID: generateSessionID,
+	}
+	svc := NewSessionExchangeService(authCodes, sessions, factory)
 	return svc, authCodes, sessions
+}
+
+// fakeSessionFactory は SessionExchangeService が session 構築を factory に委譲することを
+// 検証するための record-and-return モック（Issue #231 §Delta 1）。err を設定すると
+// NewSession が失敗し、factory 失敗時に session を永続化しないことを検証できる。
+type fakeSessionFactory struct {
+	session    *model.Session
+	err        error
+	calls      int
+	lastUserID string
+}
+
+func (f *fakeSessionFactory) NewSession(userID string) (*model.Session, error) {
+	f.calls++
+	f.lastUserID = userID
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.session, nil
 }
 
 // --- 正常系 ---
@@ -405,5 +432,92 @@ func TestExchangeAuthCodeForSession_DoesNotLeakPlainSecretsInError(t *testing.T)
 				t.Errorf("error message %q contains plain codeVerifier (NFR 1.1)", msg)
 			}
 		})
+	}
+}
+
+// --- Issue #231 §Delta 1: 共有 SessionFactory への委譲 ---
+
+// TestExchangeAuthCodeForSession_DelegatesToSessionFactory は session 構築が
+// SessionFactory.NewSession(stored.UserID) に委譲され、生成された session が
+// そのまま永続化・返却されることを検証する（Issue #231 §Delta 1）。
+func TestExchangeAuthCodeForSession_DelegatesToSessionFactory(t *testing.T) {
+	// Arrange
+	const userID = "session-user-1"
+	authCodes := &mockAuthCodes{}
+	sessions := &mockSessionCreator{}
+	want := &model.Session{
+		ID:        "factory-built-session-id",
+		UserID:    userID,
+		CreatedAt: fixedSessionExchangeIssuedAt,
+		ExpiresAt: fixedSessionExchangeIssuedAt.Add(sessionExchangeTestTTL),
+	}
+	factory := &fakeSessionFactory{session: want}
+	svc := NewSessionExchangeService(authCodes, sessions, factory)
+	authCodes.findFn = func(ctx context.Context, hash string) (*model.AuthCode, error) {
+		return newSessionExchangeAuthCode(userID), nil
+	}
+
+	// Act
+	session, err := svc.ExchangeAuthCodeForSession(context.Background(),
+		"plain-session-auth-code", rfc7636AppendixBVerifier)
+
+	// Assert: factory が stored.UserID で 1 回呼ばれる
+	if err != nil {
+		t.Fatalf("ExchangeAuthCodeForSession returned error: %v", err)
+	}
+	if factory.calls != 1 {
+		t.Errorf("SessionFactory.NewSession calls = %d, want 1", factory.calls)
+	}
+	if factory.lastUserID != userID {
+		t.Errorf("SessionFactory.NewSession userID = %q, want %q", factory.lastUserID, userID)
+	}
+	// Assert: factory が返した session がそのまま返却・永続化される
+	if session != want {
+		t.Errorf("returned session = %+v, want factory-built session %+v", session, want)
+	}
+	if sessions.created != want {
+		t.Errorf("Create was not called with the factory-built session")
+	}
+}
+
+// TestExchangeAuthCodeForSession_FactoryFailure は SessionFactory.NewSession が失敗した
+// とき、ErrInvalidGrant ではなく wrap された非 nil error を返し、session を永続化しない
+// ことを検証する（Issue #231 §Delta 1。ID 生成失敗 = rand 失敗は 500 系 infra エラー）。
+// MarkUsed は factory 呼び出しより前に成功済みのため 1 回呼ばれる。
+func TestExchangeAuthCodeForSession_FactoryFailure(t *testing.T) {
+	// Arrange
+	authCodes := &mockAuthCodes{}
+	sessions := &mockSessionCreator{}
+	factoryErr := errors.New("session id generation failed")
+	factory := &fakeSessionFactory{err: factoryErr}
+	svc := NewSessionExchangeService(authCodes, sessions, factory)
+	authCodes.findFn = func(ctx context.Context, hash string) (*model.AuthCode, error) {
+		return newSessionExchangeAuthCode("session-user-1"), nil
+	}
+
+	// Act
+	session, err := svc.ExchangeAuthCodeForSession(context.Background(),
+		"plain-session-auth-code", rfc7636AppendixBVerifier)
+
+	// Assert: infra エラーとして wrap（ErrInvalidGrant に正規化しない）
+	if err == nil {
+		t.Fatal("err = nil, want non-nil (factory 失敗は 500 系 infra エラー)")
+	}
+	if errors.Is(err, ErrInvalidGrant) {
+		t.Errorf("err = %v, must not be ErrInvalidGrant (factory 失敗は infra エラー)", err)
+	}
+	if !errors.Is(err, factoryErr) {
+		t.Errorf("err = %v, want wrap of %v", err, factoryErr)
+	}
+	if session != nil {
+		t.Errorf("session = %+v, want nil", session)
+	}
+	// MarkUsed は factory 呼び出しより前（手順 3）で成功済み。
+	if authCodes.markUsedCalls != 1 {
+		t.Errorf("MarkUsed calls = %d, want 1", authCodes.markUsedCalls)
+	}
+	// factory 失敗時は session を一切永続化しない。
+	if sessions.createCalls != 0 {
+		t.Errorf("Create calls = %d, want 0 (factory 失敗時は session を永続化しない)", sessions.createCalls)
 	}
 }
