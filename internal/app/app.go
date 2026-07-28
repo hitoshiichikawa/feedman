@@ -236,19 +236,47 @@ func runServe(cfg *config.Config) error {
 	//
 	// jwtVerifier は interface 型のため secret 設定時のみ非 nil の具象
 	// （*auth.JWTVerifier）を代入する（typed-nil を作らない）。
+	// Web パスキーログインと直接登録 session は、同一の SessionFactory を共有する。
+	// registration は NATIVE_AUTH_JWT_SECRET に依存しないため、本 factory は native auth
+	// の条件分岐より外で一度だけ構築する（Issue #231 Delta 1）。
+	sessionTTL := time.Duration(cfg.SessionMaxAge) * time.Second
+	sessionFactory := auth.NewSessionFactory(sessionTTL)
 	var nativeAuthHandler *handler.NativeAuthHandler
 	var jwtVerifier middleware.JWTVerifier
 	if cfg.NativeAuthJWTSecret != "" {
 		jwtIssuer := auth.NewJWTIssuer([]byte(cfg.NativeAuthJWTSecret), cfg.NativeAuthJWTKid)
 		nativeTokenService := auth.NewTokenService(authCodeRepo, refreshTokenRepo, jwtIssuer)
-		nativeAuthHandler = handler.NewNativeAuthHandler(nativeTokenService)
+		// Web パスキー導線用 Session 交換サービス（Issue #223 / task 2）: 既存 authCodeRepo /
+		// sessionRepo を再利用する（interface segregation の SessionCreator は SessionRepo が
+		// 構造的に充足する）。session の ID / 時刻 / TTL は、直接登録経路と同じ
+		// SessionFactory instance に委譲する（Issue #231 Delta 1）。
+		sessionExchangeService := auth.NewSessionExchangeService(authCodeRepo, sessionRepo, sessionFactory)
+		// Cookie 属性は既存 Google OAuth Callback（handler.AuthHandlerConfig）と厳密一致させる
+		// ため、CookieDomain / CookieSecure / SessionMaxAge を同じ cfg 値から注入する。
+		nativeAuthHandler = handler.NewNativeAuthHandler(
+			nativeTokenService,
+			handler.WithSessionExchange(
+				sessionExchangeService,
+				cfg.CookieDomain,
+				cfg.CookieSecure,
+				cfg.SessionMaxAge,
+			),
+			// Web パスキー専用の strict exact Origin。未設定・不正値は空になり、
+			// /api/auth/session が全リクエストを 403 に倒す（Issue #231 Delta 4/6）。
+			handler.WithSessionAllowedOrigin(cfg.WebPasskeyAllowedOrigin),
+		)
 		// 検証は発行と同一の env 値（署名鍵）を共用する（#169 Req 4.1）。
 		jwtVerifier = auth.NewJWTVerifier([]byte(cfg.NativeAuthJWTSecret))
 		slog.Info("native token exchange enabled",
 			slog.String("kid", cfg.NativeAuthJWTKid),
 		)
 	} else {
-		slog.Warn("NATIVE_AUTH_JWT_SECRET is not set; POST /api/auth/token and Bearer auth are disabled")
+		// NATIVE_AUTH_JWT_SECRET 未設定時は NativeAuthHandler が nil となり、/api/auth/token /
+		// refresh / revoke / session と Bearer 認証がすべて無効化される（fail-closed）。
+		// /api/auth/session が無効になると Web パスキーフローの session 合流が成立しないため、
+		// GET /api/passkey/capability も 404 に倒れ、Web はパスキー導線を非表示にして
+		// Google 単体構成へ縮退する（Issue #223 review #3: capability と session の有効化条件を統一）。
+		slog.Warn("NATIVE_AUTH_JWT_SECRET is not set; POST /api/auth/token, /api/auth/session, /api/passkey/capability, and Bearer auth are disabled (Web passkey degrades to Google-only)")
 	}
 
 	// Passkey / AASA wiring（Issue #216）: fail-closed 縮退。
@@ -285,17 +313,35 @@ func runServe(cfg *config.Config) error {
 		passkeyRegTxBeginner := newPasskeyRegistrationTxBeginner(txBeginner)
 		registrationSvc := passkey.NewRegistrationService(
 			webAuthnAdapter, challengeStore, userRepo, passkeyCredentialRepo,
-			passkeyRegTxBeginner, nil,
+			passkeyRegTxBeginner, sessionRepo, sessionFactory, nil,
 		)
 		authenticationSvc := passkey.NewAuthenticationService(
 			webAuthnAdapter, challengeStore, passkeyCredentialRepo, userRepo, authCodeRepo, nil,
 		)
-		passkeyHandler = handler.NewPasskeyHandler(registrationSvc, authenticationSvc)
+		passkeyHandler = handler.NewPasskeyHandler(
+			registrationSvc,
+			authenticationSvc,
+			handler.WithWebRegistrationSession(
+				cfg.WebPasskeyAllowedOrigin,
+				cfg.CookieDomain,
+				cfg.CookieSecure,
+				cfg.SessionMaxAge,
+			),
+		)
 		slog.Info("passkey handlers enabled",
 			slog.String("rp_id", cfg.WebAuthnRPID),
 			slog.Int("origins", len(cfg.WebAuthnOrigins)),
 			slog.Duration("challenge_ttl", cfg.PasskeyChallengeTTL),
 		)
+		// Web パスキーフロー（GET /api/passkey/capability + POST /api/auth/session）は
+		// session 合流に NativeAuthHandler を必要とする。passkey は有効でも
+		// NATIVE_AUTH_JWT_SECRET 未設定なら capability / session が 404 となり、Web は
+		// パスキー導線を出さずに Google 単体構成へ縮退する（iOS 側 passkey API は有効なまま）。
+		// 運用者が Web パスキーを意図している場合の取りこぼしを防ぐため Warn を 1 回出す
+		// （Issue #223 review #3 / #4）。
+		if cfg.NativeAuthJWTSecret == "" {
+			slog.Warn("passkey is enabled but NATIVE_AUTH_JWT_SECRET is not set; Web passkey (GET /api/passkey/capability, POST /api/auth/session) stays disabled and the login screen shows Google only")
+		}
 	} else {
 		slog.Warn("passkey is disabled (WEBAUTHN_RP_ID or WEBAUTHN_ORIGINS not set)")
 	}
@@ -336,8 +382,9 @@ func runServe(cfg *config.Config) error {
 		// いずれも env 未設定時は nil のまま。router 側で個別に fail-closed 判定される
 		// （PasskeyHandler nil → /api/passkey/* 404 / AASAHandler nil →
 		// /.well-known/apple-app-site-association 404 / NFR 2.2）。
-		PasskeyHandler: passkeyHandler,
-		AASAHandler:    aasaHandler,
+		PasskeyHandler:          passkeyHandler,
+		WebPasskeyAllowedOrigin: cfg.WebPasskeyAllowedOrigin,
+		AASAHandler:             aasaHandler,
 
 		FeedService:         feedService,
 		SubscriptionDeleter: subDeleterAdapter,

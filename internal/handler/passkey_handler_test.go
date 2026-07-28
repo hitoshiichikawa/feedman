@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/hitoshi/feedman/internal/middleware"
+	"github.com/hitoshi/feedman/internal/model"
 	"github.com/hitoshi/feedman/internal/passkey"
 )
 
@@ -28,9 +29,10 @@ import (
 
 type stubPasskeyRegistrationService struct {
 	beginNewFn  func(ctx context.Context, rawUsername, optionalEmail, codeChallenge string) (string, []byte, error)
-	finishNewFn func(ctx context.Context, challengeID string, requestBody []byte) (string, error)
+	finishNewFn func(ctx context.Context, challengeID string, requestBody []byte, issueWebSession bool) (string, *model.Session, error)
 	beginAddFn  func(ctx context.Context, authenticatedUserID string) (string, []byte, error)
 	finishAddFn func(ctx context.Context, authenticatedUserID, challengeID string, requestBody []byte) error
+	webReady    bool
 
 	beginNewCalled  int
 	finishNewCalled int
@@ -44,6 +46,7 @@ type stubPasskeyRegistrationService struct {
 	lastChallengeID   string
 	lastRequestBody   []byte
 	lastAuthenticated string
+	lastIssueWeb      bool
 }
 
 func (s *stubPasskeyRegistrationService) BeginRegistrationNew(ctx context.Context,
@@ -60,15 +63,20 @@ func (s *stubPasskeyRegistrationService) BeginRegistrationNew(ctx context.Contex
 }
 
 func (s *stubPasskeyRegistrationService) FinishRegistrationNew(ctx context.Context,
-	challengeID string, requestBody []byte,
-) (string, error) {
+	challengeID string, requestBody []byte, issueWebSession bool,
+) (string, *model.Session, error) {
 	s.finishNewCalled++
 	s.lastChallengeID = challengeID
 	s.lastRequestBody = append([]byte(nil), requestBody...)
+	s.lastIssueWeb = issueWebSession
 	if s.finishNewFn != nil {
-		return s.finishNewFn(ctx, challengeID, requestBody)
+		return s.finishNewFn(ctx, challengeID, requestBody, issueWebSession)
 	}
-	return "", errors.New("finishNewFn not configured")
+	return "", nil, errors.New("finishNewFn not configured")
+}
+
+func (s *stubPasskeyRegistrationService) WebSessionReady() bool {
+	return s.webReady
 }
 
 func (s *stubPasskeyRegistrationService) BeginAddCredential(ctx context.Context,
@@ -383,14 +391,22 @@ func TestPasskeyHandler_RegistrationBegin_EmailOptional(t *testing.T) {
 // Req 1.2 / 1.3: 成功時 200 + user_id を返す。
 func TestPasskeyHandler_RegistrationFinish_Success(t *testing.T) {
 	reg := &stubPasskeyRegistrationService{
-		finishNewFn: func(ctx context.Context, challengeID string, requestBody []byte) (string, error) {
+		finishNewFn: func(
+			ctx context.Context,
+			challengeID string,
+			requestBody []byte,
+			issueWebSession bool,
+		) (string, *model.Session, error) {
 			if challengeID != "chal-1" {
 				t.Errorf("challengeID = %q, want chal-1", challengeID)
 			}
 			if !bytes.Contains(requestBody, []byte(`"raw":true`)) {
 				t.Errorf("requestBody did not pass through as JSON RawMessage: %s", requestBody)
 			}
-			return "user-abc", nil
+			if issueWebSession {
+				t.Error("issueWebSession = true, want false for Origin-less iOS/native request")
+			}
+			return "user-abc", nil, nil
 		},
 	}
 	h := NewPasskeyHandler(reg, &stubPasskeyAuthenticationService{})
@@ -410,13 +426,192 @@ func TestPasskeyHandler_RegistrationFinish_Success(t *testing.T) {
 	if resp.UserID != "user-abc" {
 		t.Errorf("user_id = %q, want user-abc", resp.UserID)
 	}
+	if len(w.Result().Cookies()) != 0 {
+		t.Errorf("Origin-less iOS/native response cookies = %v, want none", w.Result().Cookies())
+	}
+	if reg.lastIssueWeb {
+		t.Error("issueWebSession = true, want false for Origin-less iOS/native request")
+	}
+}
+
+func TestPasskeyHandler_RegistrationFinish_WebModeSetsCanonicalCookie(t *testing.T) {
+	// Arrange
+	const allowedOrigin = "https://app.example.com"
+	session := &model.Session{ID: "web-session-id", UserID: "user-web"}
+	reg := &stubPasskeyRegistrationService{
+		webReady: true,
+		finishNewFn: func(
+			ctx context.Context,
+			challengeID string,
+			requestBody []byte,
+			issueWebSession bool,
+		) (string, *model.Session, error) {
+			if !issueWebSession {
+				t.Error("issueWebSession = false, want true")
+			}
+			return "user-web", session, nil
+		},
+	}
+	h := NewPasskeyHandler(
+		reg,
+		&stubPasskeyAuthenticationService{},
+		WithWebRegistrationSession(allowedOrigin, "example.com", true, 7200),
+	)
+	req := newPasskeyReq(
+		"/api/passkey/registration/finish",
+		`{"challenge_id":"chal-web","credential":{"raw":true}}`,
+	)
+	req.Header.Set("Origin", allowedOrigin)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.RegistrationFinish(w, req)
+
+	// Assert
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if reg.finishNewCalled != 1 || !reg.lastIssueWeb {
+		t.Errorf("FinishRegistrationNew calls/issueWeb = %d/%v, want 1/true",
+			reg.finishNewCalled, reg.lastIssueWeb)
+	}
+	var response registrationFinishNewResponse
+	if err := json.NewDecoder(w.Result().Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.UserID != "user-web" {
+		t.Errorf("user_id = %q, want user-web", response.UserID)
+	}
+	cookies := w.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("cookies = %v, want exactly one", cookies)
+	}
+	cookie := cookies[0]
+	if cookie.Name != sessionCookieName || cookie.Value != session.ID {
+		t.Errorf("cookie Name/Value = %q/%q, want %q/%q",
+			cookie.Name, cookie.Value, sessionCookieName, session.ID)
+	}
+	if cookie.Path != "/" || cookie.Domain != "example.com" || cookie.MaxAge != 7200 ||
+		!cookie.HttpOnly || !cookie.Secure || cookie.SameSite != http.SameSiteLaxMode {
+		t.Errorf("cookie attributes mismatch: %+v", cookie)
+	}
+}
+
+func TestPasskeyHandler_RegistrationFinish_WebOriginFailClosedBeforeMutation(t *testing.T) {
+	cases := []struct {
+		name          string
+		allowedOrigin string
+		requestOrigin string
+	}{
+		{
+			name:          "許可 Origin と不一致",
+			allowedOrigin: "https://app.example.com",
+			requestOrigin: "https://evil.example",
+		},
+		{
+			name:          "許可 Origin 未設定で非空 Origin",
+			allowedOrigin: "",
+			requestOrigin: "https://app.example.com",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			reg := &stubPasskeyRegistrationService{webReady: true}
+			h := NewPasskeyHandler(
+				reg,
+				&stubPasskeyAuthenticationService{},
+				WithWebRegistrationSession(tc.allowedOrigin, "", false, 3600),
+			)
+			req := newPasskeyReq(
+				"/api/passkey/registration/finish",
+				`{"challenge_id":"chal-web","credential":{"raw":true}}`,
+			)
+			req.Header.Set("Origin", tc.requestOrigin)
+			w := httptest.NewRecorder()
+
+			// Act
+			h.RegistrationFinish(w, req)
+
+			// Assert
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403", w.Code)
+			}
+			if reg.finishNewCalled != 0 {
+				t.Errorf("FinishRegistrationNew calls = %d, want 0", reg.finishNewCalled)
+			}
+			if len(w.Result().Cookies()) != 0 {
+				t.Errorf("cookies = %v, want none", w.Result().Cookies())
+			}
+		})
+	}
+}
+
+func TestPasskeyHandler_RegistrationFinish_WebPreconditionsBeforeMutation(t *testing.T) {
+	const allowedOrigin = "https://app.example.com"
+	cases := []struct {
+		name        string
+		contentType string
+		webReady    bool
+		wantStatus  int
+	}{
+		{
+			name:        "JSON でない Content-Type",
+			contentType: "text/plain",
+			webReady:    true,
+			wantStatus:  http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "direct session 依存が未配線",
+			contentType: "application/json",
+			webReady:    false,
+			wantStatus:  http.StatusInternalServerError,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			reg := &stubPasskeyRegistrationService{webReady: tc.webReady}
+			h := NewPasskeyHandler(
+				reg,
+				&stubPasskeyAuthenticationService{},
+				WithWebRegistrationSession(allowedOrigin, "", false, 3600),
+			)
+			req := newPasskeyReq(
+				"/api/passkey/registration/finish",
+				`{"challenge_id":"chal-web","credential":{"raw":true}}`,
+			)
+			req.Header.Set("Origin", allowedOrigin)
+			req.Header.Set("Content-Type", tc.contentType)
+			w := httptest.NewRecorder()
+
+			// Act
+			h.RegistrationFinish(w, req)
+
+			// Assert
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", w.Code, tc.wantStatus)
+			}
+			if reg.finishNewCalled != 0 {
+				t.Errorf("FinishRegistrationNew calls = %d, want 0", reg.finishNewCalled)
+			}
+			if len(w.Result().Cookies()) != 0 {
+				t.Errorf("cookies = %v, want none", w.Result().Cookies())
+			}
+		})
+	}
 }
 
 // Req 1.7: ErrRegistrationFailed → 400 REGISTRATION_FAILED。
 func TestPasskeyHandler_RegistrationFinish_Rejected(t *testing.T) {
 	reg := &stubPasskeyRegistrationService{
-		finishNewFn: func(ctx context.Context, challengeID string, requestBody []byte) (string, error) {
-			return "", passkey.ErrRegistrationFailed
+		finishNewFn: func(
+			context.Context,
+			string,
+			[]byte,
+			bool,
+		) (string, *model.Session, error) {
+			return "", nil, passkey.ErrRegistrationFailed
 		},
 	}
 	h := NewPasskeyHandler(reg, &stubPasskeyAuthenticationService{})
@@ -803,6 +998,66 @@ func TestPasskeyHandler_RegistrationFinish_BodyLimitExceeded(t *testing.T) {
 	}
 	if reg.finishNewCalled != 0 {
 		t.Errorf("service should not be called on body limit exceed, called %d", reg.finishNewCalled)
+	}
+}
+
+// ------------------------------------------------------------
+// Capability（Issue #223 / task 3 / Req 5.2 / NFR 1.1）
+// ------------------------------------------------------------
+
+// Req 5.2: Capability は常に 200 で `{"available": true}` を返す（endpoint 到達 = 有効判定）。
+// handler 単体では stub 依存不要（env 参照・分岐を持たず、到達したら固定応答のみ）。
+func TestPasskeyHandler_Capability_ReturnsAvailableTrue(t *testing.T) {
+	// Arrange
+	h := NewPasskeyHandler(&stubPasskeyRegistrationService{}, &stubPasskeyAuthenticationService{})
+	req := httptest.NewRequest(http.MethodGet, "/api/passkey/capability", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Capability(w, req)
+
+	// Assert: status 200 + body {"available": true}
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Result().StatusCode)
+	}
+	var resp capabilityResponse
+	if err := json.NewDecoder(w.Result().Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.Available {
+		t.Errorf("available = %v, want true (Req 5.2: 到達 = 有効判定)", resp.Available)
+	}
+}
+
+// NFR 1.1: Capability 応答は Content-Type: application/json ヘッダを常に返す。
+func TestPasskeyHandler_Capability_SetsContentTypeApplicationJSON(t *testing.T) {
+	// Arrange
+	h := NewPasskeyHandler(&stubPasskeyRegistrationService{}, &stubPasskeyAuthenticationService{})
+	req := httptest.NewRequest(http.MethodGet, "/api/passkey/capability", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Capability(w, req)
+
+	// Assert
+	if got := w.Result().Header.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+}
+
+// Req 5.2: Capability は Cache-Control: no-store を常に返す（CDN / ブラウザにキャッシュさせない）。
+func TestPasskeyHandler_Capability_SetsCacheControlNoStore(t *testing.T) {
+	// Arrange
+	h := NewPasskeyHandler(&stubPasskeyRegistrationService{}, &stubPasskeyAuthenticationService{})
+	req := httptest.NewRequest(http.MethodGet, "/api/passkey/capability", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Capability(w, req)
+
+	// Assert
+	if got := w.Result().Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store (design.md §Capability / Req 5.2)", got)
 	}
 }
 

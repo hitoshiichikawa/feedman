@@ -29,9 +29,12 @@ import (
 // `*passkey.RegistrationService` が構造的にこれを充足する。
 type PasskeyRegistrationService interface {
 	BeginRegistrationNew(ctx context.Context, rawUsername, optionalEmail, codeChallenge string) (challengeID string, options []byte, err error)
-	FinishRegistrationNew(ctx context.Context, challengeID string, requestBody []byte) (userID string, err error)
+	FinishRegistrationNew(ctx context.Context, challengeID string, requestBody []byte, issueWebSession bool) (userID string, webSession *model.Session, err error)
 	BeginAddCredential(ctx context.Context, authenticatedUserID string) (challengeID string, options []byte, err error)
 	FinishAddCredential(ctx context.Context, authenticatedUserID, challengeID string, requestBody []byte) error
+	// WebSessionReady は Web mode の直接 session 発行に必要な依存が配線済みかを返す
+	// （Issue #231 §Delta 3 / readiness 判定）。*passkey.RegistrationService が充足する。
+	WebSessionReady() bool
 }
 
 // PasskeyAuthenticationService は PasskeyHandler が認証 2 メソッドに必要とする最小
@@ -51,16 +54,62 @@ type PasskeyAuthenticationService interface {
 type PasskeyHandler struct {
 	registration   PasskeyRegistrationService
 	authentication PasskeyAuthenticationService
+
+	// Web 直接登録 session（Issue #231 §Delta 1 / §Delta 3）用の設定。WEBAUTHN_* 設定時に
+	// wiring から Option で注入される。allowedOrigin が空のときは registration/finish は
+	// native/iOS mode（Origin 不在）と Origin 非空拒否（403）のみを扱い、Web mode は成立しない。
+	allowedOrigin string // = WebPasskeyAllowedOrigin（明示された exact Origin）
+	cookieDomain  string // session Cookie の Domain（空も有効な構成）
+	cookieSecure  bool   // session Cookie の Secure（本番 https で true）
+	cookieMaxAge  int    // session Cookie の Max-Age（= SessionMaxAge / 秒）
+}
+
+// PasskeyHandlerOption は NewPasskeyHandler の functional option（既存 NativeAuthHandler の
+// WithSession* Option idiom を踏襲 / Issue #231）。
+type PasskeyHandlerOption func(*PasskeyHandler)
+
+// WithWebRegistrationSession は Web 直接登録 session（registration/finish の Web mode）に
+// 必要な許可 Origin と Cookie 属性を注入する Option（Issue #231 §Delta 1）。
+//
+// allowedOrigin は config.WebPasskeyAllowedOrigin（strict validation 済みの exact Origin）を
+// 渡す。Cookie 属性（Domain / Secure / Max-Age）は既存 Google OAuth Callback と一致させるため
+// cfg.CookieDomain / cfg.CookieSecure / cfg.SessionMaxAge をそのまま渡す。
+func WithWebRegistrationSession(allowedOrigin, cookieDomain string, cookieSecure bool, cookieMaxAge int) PasskeyHandlerOption {
+	return func(h *PasskeyHandler) {
+		h.allowedOrigin = allowedOrigin
+		h.cookieDomain = cookieDomain
+		h.cookieSecure = cookieSecure
+		h.cookieMaxAge = cookieMaxAge
+	}
 }
 
 // NewPasskeyHandler は PasskeyHandler を生成する。両依存とも非 nil を要求する契約とし、
 // router 側は「passkey wiring 全体が組めているとき」にのみ本 handler を生成する
-// （fail-closed 縮退は wiring 層の責務）。
-func NewPasskeyHandler(reg PasskeyRegistrationService, authn PasskeyAuthenticationService) *PasskeyHandler {
-	return &PasskeyHandler{
+// （fail-closed 縮退は wiring 層の責務）。Web 直接登録 session の設定は
+// WithWebRegistrationSession Option で任意注入する（未注入なら Web mode は成立しない
+// = fail-closed）。
+func NewPasskeyHandler(reg PasskeyRegistrationService, authn PasskeyAuthenticationService, opts ...PasskeyHandlerOption) *PasskeyHandler {
+	h := &PasskeyHandler{
 		registration:   reg,
 		authentication: authn,
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
+}
+
+// webRegistrationReady は Web mode の直接 session 発行が配線済みかを返す
+// （Issue #231 §Delta 3 §capability の readiness 強化 / Blocker #3）。
+//
+// 条件: allowedOrigin != ""（明示された exact Origin）&& cookieMaxAge > 0（正の Cookie
+// MaxAge = SessionMaxAge）&& registration.WebSessionReady()（session writer / session
+// factory / txBeginner がすべて非 nil）。cookieDomain 空・cookieSecure=false は有効な構成
+// （本番 https で Secure=true、単一ドメインなら Domain 空が正）のため readiness 条件に
+// 含めない。router の capability 登録 gate と、RegistrationFinish の Web mode fail-closed に
+// 共有する。
+func (h *PasskeyHandler) webRegistrationReady() bool {
+	return h.allowedOrigin != "" && h.cookieMaxAge > 0 && h.registration.WebSessionReady()
 }
 
 // --- リクエスト / レスポンス DTO ---
@@ -111,6 +160,15 @@ type authenticationFinishResponse struct {
 	AuthCode string `json:"auth_code"`
 }
 
+// capabilityResponse は GET /api/passkey/capability の 200 応答固定 body。
+// 常に `{"available": true}` のみを返し、RP ID / origins / IOS App ID 等の env 由来値を
+// ボディ・ヘッダに一切露出させない（Issue #223 / Req 5.2 / NFR 1.1）。
+// endpoint 到達 = 有効という設計であり、fail-closed（env 未設定時に 404）は router 側の
+// `deps.PasskeyHandler != nil` gate が担う（CLAUDE.md §1 レイヤリング）。
+type capabilityResponse struct {
+	Available bool `json:"available"`
+}
+
 // --- ハンドラ本体 ---
 
 // RegistrationBegin は POST /api/passkey/registration/begin を処理する（Req 1.1, 1.4, 1.5）。
@@ -153,8 +211,36 @@ func (h *PasskeyHandler) RegistrationBegin(w http.ResponseWriter, r *http.Reques
 //   - 200: {user_id}
 //   - 400 INVALID_REQUEST:      JSON 不正・必須フィールド欠落・ボディ上限超過
 //   - 400 REGISTRATION_FAILED:  ErrRegistrationFailed に正規化された拒否（Req 1.7）
+//   - 403 FORBIDDEN_ORIGIN:     Web Origin が未設定または許可 Origin と不一致
+//   - 415 UNSUPPORTED_MEDIA_TYPE: Web mode の Content-Type が application/json でない
 //   - 500 INTERNAL_ERROR:       上記以外
 func (h *PasskeyHandler) RegistrationFinish(w http.ResponseWriter, r *http.Request) {
+	// Origin 不在は既存 iOS/native mode、非空かつ exact match のみ Web mode とする。
+	// 不一致または allowedOrigin 未設定時の非空 Origin は、challenge consume / DB mutation
+	// より前に拒否する（Issue #231 Delta 1/4）。
+	origin := r.Header.Get("Origin")
+	webMode := false
+	if origin != "" {
+		if h.allowedOrigin == "" || origin != h.allowedOrigin {
+			slog.Info("passkey registration finish rejected: disallowed origin")
+			middleware.WriteErrorResponse(w, http.StatusForbidden, forbiddenOriginError())
+			return
+		}
+		webMode = true
+		// Web mode のみ JSON Content-Type と direct-session readiness を mutation 前に検証する。
+		// iOS/native mode へこの追加制約を課さず #216 の既存契約を維持する。
+		if !hasJSONContentType(r) {
+			slog.Info("passkey registration finish rejected: unsupported content-type")
+			middleware.WriteErrorResponse(w, http.StatusUnsupportedMediaType, unsupportedMediaTypeError())
+			return
+		}
+		if !h.webRegistrationReady() {
+			slog.Error("passkey registration finish rejected: web session dependencies are not ready")
+			middleware.WriteInternalServerError(w)
+			return
+		}
+	}
+
 	var req registrationFinishRequest
 	if !decodeRequest(w, r, &req, "passkey registration finish") {
 		return
@@ -165,10 +251,29 @@ func (h *PasskeyHandler) RegistrationFinish(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	userID, err := h.registration.FinishRegistrationNew(r.Context(), req.ChallengeID, req.Credential)
+	userID, webSession, err := h.registration.FinishRegistrationNew(
+		r.Context(), req.ChallengeID, req.Credential, webMode,
+	)
 	if err != nil {
 		h.writeRegistrationError(w, err, "passkey registration finish failed")
 		return
+	}
+
+	if webMode {
+		// Web mode の service 契約では commit 後に必ず Session が返る。nil は配線・実装の
+		// 契約違反なので Cookie を発行せず 500 に倒す。
+		if webSession == nil {
+			slog.Error("passkey registration finish failed: committed web session is missing")
+			middleware.WriteInternalServerError(w)
+			return
+		}
+		http.SetCookie(w, buildSessionCookie(
+			sessionCookieName,
+			webSession.ID,
+			h.cookieDomain,
+			h.cookieSecure,
+			h.cookieMaxAge,
+		))
 	}
 
 	writeJSON(w, http.StatusOK, registrationFinishNewResponse{UserID: userID})
@@ -295,6 +400,24 @@ func (h *PasskeyHandler) AuthenticationFinish(w http.ResponseWriter, r *http.Req
 	}
 
 	writeJSON(w, http.StatusOK, authenticationFinishResponse{AuthCode: authCode})
+}
+
+// Capability は GET /api/passkey/capability を処理する（Issue #223 / Req 5.2 / NFR 1.1）。
+//
+//   - 200: {"available": true}（endpoint 到達 = パスキー有効判定）
+//
+// 常に `Content-Type: application/json` + `Cache-Control: no-store` を返し、CDN や
+// ブラウザキャッシュに載せない。RP ID / origins / IOS App ID 等の env 由来値は
+// ボディ・ヘッダに一切露出させない（NFR 1.1）。
+//
+// fail-closed は router 側の `deps.PasskeyHandler != nil` gate が担うため、handler 本体は
+// env 参照・分岐を持たず「到達したら常に available:true」を返すだけの単純実装とする。
+// PasskeyHandler が nil のとき本 endpoint は router に未登録 = 404 となり、Web は
+// 「パスキー非提供」と判定して Google 単体構成へ縮退する（NFR 2.1）。
+func (h *PasskeyHandler) Capability(w http.ResponseWriter, r *http.Request) {
+	// writeJSON は Content-Type のみ set するため、Cache-Control: no-store を追加で set。
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, capabilityResponse{Available: true})
 }
 
 // --- helpers ---

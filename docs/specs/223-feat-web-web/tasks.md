@@ -9,7 +9,7 @@ per-task ループ運用時のテスト境界: 各タスクは実装 + テスト
 同一 commit で完結させる。同 task 内テストが困難な場合のみ `_Requirements_partial:_` を
 明示する（本ドラフトでは全 task が同 task 内テスト完結）。
 
-- [ ] 1. サーバ: `SessionExchangeService` を追加し、auth_code + code_verifier を Cookie session に交換する経路を用意する
+- [x] 1. サーバ: `SessionExchangeService` を追加し、auth_code + code_verifier を Cookie session に交換する経路を用意する
   - `internal/auth/session_exchange.go` を新規追加し、`SessionCreator` interface（`Create` のみ）
     と `SessionExchangeService` を定義する（`AuthCodeConsumer` は既存 `token_service.go` の
     interface を再利用 / interface segregation / CLAUDE.md §5）
@@ -27,7 +27,7 @@ per-task ループ運用時のテスト境界: 各タスクは実装 + テスト
   - _Requirements: 3.1, 4.2, NFR 1.1_
   - _Boundary: SessionExchangeService_
 
-- [ ] 2. サーバ: `POST /api/auth/session` handler と wiring を追加する（既存 Cookie 属性と厳密一致）
+- [x] 2. サーバ: `POST /api/auth/session` handler と wiring を追加する（既存 Cookie 属性と厳密一致）
   - `internal/handler/native_auth_handler.go` の `NativeAuthHandler` に `Session(w, r)` メソッドを追加。
     `dec.DisallowUnknownFields()` で `{auth_code, code_verifier}` を厳格 decode（既存 `Token`
     流儀）。必須欠落 / JSON 不正 → 400 INVALID_REQUEST（既存 `invalidRequestError` 相当）。
@@ -58,7 +58,7 @@ per-task ループ運用時のテスト境界: 各タスクは実装 + テスト
   - _Boundary: NativeAuthHandler, Router_
   - _Depends: 1_
 
-- [ ] 3. サーバ: `GET /api/passkey/capability` handler を追加する（fail-closed で non-nil = 有効判定を Web に提供）
+- [x] 3. サーバ: `GET /api/passkey/capability` handler を追加する（fail-closed で non-nil = 有効判定を Web に提供）
   - `internal/handler/passkey_handler.go` の `PasskeyHandler` に `Capability(w, r)` メソッドを追加。
     常に `Content-Type: application/json` + `Cache-Control: no-store` で 200 `{"available":true}` を返す。
     RP ID / origins / IOS App ID 等の env 由来値を一切ボディ / ヘッダに露出させない（NFR 1.1）
@@ -74,7 +74,7 @@ per-task ループ運用時のテスト境界: 各タスクは実装 + テスト
   - _Requirements: 5.2, NFR 1.1, NFR 2.1_
   - _Boundary: PasskeyHandler, Router_
 
-- [ ] 4. Web: `web/src/lib/pkce.ts` を追加し、PKCE code_verifier / code_challenge (S256) 生成の純粋 utility を実装する
+- [x] 4. Web: `web/src/lib/pkce.ts` を追加し、PKCE code_verifier / code_challenge (S256) 生成の純粋 utility を実装する
   - `generatePkcePair(): Promise<PkcePair>` を実装。`crypto.getRandomValues(new Uint8Array(32))`
     → base64url（`+/=` 除去 / padding なし）で code_verifier（43 文字 = 32 バイト base64url 化）。
     `crypto.subtle.digest("SHA-256", verifierBytes)` → base64url で code_challenge（43 文字）
@@ -86,7 +86,7 @@ per-task ループ運用時のテスト境界: 各タスクは実装 + テスト
   - _Requirements: 2.2, 4.2, NFR 1.1_
   - _Boundary: lib/pkce_
 
-- [ ] 5. Web: `web/src/lib/webauthn.ts` を追加し、base64url ↔ ArrayBuffer 変換と WebAuthn options / response の JSON 相互変換を実装する
+- [x] 5. Web: `web/src/lib/webauthn.ts` を追加し、base64url ↔ ArrayBuffer 変換と WebAuthn options / response の JSON 相互変換を実装する
   - `base64urlToArrayBuffer(s: string): ArrayBuffer` と `arrayBufferToBase64url(buf: ArrayBuffer | Uint8Array): string`
     をブラウザ標準 `atob` / `btoa` で実装（`+/=` の base64 → base64url 変換 / padding 除去）
   - `decodeCreationOptions(raw: unknown): CredentialCreationOptions` を実装。
@@ -110,7 +110,7 @@ per-task ループ運用時のテスト境界: 各タスクは実装 + テスト
   - _Requirements: 2.2, 2.7, 4.1, 4.5, NFR 1.1_
   - _Boundary: lib/webauthn_
 
-- [ ] 6. Web: `web/src/types/passkey.ts` + `web/src/lib/passkey-capability.ts` + `web/src/hooks/use-passkey-capability.ts` を追加し、サーバ / ブラウザ合成の capability 判定を提供する
+- [x] 6. Web: `web/src/types/passkey.ts` + `web/src/lib/passkey-capability.ts` + `web/src/hooks/use-passkey-capability.ts` を追加し、サーバ / ブラウザ合成の capability 判定を提供する
   - `web/src/types/passkey.ts` を新規追加し、`RegistrationBeginRequest` /
     `PasskeyBeginResponse` / `PasskeyFinishRequest` / `RegistrationFinishResponse` /
     `AuthenticationBeginRequest` / `AuthenticationFinishResponse` / `SessionExchangeRequest` /
@@ -137,7 +137,7 @@ per-task ループ運用時のテスト境界: 各タスクは実装 + テスト
   - _Requirements: 5.1, 5.2, 5.3, 5.4, NFR 1.4_
   - _Boundary: types/passkey, lib/passkey-capability, hooks/use-passkey-capability_
 
-- [ ] 7. Web: `web/src/hooks/use-passkey-authentication.ts` を追加し、ログイン用の mutation chain（begin → get → finish → session）を提供する
+- [x] 7. Web: `web/src/hooks/use-passkey-authentication.ts` を追加し、ログイン用の mutation chain（begin → get → finish → session）を提供する
   - `usePasskeyAuthentication()` を `useMutation<void, PasskeyAuthError, void>` で実装。
     内部 chain は design.md §Flows「ログインフロー」の全 5 段:
     1. `generatePkcePair()`
@@ -167,7 +167,7 @@ per-task ループ運用時のテスト境界: 各タスクは実装 + テスト
   - _Boundary: hooks/use-passkey-authentication_
   - _Depends: 4, 5_
 
-- [ ] 8. Web: `web/src/hooks/use-passkey-registration.ts` を追加し、新規作成 mutation（登録 → 認証 → session の連鎖）を提供する
+- [x] 8. Web: `web/src/hooks/use-passkey-registration.ts` を追加し、新規作成 mutation（登録 → 認証 → session の連鎖）を提供する
   - `usePasskeyRegistration()` を `useMutation<void, PasskeyRegistrationError, {username: string}>`
     で実装。内部 chain は design.md §Flows「新規作成フロー」に準拠:
     1. `generatePkcePair()`
@@ -204,7 +204,7 @@ per-task ループ運用時のテスト境界: 各タスクは実装 + テスト
   - _Boundary: hooks/use-passkey-registration_
   - _Depends: 4, 5_
 
-- [ ] 9. Web: `web/src/components/passkey-signup-dialog.tsx` を追加し、username 入力 UI とエラー表示を提供する
+- [x] 9. Web: `web/src/components/passkey-signup-dialog.tsx` を追加し、username 入力 UI とエラー表示を提供する
   - shadcn/ui の `Dialog` / `DialogContent` / `DialogHeader` / `DialogTitle` /
     `DialogDescription` / `Input` / `Label` / `Button` を既存 `components/ui/*` から再利用
     （CLAUDE.md §4「共有 UI の再利用」）
@@ -235,7 +235,7 @@ per-task ループ運用時のテスト境界: 各タスクは実装 + テスト
   - _Boundary: components/passkey-signup-dialog_
   - _Depends: 8_
 
-- [ ] 10. Web: `web/src/components/passkey-buttons.tsx` を追加し、`web/src/components/login-page.tsx` にパスキー導線と Signup Dialog を統合する（既存 Google 導線・既存テストを完全不変）
+- [x] 10. Web: `web/src/components/passkey-buttons.tsx` を追加し、`web/src/components/login-page.tsx` にパスキー導線と Signup Dialog を統合する（既存 Google 導線・既存テストを完全不変）
   - `web/src/components/passkey-buttons.tsx` を新規追加:
     - `usePasskeyCapability()` で capability を取得。`isLoading` の間は placeholder（`null` 返却でも可）、
       `available === false` のとき `null` を返し非表示（Requirement 5.1 / 5.2）

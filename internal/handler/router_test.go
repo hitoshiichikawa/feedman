@@ -750,6 +750,7 @@ type stubPasskeyRouterRegistration struct {
 	beginAddCalled  int
 	finishAddCalled int
 	lastAuthUserID  string
+	webNotReady     bool
 }
 
 func (s *stubPasskeyRouterRegistration) BeginRegistrationNew(ctx context.Context,
@@ -760,10 +761,20 @@ func (s *stubPasskeyRouterRegistration) BeginRegistrationNew(ctx context.Context
 }
 
 func (s *stubPasskeyRouterRegistration) FinishRegistrationNew(ctx context.Context,
-	challengeID string, requestBody []byte,
-) (string, error) {
+	challengeID string, requestBody []byte, issueWebSession bool,
+) (string, *model.Session, error) {
 	s.finishNewCalled++
-	return "user-router-new", nil
+	if issueWebSession {
+		return "user-router-new", &model.Session{
+			ID:     "router-session-id",
+			UserID: "user-router-new",
+		}, nil
+	}
+	return "user-router-new", nil, nil
+}
+
+func (s *stubPasskeyRouterRegistration) WebSessionReady() bool {
+	return !s.webNotReady
 }
 
 func (s *stubPasskeyRouterRegistration) BeginAddCredential(ctx context.Context,
@@ -879,6 +890,317 @@ func TestNewRouter_Passkey_UnauthEndpoints_DoesNotRequireSession(t *testing.T) {
 	}
 	if authn.beginCalled != 1 {
 		t.Errorf("service called %d times, want 1", authn.beginCalled)
+	}
+}
+
+// newCapabilityDeps は capability の有効化条件（PasskeyHandler + NativeAuthHandler の
+// 双方が非 nil）を任意に組み合わせるための deps builder（Issue #223 review #3）。
+// withPasskey / withNativeAuth の各 bool で 4 通りの構成を作れる。
+func newCapabilityDeps(withPasskey, withNativeAuth bool) *RouterDeps {
+	const allowedOrigin = "https://app.example.com"
+	var ph *PasskeyHandler
+	if withPasskey {
+		ph = NewPasskeyHandler(
+			&stubPasskeyRouterRegistration{},
+			&stubPasskeyRouterAuthentication{},
+			WithWebRegistrationSession(allowedOrigin, "", true, 86400),
+		)
+	}
+	deps := newPasskeyRouterDeps(ph, nil)
+	deps.WebPasskeyAllowedOrigin = allowedOrigin
+	if withNativeAuth {
+		deps.NativeAuthHandler = NewNativeAuthHandler(
+			&alwaysSucceedExchangeService{},
+			WithSessionExchange(&alwaysSucceedSessionExchange{}, "example.com", true, 86400),
+			WithSessionAllowedOrigin(allowedOrigin),
+		)
+	}
+	return deps
+}
+
+// TestNewRouter_PasskeyCapability_RegisteredWhenBothHandlersInjected は PasskeyHandler と
+// NativeAuthHandler の **双方** が注入されたとき GET /api/passkey/capability がセッション無しで
+// 到達し、200 + JSON `{"available": true}` を返すことを検証する（Issue #223 / task 3 / Req 5.2 /
+// review #3: capability は Web フロー全体が有効なときのみ 200）。
+func TestNewRouter_PasskeyCapability_RegisteredWhenBothHandlersInjected(t *testing.T) {
+	// Arrange: passkey + native auth（session 交換）双方あり
+	router := NewRouter(newCapabilityDeps(true, true))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/passkey/capability", nil)
+	// Cookie / Bearer 無し（未認証グループ配下）
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: 200 + body / header
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 (両 handler 到達 / Req 5.2)", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	if !strings.Contains(w.Body.String(), `"available":true`) {
+		t.Errorf("body = %q, want to contain {\"available\":true}", w.Body.String())
+	}
+}
+
+// TestNewRouter_PasskeyCapability_GatingMatrix は capability の有効化条件が session 交換
+// endpoint（/api/auth/session = NativeAuthHandler）と統一されていることを、構成の 4 通り
+// 組合せで検証する（Issue #223 review #3: passkey 設定あり・NATIVE_AUTH_JWT_SECRET なしで
+// capability だけ 200 になり session が 404 になる不整合を防ぐ）。
+//
+// capability と /api/auth/session が **同じ 200/404** を返す（両方 200 か両方 404）ことを
+// 同一 router で突き合わせる。
+func TestNewRouter_PasskeyCapability_GatingMatrix(t *testing.T) {
+	cases := []struct {
+		name        string
+		withPasskey bool
+		withNative  bool
+		wantStatus  int
+	}{
+		{"passkey+native 双方あり → 200", true, true, http.StatusOK},
+		{"passkey あり native なし → 404（review #3 の修正対象）", true, false, http.StatusNotFound},
+		{"passkey なし native あり → 404", false, true, http.StatusNotFound},
+		{"双方なし → 404", false, false, http.StatusNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			router := NewRouter(newCapabilityDeps(tc.withPasskey, tc.withNative))
+
+			// Act: capability
+			capReq := httptest.NewRequest(http.MethodGet, "/api/passkey/capability", nil)
+			capW := httptest.NewRecorder()
+			router.ServeHTTP(capW, capReq)
+
+			// Act: session 交換 endpoint（Content-Type: application/json 必須）
+			sessBody := `{"auth_code":"a","code_verifier":"v"}`
+			sessReq := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(sessBody))
+			sessReq.Header.Set("Content-Type", "application/json")
+			sessReq.Header.Set("Origin", sessionTestAllowedOrigin)
+			sessW := httptest.NewRecorder()
+			router.ServeHTTP(sessW, sessReq)
+
+			// Assert: capability の登録有無が期待どおり
+			if got := capW.Result().StatusCode; got != tc.wantStatus {
+				t.Errorf("capability status = %d, want %d", got, tc.wantStatus)
+			}
+			// Assert (review #3 の核心): capability が 200（登録）なら /api/auth/session も
+			// 必ず到達可能でなければならない。「capability 200 なのに session 404」という
+			// 不整合（Web がパスキー導線を出すが session 合流で破綻する）を禁止する。
+			// 逆（session 登録済みだが capability 404）は許容する — passkey 未設定時は Web が
+			// パスキー導線を出さず session に到達する経路が無いため無害。
+			sessRegistered := sessW.Result().StatusCode != http.StatusNotFound
+			capRegistered := capW.Result().StatusCode != http.StatusNotFound
+			if capRegistered && !sessRegistered {
+				t.Errorf("capability が有効(200)なのに /api/auth/session が無効(404): Web フローが session 合流で破綻する不整合 (review #3)")
+			}
+		})
+	}
+}
+
+func TestNewRouter_WebPasskeyFailClosedFiveColumnMatrix(t *testing.T) {
+	const allowedOrigin = "https://app.example.com"
+	cases := []struct {
+		name string
+		w    bool
+		n    bool
+		c    bool
+		want [5]int
+	}{
+		{
+			name: "W✓ N✓ C✓",
+			w:    true,
+			n:    true,
+			c:    true,
+			want: [5]int{200, 204, 200, 200, 200},
+		},
+		{
+			name: "W✓ N✗ C✓",
+			w:    true,
+			n:    false,
+			c:    true,
+			want: [5]int{404, 404, 200, 200, 200},
+		},
+		{
+			name: "W✓ N✓ C✗",
+			w:    true,
+			n:    true,
+			c:    false,
+			want: [5]int{404, 403, 403, 200, 200},
+		},
+		{
+			name: "W✗ N✓ C✓",
+			w:    false,
+			n:    true,
+			c:    true,
+			want: [5]int{404, 204, 404, 404, 404},
+		},
+		{
+			name: "W✗ N✗ C任意",
+			w:    false,
+			n:    false,
+			c:    false,
+			want: [5]int{404, 404, 404, 404, 404},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			var passkeyHandler *PasskeyHandler
+			if tc.w {
+				origin := ""
+				if tc.c {
+					origin = allowedOrigin
+				}
+				passkeyHandler = NewPasskeyHandler(
+					&stubPasskeyRouterRegistration{},
+					&stubPasskeyRouterAuthentication{},
+					WithWebRegistrationSession(origin, "", true, 86400),
+				)
+			}
+			deps := newPasskeyRouterDeps(passkeyHandler, nil)
+			if tc.c {
+				deps.WebPasskeyAllowedOrigin = allowedOrigin
+			}
+			if tc.n {
+				origin := ""
+				if tc.c {
+					origin = allowedOrigin
+				}
+				deps.NativeAuthHandler = NewNativeAuthHandler(
+					&alwaysSucceedExchangeService{},
+					WithSessionExchange(
+						&alwaysSucceedSessionExchange{},
+						"",
+						true,
+						86400,
+					),
+					WithSessionAllowedOrigin(origin),
+				)
+			}
+			router := NewRouter(deps)
+
+			requests := []*http.Request{
+				httptest.NewRequest(http.MethodGet, "/api/passkey/capability", nil),
+				httptest.NewRequest(
+					http.MethodPost,
+					"/api/auth/session",
+					strings.NewReader(`{"auth_code":"a","code_verifier":"v"}`),
+				),
+				httptest.NewRequest(
+					http.MethodPost,
+					"/api/passkey/registration/finish",
+					strings.NewReader(`{"challenge_id":"c","credential":{"raw":true}}`),
+				),
+				httptest.NewRequest(
+					http.MethodPost,
+					"/api/passkey/registration/begin",
+					strings.NewReader(
+						`{"username":"alice","code_challenge":"E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"}`,
+					),
+				),
+				httptest.NewRequest(
+					http.MethodPost,
+					"/api/passkey/authentication/begin",
+					strings.NewReader(
+						`{"code_challenge":"E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"}`,
+					),
+				),
+			}
+			for index, request := range requests {
+				if index != 0 {
+					request.Header.Set("Content-Type", "application/json")
+				}
+				if index == 1 || index == 2 {
+					request.Header.Set("Origin", allowedOrigin)
+				}
+				recorder := httptest.NewRecorder()
+				router.ServeHTTP(recorder, request)
+				if recorder.Code != tc.want[index] {
+					t.Errorf("column %c status = %d, want %d",
+						'A'+rune(index), recorder.Code, tc.want[index])
+				}
+				if index == 2 && tc.want[index] == http.StatusOK &&
+					len(recorder.Result().Cookies()) != 1 {
+					t.Errorf("column C cookies = %v, want one", recorder.Result().Cookies())
+				}
+			}
+		})
+	}
+}
+
+func TestNewRouter_PasskeyCapability_NotRegisteredForPartialWebRegistrationWiring(t *testing.T) {
+	const allowedOrigin = "https://app.example.com"
+	cases := []struct {
+		name      string
+		reg       *stubPasskeyRouterRegistration
+		cookieAge int
+	}{
+		{
+			name:      "registration service の session 依存欠落",
+			reg:       &stubPasskeyRouterRegistration{webNotReady: true},
+			cookieAge: 86400,
+		},
+		{
+			name:      "Cookie MaxAge が非正",
+			reg:       &stubPasskeyRouterRegistration{},
+			cookieAge: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			passkeyHandler := NewPasskeyHandler(
+				tc.reg,
+				&stubPasskeyRouterAuthentication{},
+				WithWebRegistrationSession(allowedOrigin, "", false, tc.cookieAge),
+			)
+			deps := newPasskeyRouterDeps(passkeyHandler, nil)
+			deps.WebPasskeyAllowedOrigin = allowedOrigin
+			deps.NativeAuthHandler = NewNativeAuthHandler(
+				&alwaysSucceedExchangeService{},
+				WithSessionExchange(&alwaysSucceedSessionExchange{}, "", false, 86400),
+				WithSessionAllowedOrigin(allowedOrigin),
+			)
+			router := NewRouter(deps)
+			request := httptest.NewRequest(http.MethodGet, "/api/passkey/capability", nil)
+			recorder := httptest.NewRecorder()
+
+			// Act
+			router.ServeHTTP(recorder, request)
+
+			// Assert
+			if recorder.Code != http.StatusNotFound {
+				t.Errorf("capability status = %d, want 404", recorder.Code)
+			}
+		})
+	}
+}
+
+// TestNewRouter_PasskeyCapability_NotRegisteredWhenHandlerNil は PasskeyHandler が nil の
+// とき GET /api/passkey/capability がルートとして登録されず 404 が返ることを検証する
+// （Issue #223 / task 3 / Req 5.2: fail-closed = Web は「パスキー非提供」判定へ縮退 / NFR 2.1）。
+func TestNewRouter_PasskeyCapability_NotRegisteredWhenHandlerNil(t *testing.T) {
+	// Arrange: PasskeyHandler nil（NativeAuthHandler も nil）
+	deps := newPasskeyRouterDeps(nil, nil)
+	router := NewRouter(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/passkey/capability", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: fail-closed として 404
+	if got := w.Result().StatusCode; got != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 (PasskeyHandler nil で fail-closed / Req 5.2 / NFR 2.1)", got)
 	}
 }
 
@@ -1130,4 +1452,164 @@ func TestNewRouter_NativeAuthIPRateLimit_Degradations(t *testing.T) {
 			t.Errorf("service calls = %d, want 5", svc.callCount)
 		}
 	})
+}
+
+// --- Session route（Issue #223 / task 2 / design.md §Router 追加） ---
+
+// alwaysSucceedSessionExchange は SessionExchanger 最小 IF の固定成功モック（route 到達判定用）。
+type alwaysSucceedSessionExchange struct {
+	callCount int
+}
+
+func (s *alwaysSucceedSessionExchange) ExchangeAuthCodeForSession(ctx context.Context, authCode, codeVerifier string) (*model.Session, error) {
+	s.callCount++
+	return &model.Session{
+		ID:        "route-test-session-id",
+		UserID:    "user-route-test",
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+		CreatedAt: time.Now(),
+	}, nil
+}
+
+// newDepsForSessionRoute は Session route 到達確認用に NativeAuthHandler
+// （SessionExchanger 注入済み）を組み立てた最小 deps を返す。
+func newDepsForSessionRoute(sessionSvc SessionExchanger) *RouterDeps {
+	nh := NewNativeAuthHandler(
+		&alwaysSucceedExchangeService{},
+		WithSessionExchange(sessionSvc, "example.com", true, 86400),
+		WithSessionAllowedOrigin(sessionTestAllowedOrigin),
+	)
+	return newMinimalDepsForNativeAuth(nh)
+}
+
+// TestNewRouter_NativeAuthSession_RegisteredWhenHandlerInjected は NativeAuthHandler を
+// 注入したとき POST /api/auth/session がセッション無しで到達し、204 が返ることを検証する
+// （Req 3.1 / 4.2: Cookie / Bearer なしで呼び出し可能）。
+func TestNewRouter_NativeAuthSession_RegisteredWhenHandlerInjected(t *testing.T) {
+	// Arrange
+	sessionSvc := &alwaysSucceedSessionExchange{}
+	router := NewRouter(newDepsForSessionRoute(sessionSvc))
+
+	body := `{"auth_code":"plain-auth-code","code_verifier":"plain-verifier"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", sessionTestAllowedOrigin)
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("status = %d, want %d (handler 到達 / Req 3.1 / 4.2)",
+			resp.StatusCode, http.StatusNoContent)
+	}
+	if sessionSvc.callCount != 1 {
+		t.Errorf("session service called %d times, want 1 (handler に到達していない可能性)",
+			sessionSvc.callCount)
+	}
+	// Set-Cookie が発行されている（既存 OAuth Callback と同等の挙動 / Req 3.1 / 4.2）
+	var found bool
+	for _, c := range resp.Cookies() {
+		if c.Name == "session_id" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("session_id cookie was not set (Req 3.1 / 4.2: 成功時 Set-Cookie 必須)")
+	}
+}
+
+// TestNewRouter_NativeAuthSession_NotRegisteredWhenHandlerNil は NativeAuthHandler が
+// nil のとき POST /api/auth/session がルートとして登録されず 404 が返ることを検証する
+// （NFR 2.2: 署名鍵未設定環境の fail-closed / 既存 3 route と連動）。
+func TestNewRouter_NativeAuthSession_NotRegisteredWhenHandlerNil(t *testing.T) {
+	// Arrange: NativeAuthHandler nil
+	router := NewRouter(newMinimalDepsForNativeAuth(nil))
+
+	body := `{"auth_code":"a","code_verifier":"v"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", sessionTestAllowedOrigin)
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: fail-closed として 404
+	if got := w.Result().StatusCode; got != http.StatusNotFound {
+		t.Errorf("status = %d, want %d (NativeAuthHandler nil で fail-closed / NFR 2.2)",
+			got, http.StatusNotFound)
+	}
+}
+
+// TestNewRouter_SessionAndCapability_NotRegisteredWhenSessionExchangeMissing は
+// NativeAuthHandler が生成されていても SessionExchanger が未注入（WithSessionExchange なし）
+// のとき、POST /api/auth/session と GET /api/passkey/capability の双方が未登録 = 404 に
+// 倒れることを検証する（Issue #223 review #5: 部分初期化で capability だけ 200 になり
+// session が nil 依存で 500 になる不整合を fail-closed で排除する）。token 系は
+// SessionExchanger に依存しないため引き続き登録される（over-gate していないことも確認）。
+func TestNewRouter_SessionAndCapability_NotRegisteredWhenSessionExchangeMissing(t *testing.T) {
+	// Arrange: PasskeyHandler あり + NativeAuthHandler あり だが SessionExchanger 未注入
+	ph := NewPasskeyHandler(&stubPasskeyRouterRegistration{}, &stubPasskeyRouterAuthentication{})
+	deps := newPasskeyRouterDeps(ph, nil)
+	// WithSessionExchange を付けずに生成 → SessionReady() == false（部分初期化）
+	deps.NativeAuthHandler = NewNativeAuthHandler(&alwaysSucceedExchangeService{})
+	router := NewRouter(deps)
+
+	// Act & Assert: POST /api/auth/session は未登録 = 404（nil 依存 500 に到達させない）
+	sessBody := `{"auth_code":"a","code_verifier":"v"}`
+	sessReq := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(sessBody))
+	sessReq.Header.Set("Content-Type", "application/json")
+	sessW := httptest.NewRecorder()
+	router.ServeHTTP(sessW, sessReq)
+	if got := sessW.Result().StatusCode; got != http.StatusNotFound {
+		t.Errorf("POST /api/auth/session status = %d, want 404 (SessionExchanger 未注入で fail-closed / review #5)", got)
+	}
+
+	// Act & Assert: GET /api/passkey/capability も同じ readiness で未登録 = 404
+	capReq := httptest.NewRequest(http.MethodGet, "/api/passkey/capability", nil)
+	capW := httptest.NewRecorder()
+	router.ServeHTTP(capW, capReq)
+	if got := capW.Result().StatusCode; got != http.StatusNotFound {
+		t.Errorf("GET /api/passkey/capability status = %d, want 404 (session と登録有無を一致 / review #5)", got)
+	}
+
+	// Act & Assert: token 系（sessionExchange 不要）は over-gate せず引き続き到達する
+	tokReq := httptest.NewRequest(http.MethodPost, "/api/auth/token", strings.NewReader(sessBody))
+	tokReq.Header.Set("Content-Type", "application/json")
+	tokW := httptest.NewRecorder()
+	router.ServeHTTP(tokW, tokReq)
+	if got := tokW.Result().StatusCode; got == http.StatusNotFound {
+		t.Errorf("POST /api/auth/token status = 404, want 到達 (token は sessionExchange に依存しない / review #5)")
+	}
+}
+
+// TestNewRouter_NativeAuthSession_DoesNotRequireSession は注入時に Cookie 無しでも
+// 401 を返さず handler まで到達することを検証する（Req 3.1 / 4.2: Session middleware 通らない）。
+func TestNewRouter_NativeAuthSession_DoesNotRequireSession(t *testing.T) {
+	// Arrange
+	sessionSvc := &alwaysSucceedSessionExchange{}
+	router := NewRouter(newDepsForSessionRoute(sessionSvc))
+
+	body := `{"auth_code":"a","code_verifier":"v"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", sessionTestAllowedOrigin)
+	// セッション Cookie 無し
+	w := httptest.NewRecorder()
+
+	// Act
+	router.ServeHTTP(w, req)
+
+	// Assert: 401 ではなく 204（Session middleware を経由していない）
+	resp := w.Result()
+	if resp.StatusCode == http.StatusUnauthorized {
+		t.Errorf("status = 401, want non-401 (Req 3.1 / 4.2: Cookie 無しで呼び出し可能)")
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
 }

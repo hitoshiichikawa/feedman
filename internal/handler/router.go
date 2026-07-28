@@ -80,6 +80,11 @@ type RouterDeps struct {
 	// WEBAUTHN_ORIGINS 未設定環境で NativeAuthHandler と同じ縮退パターン / NFR 2.2）。
 	PasskeyHandler *PasskeyHandler
 
+	// WebPasskeyAllowedOrigin は Web パスキーが信頼する strict exact Origin。
+	// capability route は明示設定済み（非空）の場合だけ登録する。CORS ミドルウェア用の
+	// CORSAllowedOrigin とは独立し、未設定・不正値は空へ正規化済み（Issue #231 Delta 3/6）。
+	WebPasskeyAllowedOrigin string
+
 	// AASAHandler は `/.well-known/apple-app-site-association` を配信する（Issue #216 / Req 5.1〜5.4）。
 	// nil のときは AASA route を登録しない（fail-closed。WEBAUTHN_IOS_APP_ID 未設定環境で
 	// AASA だけ独立に無効化される。PasskeyHandler と独立して nil 判定される点に注意）。
@@ -232,6 +237,18 @@ func NewRouter(deps *RouterDeps) http.Handler {
 				Post("/api/auth/refresh", deps.NativeAuthHandler.Refresh)
 			r.With(unauthIPMW, middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
 				Post("/api/auth/revoke", deps.NativeAuthHandler.Revoke)
+			// Web 用 Session 交換（Issue #223 / design.md §Router 追加）:
+			// 既存 native auth 3 route と同じ横断ミドルウェア（unauthIPMW + MaxBodyBytes）を通す。
+			// NativeAuthHandler == nil の場合は本 route も未登録 = 404（fail-closed / NFR 2.2）で
+			// 既存 3 route の縮退挙動と連動する。
+			// review #5: SessionExchanger 未注入（WithSessionExchange なしで生成された handler）の
+			// ときは Session() が nil 依存で 500 になるため、readiness（SessionReady）で登録を
+			// gate し、未 ready なら未登録 = 404 に倒す（fail-closed。production wiring では常に
+			// 注入済みのため挙動不変）。
+			if deps.NativeAuthHandler.SessionReady() {
+				r.With(unauthIPMW, middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
+					Post("/api/auth/session", deps.NativeAuthHandler.Session)
+			}
 		}
 
 		// AASA（Issue #216 / Req 5.4: 認証・IP レート制限の外側）。
@@ -255,6 +272,26 @@ func NewRouter(deps *RouterDeps) http.Handler {
 				Post("/api/passkey/authentication/begin", deps.PasskeyHandler.AuthenticationBegin)
 			r.With(unauthIPMW, middleware.NewMaxBodyBytesMiddleware(middleware.DefaultMaxBodyBytes)).
 				Post("/api/passkey/authentication/finish", deps.PasskeyHandler.AuthenticationFinish)
+			// Web capability probe（Issue #223 / Req 5.2）。
+			// endpoint 到達 = 200 = 「サーバがパスキー Web フロー全体を提供している」判定に使う。
+			// Web パスキーフローは passkey ceremony（PasskeyHandler）だけでなく session 合流
+			// （POST /api/auth/session = NativeAuthHandler.Session）まで到達して初めて完結する。
+			// このため capability は PasskeyHandler と NativeAuthHandler の **双方が有効なとき**
+			// のみ 200 を返し、片方でも欠ければ登録せず 404 とする（Issue #223 review #3:
+			// capability と session の有効化条件を統一。passkey 設定あり・session 交換 endpoint
+			// 無効という不整合状態で capability だけ 200 になり Web フローが session 合流で
+			// 破綻する事故を防ぐ）。404 のとき Web は「非提供」と判定して Google 単体構成へ
+			// 縮退する（既存 passkey route と同じ fail-closed 連動 / NFR 2.1）。
+			// GET なので body 上限 middleware（MaxBodyBytes）は不要。unauthIPMW のみ通す。
+			// review #5: session 交換 endpoint と同じ readiness（SessionReady）で gate し、
+			// 「NativeAuthHandler はあるが SessionExchanger 未注入」の部分初期化でも capability と
+			// session の登録有無を厳密に一致させる（capability 200 / session 404 の不整合を排除）。
+			if deps.NativeAuthHandler != nil &&
+				deps.NativeAuthHandler.SessionReady() &&
+				deps.WebPasskeyAllowedOrigin != "" &&
+				deps.PasskeyHandler.webRegistrationReady() {
+				r.With(unauthIPMW).Get("/api/passkey/capability", deps.PasskeyHandler.Capability)
+			}
 		}
 	})
 

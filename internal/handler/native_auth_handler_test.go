@@ -9,8 +9,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hitoshi/feedman/internal/auth"
+	"github.com/hitoshi/feedman/internal/model"
 )
 
 // mockTokenExchangeService は TokenExchangeService 最小 IF の record-and-return モック。
@@ -724,5 +726,492 @@ func TestNativeAuthHandler_Revoke_InternalError(t *testing.T) {
 	// 内部詳細を反射しない（NFR 1.3）
 	if msg, _ := body["message"].(string); strings.Contains(msg, "db connection refused") {
 		t.Errorf("message %q leaks internal error detail (NFR 1.3)", msg)
+	}
+}
+
+// --- Session handler のテスト（Issue #223 / task 2 / design.md §NativeAuthHandler.Session） ---
+
+// mockSessionExchangeService は SessionExchanger 最小 IF の record-and-return モック。
+// 既存 mockTokenExchangeService と同 idiom（testability 優先）。
+type mockSessionExchangeService struct {
+	exchangeFn   func(ctx context.Context, authCode, codeVerifier string) (*model.Session, error)
+	callCount    int
+	lastAuthCode string
+	lastVerifier string
+}
+
+func (m *mockSessionExchangeService) ExchangeAuthCodeForSession(ctx context.Context, authCode, codeVerifier string) (*model.Session, error) {
+	m.callCount++
+	m.lastAuthCode = authCode
+	m.lastVerifier = codeVerifier
+	if m.exchangeFn != nil {
+		return m.exchangeFn(ctx, authCode, codeVerifier)
+	}
+	return nil, fmt.Errorf("not configured")
+}
+
+// newSessionRequest は Session handler 単体テスト用の JSON POST リクエストを生成する。
+const sessionTestAllowedOrigin = "https://feedman.example"
+
+func newSessionRequest(body string) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", sessionTestAllowedOrigin)
+	return req
+}
+
+// newSessionHandlerWith は SessionExchanger と Cookie 設定値を注入した NativeAuthHandler を返す。
+// 既存 Token / Refresh / Revoke tests への影響を避けるため WithSessionExchange オプションを用いる。
+func newSessionHandlerWith(exchange SessionExchanger, cookieDomain string, cookieSecure bool, sessionMaxAge int) *NativeAuthHandler {
+	// TokenExchangeService は Session 経路で不要のため空 mock を渡す（既存パターン踏襲）。
+	return NewNativeAuthHandler(
+		&mockTokenExchangeService{},
+		WithSessionExchange(exchange, cookieDomain, cookieSecure, sessionMaxAge),
+		WithSessionAllowedOrigin(sessionTestAllowedOrigin),
+	)
+}
+
+// TestNativeAuthHandler_Session_Success は service が成功した場合の 204 応答と
+// Set-Cookie 属性が既存 Google OAuth Callback（AuthHandler.Callback 手順 5）と完全一致する
+// ことを検証する（Req 3.1 / 4.2 / design.md §NativeAuthHandler.Session）。
+func TestNativeAuthHandler_Session_Success(t *testing.T) {
+	// Arrange
+	const (
+		cookieDomain  = "feedman.example.com"
+		cookieSecure  = true
+		sessionMaxAge = 86400
+	)
+	svc := &mockSessionExchangeService{
+		exchangeFn: func(ctx context.Context, authCode, codeVerifier string) (*model.Session, error) {
+			return &model.Session{
+				ID:        "new-session-id",
+				UserID:    "user-123",
+				ExpiresAt: time.Now().Add(24 * time.Hour),
+				CreatedAt: time.Now(),
+			}, nil
+		},
+	}
+	h := newSessionHandlerWith(svc, cookieDomain, cookieSecure, sessionMaxAge)
+	req := newSessionRequest(`{"auth_code":"plain-auth-code","code_verifier":"plain-verifier"}`)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Session(w, req)
+
+	// Assert: 204 / ボディなし
+	resp := w.Result()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d (Req 3.1 / 4.2: 成功時 204)", resp.StatusCode, http.StatusNoContent)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("body = %q, want empty (204 はボディなし)", w.Body.String())
+	}
+
+	// Assert: Set-Cookie 属性が既存 Google OAuth Callback（auth_handler.go 手順 5）と一致
+	var sessionCookie *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == "session_id" {
+			sessionCookie = c
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("expected session_id cookie to be set")
+	}
+	if sessionCookie.Value != "new-session-id" {
+		t.Errorf("cookie Value = %q, want %q", sessionCookie.Value, "new-session-id")
+	}
+	if sessionCookie.Path != "/" {
+		t.Errorf("cookie Path = %q, want %q", sessionCookie.Path, "/")
+	}
+	if sessionCookie.Domain != cookieDomain {
+		t.Errorf("cookie Domain = %q, want %q", sessionCookie.Domain, cookieDomain)
+	}
+	if sessionCookie.MaxAge != sessionMaxAge {
+		t.Errorf("cookie MaxAge = %d, want %d", sessionCookie.MaxAge, sessionMaxAge)
+	}
+	if !sessionCookie.HttpOnly {
+		t.Error("cookie should be HttpOnly (既存 OAuth Callback 準拠)")
+	}
+	if !sessionCookie.Secure {
+		t.Error("cookie should be Secure when cookieSecure=true (既存 OAuth Callback 準拠)")
+	}
+	if sessionCookie.SameSite != http.SameSiteLaxMode {
+		t.Errorf("cookie SameSite = %v, want %v (既存 OAuth Callback 準拠)",
+			sessionCookie.SameSite, http.SameSiteLaxMode)
+	}
+
+	// Assert: service が plain な値で呼ばれた（hash 化は service 内部で行う）
+	if svc.callCount != 1 {
+		t.Errorf("service called %d times, want 1", svc.callCount)
+	}
+	if svc.lastAuthCode != "plain-auth-code" {
+		t.Errorf("service.lastAuthCode = %q, want %q", svc.lastAuthCode, "plain-auth-code")
+	}
+	if svc.lastVerifier != "plain-verifier" {
+		t.Errorf("service.lastVerifier = %q, want %q", svc.lastVerifier, "plain-verifier")
+	}
+}
+
+// TestNativeAuthHandler_Session_InvalidRequest は JSON 不正・必須フィールド欠落で
+// 400 INVALID_REQUEST を返すことを検証する（design.md §NativeAuthHandler.Session）。
+func TestNativeAuthHandler_Session_InvalidRequest(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "壊れた JSON で 400 INVALID_REQUEST", body: `{not valid json`},
+		{name: "空ボディで 400 INVALID_REQUEST", body: ``},
+		{name: "auth_code 欠落のとき 400 INVALID_REQUEST", body: `{"code_verifier":"v"}`},
+		{name: "code_verifier 欠落のとき 400 INVALID_REQUEST", body: `{"auth_code":"a"}`},
+		{name: "両方欠落のとき 400 INVALID_REQUEST", body: `{}`},
+		{name: "auth_code が空文字のとき 400 INVALID_REQUEST", body: `{"auth_code":"","code_verifier":"v"}`},
+		{name: "code_verifier が空文字のとき 400 INVALID_REQUEST", body: `{"auth_code":"a","code_verifier":""}`},
+		{name: "未知フィールドで 400 INVALID_REQUEST", body: `{"auth_code":"a","code_verifier":"v","extra":"x"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			svc := &mockSessionExchangeService{}
+			h := newSessionHandlerWith(svc, "", false, 86400)
+			req := newSessionRequest(tc.body)
+			w := httptest.NewRecorder()
+
+			// Act
+			h.Session(w, req)
+
+			// Assert
+			resp := w.Result()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d (400 INVALID_REQUEST)", resp.StatusCode, http.StatusBadRequest)
+			}
+			var body map[string]any
+			_ = json.NewDecoder(resp.Body).Decode(&body)
+			if body["code"] != "INVALID_REQUEST" {
+				t.Errorf("code = %v, want %q", body["code"], "INVALID_REQUEST")
+			}
+			if body["category"] != "validation" {
+				t.Errorf("category = %v, want %q", body["category"], "validation")
+			}
+			// service には到達しない（入力不正で早期 return / NFR 1.1: 入力を反射しない）
+			if svc.callCount != 0 {
+				t.Errorf("service called %d times, want 0 (入力不正は service 到達前に拒否)", svc.callCount)
+			}
+			// Set-Cookie は発行されない
+			for _, c := range resp.Cookies() {
+				if c.Name == "session_id" {
+					t.Errorf("session_id cookie should not be set on 400 (got %q)", c.Value)
+				}
+			}
+		})
+	}
+}
+
+// TestNativeAuthHandler_Session_InvalidGrant は service が ErrInvalidGrant を返したとき
+// 400 INVALID_GRANT 応答を返すことを検証する（design.md §NativeAuthHandler.Session /
+// Req 3.4: 拒否理由の内部区別を反射しない / NFR 1.1）。
+func TestNativeAuthHandler_Session_InvalidGrant(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{name: "sentinel そのものを返したとき 400 INVALID_GRANT", err: auth.ErrInvalidGrant},
+		{
+			name: "ErrInvalidGrant を wrap したエラーでも 400 INVALID_GRANT",
+			err:  fmt.Errorf("verifier mismatch: %w", auth.ErrInvalidGrant),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			svc := &mockSessionExchangeService{
+				exchangeFn: func(ctx context.Context, authCode, codeVerifier string) (*model.Session, error) {
+					return nil, tc.err
+				},
+			}
+			h := newSessionHandlerWith(svc, "feedman.example.com", true, 86400)
+			req := newSessionRequest(`{"auth_code":"a","code_verifier":"v"}`)
+			w := httptest.NewRecorder()
+
+			// Act
+			h.Session(w, req)
+
+			// Assert
+			resp := w.Result()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+			}
+			var body map[string]any
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			if body["code"] != "INVALID_GRANT" {
+				t.Errorf("code = %v, want %q", body["code"], "INVALID_GRANT")
+			}
+			if body["category"] != "auth" {
+				t.Errorf("category = %v, want %q", body["category"], "auth")
+			}
+			// 応答に詳細な拒否理由が反射されていない（Req 3.4 / NFR 1.1）
+			if msg, _ := body["message"].(string); strings.Contains(msg, "verifier") ||
+				strings.Contains(msg, "expired") || strings.Contains(msg, "used") ||
+				strings.Contains(msg, "mismatch") {
+				t.Errorf("message %q must not differentiate rejection reasons (Req 3.4)", msg)
+			}
+			// Set-Cookie は発行されない（拒否時に session を発行しない）
+			for _, c := range resp.Cookies() {
+				if c.Name == "session_id" {
+					t.Errorf("session_id cookie should not be set on 400 INVALID_GRANT (got %q)", c.Value)
+				}
+			}
+		})
+	}
+}
+
+// TestNativeAuthHandler_Session_InternalError は service が ErrInvalidGrant 以外の infra
+// エラーを返したとき 500 INTERNAL_ERROR を返し、内部詳細を反射しないことを検証する
+// （NFR 1.1）。
+func TestNativeAuthHandler_Session_InternalError(t *testing.T) {
+	// Arrange
+	svc := &mockSessionExchangeService{
+		exchangeFn: func(ctx context.Context, authCode, codeVerifier string) (*model.Session, error) {
+			return nil, errors.New("db connection refused")
+		},
+	}
+	h := newSessionHandlerWith(svc, "", false, 86400)
+	req := newSessionRequest(`{"auth_code":"a","code_verifier":"v"}`)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Session(w, req)
+
+	// Assert
+	resp := w.Result()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusInternalServerError)
+	}
+	var body map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if body["code"] != "INTERNAL_ERROR" {
+		t.Errorf("code = %v, want %q", body["code"], "INTERNAL_ERROR")
+	}
+	// 内部詳細を反射しない（NFR 1.1）
+	if msg, _ := body["message"].(string); strings.Contains(msg, "db connection refused") {
+		t.Errorf("message %q leaks internal error detail (NFR 1.1)", msg)
+	}
+	// Set-Cookie は発行されない
+	for _, c := range resp.Cookies() {
+		if c.Name == "session_id" {
+			t.Errorf("session_id cookie should not be set on 500 (got %q)", c.Value)
+		}
+	}
+}
+
+// --- Session handler の CSRF 対策（Issue #223 review #2: Content-Type / Origin 検証） ---
+
+// newSessionSuccessSvc は成功固定の SessionExchanger を返す（CSRF テストの Arrange 共通化）。
+func newSessionSuccessSvc() *mockSessionExchangeService {
+	return &mockSessionExchangeService{
+		exchangeFn: func(ctx context.Context, authCode, codeVerifier string) (*model.Session, error) {
+			return &model.Session{
+				ID:        "csrf-session-id",
+				UserID:    "user-csrf",
+				ExpiresAt: time.Now().Add(24 * time.Hour),
+				CreatedAt: time.Now(),
+			}, nil
+		},
+	}
+}
+
+// newSessionHandlerWithOrigin は allowedOrigin を注入した Session handler を返す。
+func newSessionHandlerWithOrigin(exchange SessionExchanger, allowedOrigin string) *NativeAuthHandler {
+	return NewNativeAuthHandler(
+		&mockTokenExchangeService{},
+		WithSessionExchange(exchange, "example.com", true, 86400),
+		WithSessionAllowedOrigin(allowedOrigin),
+	)
+}
+
+// TestNativeAuthHandler_Session_RejectsNonJSONContentType は Content-Type が
+// application/json でない POST を 415 UNSUPPORTED_MEDIA_TYPE で弾き、service に到達せず
+// Cookie も発行しないことを検証する（Issue #223 review #2: login CSRF 対策 / form ベース
+// simple request の遮断）。
+func TestNativeAuthHandler_Session_RejectsNonJSONContentType(t *testing.T) {
+	cases := []struct {
+		name        string
+		contentType string
+	}{
+		{name: "text/plain（form ベース CSRF の simple request）", contentType: "text/plain"},
+		{name: "application/x-www-form-urlencoded", contentType: "application/x-www-form-urlencoded"},
+		{name: "multipart/form-data", contentType: "multipart/form-data; boundary=x"},
+		{name: "Content-Type ヘッダ欠落", contentType: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			svc := newSessionSuccessSvc()
+			h := newSessionHandlerWithOrigin(svc, "https://feedman.example")
+			req := httptest.NewRequest(http.MethodPost, "/api/auth/session",
+				strings.NewReader(`{"auth_code":"a","code_verifier":"v"}`))
+			if tc.contentType != "" {
+				req.Header.Set("Content-Type", tc.contentType)
+			}
+			w := httptest.NewRecorder()
+
+			// Act
+			h.Session(w, req)
+
+			// Assert: 415 / service 未到達 / Cookie 未発行
+			resp := w.Result()
+			if resp.StatusCode != http.StatusUnsupportedMediaType {
+				t.Fatalf("status = %d, want %d (415 UNSUPPORTED_MEDIA_TYPE)",
+					resp.StatusCode, http.StatusUnsupportedMediaType)
+			}
+			var body map[string]any
+			_ = json.NewDecoder(resp.Body).Decode(&body)
+			if body["code"] != "UNSUPPORTED_MEDIA_TYPE" {
+				t.Errorf("code = %v, want %q", body["code"], "UNSUPPORTED_MEDIA_TYPE")
+			}
+			if svc.callCount != 0 {
+				t.Errorf("service called %d times, want 0 (Content-Type 不正は service 到達前に拒否)", svc.callCount)
+			}
+			for _, c := range resp.Cookies() {
+				if c.Name == "session_id" {
+					t.Errorf("session_id cookie should not be set on 415 (got %q)", c.Value)
+				}
+			}
+		})
+	}
+}
+
+// TestNativeAuthHandler_Session_ContentTypeWithCharsetAccepted は
+// application/json にパラメータ（charset）が付いていても受理することを検証する
+// （実ブラウザは `application/json; charset=utf-8` を送る場合がある）。
+func TestNativeAuthHandler_Session_ContentTypeWithCharsetAccepted(t *testing.T) {
+	// Arrange
+	svc := newSessionSuccessSvc()
+	h := newSessionHandlerWithOrigin(svc, sessionTestAllowedOrigin)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/session",
+		strings.NewReader(`{"auth_code":"a","code_verifier":"v"}`))
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Origin", sessionTestAllowedOrigin)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Session(w, req)
+
+	// Assert: 204 成功
+	if got := w.Result().StatusCode; got != http.StatusNoContent {
+		t.Errorf("status = %d, want 204 (charset 付き application/json は受理)", got)
+	}
+	if svc.callCount != 1 {
+		t.Errorf("service called %d times, want 1", svc.callCount)
+	}
+}
+
+// TestNativeAuthHandler_Session_RejectsDisallowedOrigin は Origin ヘッダが許可オリジンと
+// 一致しない cross-site POST を 403 FORBIDDEN_ORIGIN で弾き、service に到達せず Cookie も
+// 発行しないことを検証する（Issue #223 review #2: login CSRF 対策）。
+func TestNativeAuthHandler_Session_RejectsDisallowedOrigin(t *testing.T) {
+	// Arrange
+	svc := newSessionSuccessSvc()
+	h := newSessionHandlerWithOrigin(svc, "https://feedman.example")
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/session",
+		strings.NewReader(`{"auth_code":"a","code_verifier":"v"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://attacker.example")
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Session(w, req)
+
+	// Assert: 403 / service 未到達 / Cookie 未発行 / origin 生値を反射しない
+	resp := w.Result()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d (403 FORBIDDEN_ORIGIN)", resp.StatusCode, http.StatusForbidden)
+	}
+	var body map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if body["code"] != "FORBIDDEN_ORIGIN" {
+		t.Errorf("code = %v, want %q", body["code"], "FORBIDDEN_ORIGIN")
+	}
+	if msg, _ := body["message"].(string); strings.Contains(msg, "attacker.example") {
+		t.Errorf("message %q must not reflect the origin value (NFR 1.1)", msg)
+	}
+	if svc.callCount != 0 {
+		t.Errorf("service called %d times, want 0 (不許可 Origin は service 到達前に拒否)", svc.callCount)
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == "session_id" {
+			t.Errorf("session_id cookie should not be set on 403 (got %q)", c.Value)
+		}
+	}
+}
+
+// TestNativeAuthHandler_Session_OriginFailClosed は exact match だけを許可し、Origin 不在・
+// allowedOrigin 未設定を mutation 前に 403 へ倒すことを検証する（Issue #231 Delta 4）。
+func TestNativeAuthHandler_Session_OriginFailClosed(t *testing.T) {
+	cases := []struct {
+		name          string
+		allowedOrigin string
+		reqOrigin     string
+		wantStatus    int
+		wantCalls     int
+	}{
+		{
+			name:          "Origin が許可オリジンと一致",
+			allowedOrigin: sessionTestAllowedOrigin,
+			reqOrigin:     sessionTestAllowedOrigin,
+			wantStatus:    http.StatusNoContent,
+			wantCalls:     1,
+		},
+		{
+			name:          "Origin 不在は fail-closed",
+			allowedOrigin: sessionTestAllowedOrigin,
+			reqOrigin:     "",
+			wantStatus:    http.StatusForbidden,
+			wantCalls:     0,
+		},
+		{
+			name:          "allowedOrigin 未設定は fail-closed",
+			allowedOrigin: "",
+			reqOrigin:     sessionTestAllowedOrigin,
+			wantStatus:    http.StatusForbidden,
+			wantCalls:     0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			svc := newSessionSuccessSvc()
+			h := newSessionHandlerWithOrigin(svc, tc.allowedOrigin)
+			req := httptest.NewRequest(http.MethodPost, "/api/auth/session",
+				strings.NewReader(`{"auth_code":"a","code_verifier":"v"}`))
+			req.Header.Set("Content-Type", "application/json")
+			if tc.reqOrigin != "" {
+				req.Header.Set("Origin", tc.reqOrigin)
+			}
+			w := httptest.NewRecorder()
+
+			// Act
+			h.Session(w, req)
+
+			// Assert
+			resp := w.Result()
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.wantStatus)
+			}
+			if svc.callCount != tc.wantCalls {
+				t.Errorf("service called %d times, want %d", svc.callCount, tc.wantCalls)
+			}
+			var found bool
+			for _, c := range resp.Cookies() {
+				if c.Name == "session_id" {
+					found = true
+				}
+			}
+			if (tc.wantStatus == http.StatusNoContent) != found {
+				t.Errorf("session cookie presence = %v, want %v",
+					found, tc.wantStatus == http.StatusNoContent)
+			}
+		})
 	}
 }

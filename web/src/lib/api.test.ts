@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { createApiClient, apiClient } from "./api";
+import {
+  createApiClient,
+  apiClient,
+  RequestPreparationError,
+  ResponseParseError,
+} from "./api";
 
 // グローバルfetchのモック
 const mockFetch = vi.fn();
@@ -229,6 +234,65 @@ describe("apiClient", () => {
     });
   });
 
+  describe("ボディなし成功応答（204 / 205）", () => {
+    it("204 No Content のとき json() を呼ばず undefined を返すこと（POST /api/auth/session の契約）", async () => {
+      // Arrange: 204 は空ボディのため json() は呼ばれてはならない
+      // （呼ぶと空ボディで SyntaxError になり正常系 chain が失敗する）
+      const jsonSpy = vi.fn(async () => {
+        throw new SyntaxError("Unexpected end of JSON input");
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 204,
+        json: jsonSpy,
+      });
+
+      // Act
+      const result = await apiClient.post("/api/auth/session", {
+        auth_code: "a",
+        code_verifier: "v",
+      });
+
+      // Assert: undefined を返し、json() は一度も呼ばれない
+      expect(result).toBeUndefined();
+      expect(jsonSpy).not.toHaveBeenCalled();
+    });
+
+    it("205 Reset Content でも json() を呼ばず undefined を返すこと", async () => {
+      // Arrange
+      const jsonSpy = vi.fn(async () => {
+        throw new SyntaxError("Unexpected end of JSON input");
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 205,
+        json: jsonSpy,
+      });
+
+      // Act
+      const result = await apiClient.post("/api/some-action");
+
+      // Assert
+      expect(result).toBeUndefined();
+      expect(jsonSpy).not.toHaveBeenCalled();
+    });
+
+    it("200 でボディがあるときは従来どおり json() を返すこと（204 分岐が正常系を壊さない）", async () => {
+      // Arrange
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true }),
+      });
+
+      // Act
+      const result = await apiClient.get("/api/feeds");
+
+      // Assert
+      expect(result).toEqual({ ok: true });
+    });
+  });
+
   describe("エラーハンドリング", () => {
     it("レスポンスが非OKの場合にエラーをスローすること", async () => {
       mockFetch.mockResolvedValueOnce({
@@ -266,6 +330,70 @@ describe("apiClient", () => {
         expect(apiError.status).toBe(404);
         expect(apiError.body).toEqual(errorBody);
       }
+    });
+
+    it.each([
+      ["body 欠損", undefined],
+      [
+        "途中切断",
+        vi.fn().mockRejectedValue(new TypeError("connection terminated")),
+      ],
+      [
+        "parse 不能",
+        vi.fn().mockRejectedValue(new SyntaxError("invalid JSON")),
+      ],
+    ])(
+      "2xx response の %s は status を持つ ResponseParseError になること",
+      async (_label, json) => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json,
+        });
+
+        const error = await createApiClient()
+          .get("/api/feeds")
+          .catch((caught: unknown) => caught);
+
+        expect(error).toBeInstanceOf(ResponseParseError);
+        expect((error as ResponseParseError).status).toBe(200);
+      },
+    );
+
+    it("循環参照の JSON.stringify 失敗は dispatch 前の RequestPreparationError になること", async () => {
+      const circular: { self?: unknown } = {};
+      circular.self = circular;
+
+      await expect(
+        createApiClient().post("/api/feeds", circular),
+      ).rejects.toBeInstanceOf(RequestPreparationError);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("URL 組み立て失敗は dispatch 前の RequestPreparationError になること", async () => {
+      const invalidUrl = {
+        [Symbol.toPrimitive]() {
+          throw new TypeError("cannot convert URL");
+        },
+      } as unknown as string;
+
+      await expect(
+        createApiClient().get(invalidUrl),
+      ).rejects.toBeInstanceOf(RequestPreparationError);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("fetch reject の plain TypeError はラップせず透過すること", async () => {
+      const fetchError = new TypeError("Failed to fetch");
+      mockFetch.mockRejectedValueOnce(fetchError);
+
+      const error = await createApiClient()
+        .get("/api/feeds")
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBe(fetchError);
+      expect(error).not.toBeInstanceOf(RequestPreparationError);
+      expect(error).not.toBeInstanceOf(ResponseParseError);
     });
   });
 });

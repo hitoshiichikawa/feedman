@@ -102,6 +102,16 @@ type RegistrationTxBeginner interface {
 	BeginTx(ctx context.Context) (RegistrationTx, error)
 }
 
+// SessionWriter は RegistrationService が Web 直接登録 session の tx 内 INSERT に必要とする
+// 最小 interface である（Issue #231 §Delta 1 / interface segregation / CLAUDE.md §5）。
+//
+// repository.PostgresSessionRepo の CreateExec が構造的にこれを充足する。#230 既存の
+// UserWriter / PasskeyCredentialWriter / RegistrationTxBeginner は本 Issue で再宣言しない。
+type SessionWriter interface {
+	// CreateExec は指定の共有トランザクション（repository.DBTX）上で session 行を INSERT する。
+	CreateExec(ctx context.Context, q repository.DBTX, s *model.Session) error
+}
+
 // challengeStore は RegistrationService が challenge lifecycle に必要とする最小
 // interface である（interface segregation）。ChallengeStore（本 package）が
 // 構造的にこれを充足するため wiring 時に具体型をそのまま渡せる。
@@ -129,6 +139,11 @@ type RegistrationService struct {
 	credentials PasskeyCredentialWriter
 	txBeginner  RegistrationTxBeginner
 	now         func() time.Time
+
+	// Web 直接登録 session（Issue #231 §Delta 1）用の依存。WEBAUTHN_* 設定時に wiring から
+	// 非 nil で注入される。auth_code 関連依存は追加しない（direct session は auth_code を介さない）。
+	sessions       SessionWriter           // session 行 INSERT（tx 変種 CreateExec）
+	sessionFactory auth.SessionFactoryFunc // ID + now + CreatedAt + ExpiresAt を一貫生成（共有 factory）
 }
 
 // NewRegistrationService は RegistrationService を生成する。
@@ -137,25 +152,40 @@ type RegistrationService struct {
 // txBeginner は新規登録 finish で users / passkey_credentials を 1 tx で INSERT する
 // ために必須（Issue #230 / Req 1.1〜1.6 / NFR 1.1）。nil を渡すことは許容せず、
 // wiring 側で常に非 nil を注入する契約とする。
+//
+// sessions / sessionFactory は Web 直接登録 session（Issue #231）用で、WEBAUTHN_* 設定時に
+// 非 nil で注入される。iOS 専用構成でも本引数は wiring から渡される（Web mode は
+// issueWebSession=false で使わない）。
 func NewRegistrationService(
 	adapter WebAuthnAdapter,
 	challenges challengeStore,
 	users UserWriter,
 	credentials PasskeyCredentialWriter,
 	txBeginner RegistrationTxBeginner,
+	sessions SessionWriter,
+	sessionFactory auth.SessionFactoryFunc,
 	now func() time.Time,
 ) *RegistrationService {
 	if now == nil {
 		now = time.Now
 	}
 	return &RegistrationService{
-		adapter:     adapter,
-		challenges:  challenges,
-		users:       users,
-		credentials: credentials,
-		txBeginner:  txBeginner,
-		now:         now,
+		adapter:        adapter,
+		challenges:     challenges,
+		users:          users,
+		credentials:    credentials,
+		txBeginner:     txBeginner,
+		now:            now,
+		sessions:       sessions,
+		sessionFactory: sessionFactory,
 	}
+}
+
+// WebSessionReady は Web mode の直接 session 発行に必要な依存（session writer /
+// session factory / txBeginner）がすべて配線済みかを返す（Issue #231 §Delta 1 /
+// defense-in-depth）。handler の webRegistrationReady() readiness 判定に用いる。
+func (s *RegistrationService) WebSessionReady() bool {
+	return s.sessions != nil && s.sessionFactory != nil && s.txBeginner != nil
 }
 
 // registrationUser は WebAuthnUser（= webauthn.User）を実装するための最小構造体である。
@@ -290,22 +320,23 @@ func (s *RegistrationService) FinishRegistrationNew(
 	ctx context.Context,
 	challengeID string,
 	requestBody []byte,
-) (string, error) {
+	issueWebSession bool,
+) (userID string, webSession *model.Session, err error) {
 	ch, err := s.challenges.Consume(ctx, challengeID, model.PasskeyChallengeKindRegistrationNew)
 	if err != nil {
 		if errors.Is(err, ErrChallengeNotUsable) {
 			s.logRejection("passkey registration finish (new) rejected: challenge not usable",
 				shortID(challengeID))
-			return "", ErrRegistrationFailed
+			return "", nil, ErrRegistrationFailed
 		}
-		return "", fmt.Errorf("failed to consume registration challenge: %w", err)
+		return "", nil, fmt.Errorf("failed to consume registration challenge: %w", err)
 	}
 	if ch.PendingUsername == nil {
 		// begin 段階で pendingUsername を必ず保存する契約（BeginRegistrationNew）。
 		// missing は自陣契約違反だが uniform 拒否側に倒す。
 		s.logRejection("passkey registration finish (new) rejected: malformed challenge",
 			shortID(challengeID))
-		return "", ErrRegistrationFailed
+		return "", nil, ErrRegistrationFailed
 	}
 	// 仮 UUID（begin 時の WebAuthn user handle）は challenge.user_id 列ではなく
 	// sessionData に保存されている（user_id は users FK のため未作成 user を指せない）。
@@ -313,7 +344,7 @@ func (s *RegistrationService) FinishRegistrationNew(
 	if err != nil || len(session.UserID) == 0 {
 		s.logRejection("passkey registration finish (new) rejected: malformed challenge",
 			shortID(challengeID))
-		return "", ErrRegistrationFailed
+		return "", nil, ErrRegistrationFailed
 	}
 	pendingUserID := string(session.UserID)
 	normalized := *ch.PendingUsername
@@ -330,20 +361,22 @@ func (s *RegistrationService) FinishRegistrationNew(
 		// adapter 側で既に ErrRegistrationFailed に正規化されているが、
 		// 万一 wrap されていても uniform 側へ倒す。
 		if errors.Is(err, ErrRegistrationFailed) {
-			return "", ErrRegistrationFailed
+			return "", nil, ErrRegistrationFailed
 		}
-		return "", ErrRegistrationFailed
+		return "", nil, ErrRegistrationFailed
 	}
 
 	// Issue #230 / Req 1.1〜1.6: users INSERT と passkey_credentials INSERT を 1 tx で
 	// 実行することで、途中失敗（credential 重複・インフラ障害・username race のいずれか）
 	// でも「部分的に永続化された孤立ユーザー / 孤立 credential」を残さない。
+	// Issue #231 §Delta 1: Web mode（issueWebSession=true）では同一 tx に session 行も
+	// INSERT し、user・credential・session の 3 行を atomic に commit する。
 	// 既存 withdrawTx（internal/user/service.go）と同じ tx オーケストレーションパターン。
 	tx, err := s.txBeginner.BeginTx(ctx)
 	if err != nil {
 		// tx begin 自体の失敗はインフラ障害。uniform 拒否ではなく wrap して返す
 		// （handler で 500）。username / challenge 生値をメッセージに含めない（NFR 1.2）。
-		return "", fmt.Errorf("failed to begin registration transaction: %w", err)
+		return "", nil, fmt.Errorf("failed to begin registration transaction: %w", err)
 	}
 	// 確定前に関数を抜けた場合は必ずロールバックする。コミット済みなら no-op。
 	committed := false
@@ -365,9 +398,9 @@ func (s *RegistrationService) FinishRegistrationNew(
 			// 対応 credential 行が永続化されないことを保証したうえで、uniform 拒否側に倒す。
 			s.logRejection("passkey registration finish (new) rejected: username race",
 				shortID(challengeID))
-			return "", ErrRegistrationFailed
+			return "", nil, ErrRegistrationFailed
 		}
-		return "", fmt.Errorf("failed to create user: %w", err)
+		return "", nil, fmt.Errorf("failed to create user: %w", err)
 	}
 
 	cred := &model.PasskeyCredential{
@@ -385,19 +418,36 @@ func (s *RegistrationService) FinishRegistrationNew(
 			// tx rollback により対応 users 行が永続化されないことを保証する。
 			s.logRejection("passkey registration finish (new) rejected: credential duplicate",
 				shortID(challengeID))
-			return "", ErrRegistrationFailed
+			return "", nil, ErrRegistrationFailed
 		}
 		// Issue #230 Req 1.4: credential 側のインフラ障害でも tx rollback により
 		// 対応 users 行が残らない。wrap して返す（handler で 500）。
-		return "", fmt.Errorf("failed to save passkey credential: %w", err)
+		return "", nil, fmt.Errorf("failed to save passkey credential: %w", err)
 	}
+
+	// Issue #231 §Delta 1: Web mode のみ、credential INSERT の後・Commit の前に session を
+	// 同一 tx へ INSERT する。session 生成失敗 / INSERT 失敗は defer Rollback により user /
+	// credential も含めて全取消しし webSession=nil で伝播する（3 行 atomic）。
+	// session ID 生値・auth_code 平文はログ・エラーに残さない（NFR 2.1。session ID は
+	// handler の Set-Cookie でのみクライアントへ渡す）。
+	if issueWebSession {
+		sess, e := s.sessionFactory.NewSession(newUser.ID)
+		if e != nil {
+			return "", nil, fmt.Errorf("failed to build session: %w", e)
+		}
+		if e := s.sessions.CreateExec(ctx, tx.Querier(), sess); e != nil {
+			return "", nil, fmt.Errorf("failed to create session: %w", e)
+		}
+		webSession = sess
+	}
+
 	if err := tx.Commit(); err != nil {
 		// commit 自体の失敗は稀だが、defer rollback により整合性は保たれる。
 		// NFR 1.2: username / credential_id 生値をメッセージに含めない。
-		return "", fmt.Errorf("failed to commit registration transaction: %w", err)
+		return "", nil, fmt.Errorf("failed to commit registration transaction: %w", err)
 	}
 	committed = true
-	return newUser.ID, nil
+	return newUser.ID, webSession, nil
 }
 
 // BeginAddCredential は認証済みクライアントの追加登録 ceremony の begin 段階を担う
