@@ -29,6 +29,7 @@ describe("apiClient", () => {
         method: "GET",
         headers: {
           "Content-Type": "application/json",
+          Accept: "application/json",
         },
         credentials: "include",
       });
@@ -57,6 +58,7 @@ describe("apiClient", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Accept: "application/json",
         },
         credentials: "include",
         body: JSON.stringify({ url: "https://example.com/feed.xml" }),
@@ -72,6 +74,7 @@ describe("apiClient", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Accept: "application/json",
         },
         credentials: "include",
       });
@@ -88,6 +91,7 @@ describe("apiClient", () => {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
+          Accept: "application/json",
         },
         credentials: "include",
         body: JSON.stringify({ is_read: true }),
@@ -105,6 +109,7 @@ describe("apiClient", () => {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
+          Accept: "application/json",
         },
         credentials: "include",
         body: JSON.stringify({ feed_url: "https://new-url.com" }),
@@ -122,6 +127,7 @@ describe("apiClient", () => {
         method: "DELETE",
         headers: {
           "Content-Type": "application/json",
+          Accept: "application/json",
         },
         credentials: "include",
       });
@@ -150,6 +156,7 @@ describe("apiClient", () => {
         method: "GET",
         headers: {
           "Content-Type": "application/json",
+          Accept: "application/json",
         },
         credentials: "include",
       });
@@ -228,9 +235,33 @@ describe("apiClient", () => {
         method: "GET",
         headers: {
           "Content-Type": "application/json",
+          Accept: "application/json",
         },
         credentials: "include",
       });
+    });
+  });
+
+  describe("Accept ヘッダ（Issue #235）", () => {
+    it("全メソッドが Accept: application/json を送信すること（サーバ側 content negotiation の識別条件）", async () => {
+      // Arrange
+      const api = createApiClient();
+
+      // Act: 各メソッドを一度ずつ呼び出す
+      await api.get("/api/x");
+      await api.post("/api/x");
+      await api.put("/api/x", {});
+      await api.patch("/api/x", {});
+      await api.delete("/api/x");
+
+      // Assert: 全 5 回の呼び出しで Accept: application/json が含まれる
+      // （POST /auth/logout の content negotiation を成立させるため / Req 1.1 起点）
+      for (const call of mockFetch.mock.calls) {
+        const options = call[1] as RequestInit;
+        const headers = options.headers as Record<string, string>;
+        expect(headers.Accept).toBe("application/json");
+      }
+      expect(mockFetch).toHaveBeenCalledTimes(5);
     });
   });
 

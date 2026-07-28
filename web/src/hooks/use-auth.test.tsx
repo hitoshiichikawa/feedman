@@ -116,4 +116,62 @@ describe("useLogout", () => {
       })
     );
   });
+
+  // Issue #235:
+  //   fetch はサーバの content negotiation を成立させるため Accept: application/json を
+  //   送信する必要がある。これが無いと従来クライアントとして 303 + Location が返り、
+  //   fetch の既定 redirect: "follow" で遷移先 HTML が JSON パースに失敗する。
+  it("useLogout は Accept: application/json を送信すること（Issue #235 サーバ content negotiation 前提）", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 204,
+      json: async () => ({}),
+    });
+
+    const { result } = renderHook(() => useLogout(), {
+      wrapper: createWrapper(),
+    });
+
+    result.current.mutate();
+    await waitFor(() => {
+      expect(result.current.isSuccess).toBe(true);
+    });
+
+    const [, options] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const headers = options.headers as Record<string, string>;
+    expect(headers.Accept).toBe("application/json");
+  });
+
+  // Requirement 3.1 の中核: mutation success 時にキャッシュをクリアする。
+  // useLogout フック側にも onSuccess 契約があり、logout-button の onSuccess とは
+  // 独立した責務（キャッシュクリア）を担う。
+  it("useLogout は成功時に QueryClient のキャッシュをクリアすること（Requirement 3.1）", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 204,
+      json: async () => ({}),
+    });
+
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    });
+    queryClient.setQueryData(["auth", "me"], { id: "user-x" });
+
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+
+    const { result } = renderHook(() => useLogout(), { wrapper });
+
+    result.current.mutate();
+    await waitFor(() => {
+      expect(result.current.isSuccess).toBe(true);
+    });
+
+    // 保持していたキャッシュエントリが除去される
+    expect(queryClient.getQueryData(["auth", "me"])).toBeUndefined();
+  });
 });

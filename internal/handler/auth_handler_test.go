@@ -478,6 +478,145 @@ func TestAuthHandler_Logout_NoSession_StillRedirects(t *testing.T) {
 	}
 }
 
+// TestAuthHandler_Logout_JSONAccept_ReturnsNoContent は Accept: application/json を送る
+// fetch/XHR クライアント（Web 版 useLogout など）に対して 204 No Content を返し、
+// Location ヘッダを付与しないことを検証する（Issue #235 Requirement 1.1 / 1.2）。
+//
+// 従来 303 See Other + Location を返していたため、fetch の既定 redirect: "follow" で
+// クライアントが遷移先 HTML を取得し JSON パーサが SyntaxError を起こしてログアウトが
+// 失敗扱いになる不具合の中核修正。
+func TestAuthHandler_Logout_JSONAccept_ReturnsNoContent(t *testing.T) {
+	// Arrange
+	logoutCalledWith := ""
+	svc := &mockAuthService{
+		logoutFn: func(ctx context.Context, sessionID string) error {
+			logoutCalledWith = sessionID
+			return nil
+		},
+	}
+	h := NewAuthHandler(svc, AuthHandlerConfig{
+		BaseURL:       "http://localhost:3000",
+		CookieDomain:  "",
+		CookieSecure:  false,
+		SessionMaxAge: 86400,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req.Header.Set("Accept", "application/json")
+	req.AddCookie(&http.Cookie{Name: "session_id", Value: "session-json-client"})
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Logout(w, req)
+
+	// Assert: 204 No Content + Location ヘッダ不在（Req 1.1 / 1.2）
+	resp := w.Result()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+	if loc := resp.Header.Get("Location"); loc != "" {
+		t.Errorf("Location = %q, want empty (json client should not be redirected)", loc)
+	}
+
+	// セッション破棄が行われること（Req 1.1）
+	if logoutCalledWith != "session-json-client" {
+		t.Errorf("service.Logout called with %q, want %q", logoutCalledWith, "session-json-client")
+	}
+
+	// セッションCookieがクリアされること（NFR 1 / Req 6.1 の Cookie 属性維持）
+	var sessionCookie *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == "session_id" {
+			sessionCookie = c
+			break
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("expected session_id cookie to be cleared even for JSON client")
+	}
+	if sessionCookie.MaxAge != -1 {
+		t.Errorf("session cookie MaxAge = %d, want -1 (delete)", sessionCookie.MaxAge)
+	}
+	if !sessionCookie.HttpOnly {
+		t.Error("session cookie should remain HttpOnly (Req 6.1)")
+	}
+	if sessionCookie.SameSite != http.SameSiteLaxMode {
+		t.Errorf("session cookie SameSite = %v, want %v (Req 6.1)", sessionCookie.SameSite, http.SameSiteLaxMode)
+	}
+}
+
+// TestAuthHandler_Logout_JSONAccept_NoSession_ReturnsNoContent は Accept: application/json
+// で session Cookie を持たないクライアントに対しても 204 を返すことを検証する
+// （Req 5.3 セッション期限切れ・未存在時もログイン画面表示に到達）。
+func TestAuthHandler_Logout_JSONAccept_NoSession_ReturnsNoContent(t *testing.T) {
+	// Arrange: Cookie を付与しない
+	h := NewAuthHandler(&mockAuthService{}, AuthHandlerConfig{
+		BaseURL: "http://localhost:3000",
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req.Header.Set("Accept", "application/json")
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Logout(w, req)
+
+	// Assert: 204 でリダイレクトしない
+	resp := w.Result()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+	if loc := resp.Header.Get("Location"); loc != "" {
+		t.Errorf("Location = %q, want empty", loc)
+	}
+}
+
+// TestAuthHandler_Logout_FormPost_StillRedirects は Accept ヘッダに application/json を
+// 含まない従来クライアント（HTML form POST 経由等）に対しては、これまで通り 303 See Other +
+// Location を返すことを検証する（Req 6.2 の後方互換性維持）。
+func TestAuthHandler_Logout_FormPost_StillRedirects(t *testing.T) {
+	cases := []struct {
+		name   string
+		accept string
+	}{
+		{name: "Accept ヘッダ不在", accept: ""},
+		{name: "HTML を要求する form POST", accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
+		{name: "text/plain のみ", accept: "text/plain"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			svc := &mockAuthService{
+				logoutFn: func(ctx context.Context, sessionID string) error {
+					return nil
+				},
+			}
+			h := NewAuthHandler(svc, AuthHandlerConfig{
+				BaseURL:       "http://localhost:3000",
+				SessionMaxAge: 86400,
+			})
+			req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+			if tc.accept != "" {
+				req.Header.Set("Accept", tc.accept)
+			}
+			req.AddCookie(&http.Cookie{Name: "session_id", Value: "session-form-post"})
+			w := httptest.NewRecorder()
+
+			// Act
+			h.Logout(w, req)
+
+			// Assert: 従来通り 303 See Other + Location: BaseURL（Req 6.2）
+			resp := w.Result()
+			if resp.StatusCode != http.StatusSeeOther {
+				t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
+			}
+			if loc := resp.Header.Get("Location"); loc != "http://localhost:3000" {
+				t.Errorf("Location = %q, want %q", loc, "http://localhost:3000")
+			}
+		})
+	}
+}
+
 func TestAuthHandler_Me_Authenticated_ReturnsUserJSON(t *testing.T) {
 	svc := &mockAuthService{
 		getCurrentUserFn: func(ctx context.Context, sessionID string) (*model.User, error) {

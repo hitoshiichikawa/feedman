@@ -75,6 +75,11 @@ async function request<T>(
   try {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
+      // Accept: application/json をサーバに明示することで、サーバ側 content
+      // negotiation ハンドラ（例: POST /auth/logout / Issue #235）が form POST 経由の
+      // 従来クライアントと fetch / XHR 経由の JSON クライアントを識別できるようにする。
+      // 追加コストは 1 ヘッダのみで、既存 JSON API エンドポイントの応答挙動は変わらない。
+      Accept: "application/json",
     };
 
     options = {
