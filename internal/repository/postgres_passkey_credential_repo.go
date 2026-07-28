@@ -97,18 +97,21 @@ func (r *PostgresPasskeyCredentialRepo) CreateExec(
 	err := q.QueryRowContext(ctx,
 		`INSERT INTO passkey_credentials (
 		     id, user_id, credential_id, public_key, sign_count,
-		     attestation_type, aaguid, transports, created_at, last_used_at
+		     attestation_type, aaguid, transports, created_at, last_used_at,
+		     backup_eligible, backup_state
 		 )
 		 VALUES (
 		     COALESCE($1::uuid, gen_random_uuid()),
 		     $2, $3, $4, $5, $6, $7, $8,
 		     COALESCE($9::timestamptz, now()),
-		     $10
+		     $10,
+		     $11, $12
 		 )
 		 RETURNING id, created_at`,
 		idArg, c.UserID, c.CredentialID, c.PublicKey, int64(c.SignCount),
 		c.AttestationType, aaguidArg, serializeTransports(c.Transports),
 		createdAtArg, lastUsedAtArg,
+		c.BackupEligible, c.BackupState,
 	).Scan(&c.ID, &c.CreatedAt)
 	if err != nil {
 		var pgErr *pq.Error
@@ -133,13 +136,15 @@ func (r *PostgresPasskeyCredentialRepo) FindByCredentialID(
 	var lastUsedAt sql.NullTime
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, user_id, credential_id, public_key, sign_count,
-		        attestation_type, aaguid, transports, created_at, last_used_at
+		        attestation_type, aaguid, transports, created_at, last_used_at,
+		        backup_eligible, backup_state
 		 FROM passkey_credentials
 		 WHERE credential_id = $1`,
 		credentialID,
 	).Scan(
 		&c.ID, &c.UserID, &c.CredentialID, &c.PublicKey, &signCount,
 		&c.AttestationType, &aaguid, &transports, &c.CreatedAt, &lastUsedAt,
+		&c.BackupEligible, &c.BackupState,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -164,7 +169,8 @@ func (r *PostgresPasskeyCredentialRepo) ListByUserID(
 ) ([]*model.PasskeyCredential, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT id, user_id, credential_id, public_key, sign_count,
-		        attestation_type, aaguid, transports, created_at, last_used_at
+		        attestation_type, aaguid, transports, created_at, last_used_at,
+		        backup_eligible, backup_state
 		 FROM passkey_credentials
 		 WHERE user_id = $1
 		 ORDER BY created_at ASC`,
@@ -186,6 +192,7 @@ func (r *PostgresPasskeyCredentialRepo) ListByUserID(
 		if err := rows.Scan(
 			&c.ID, &c.UserID, &c.CredentialID, &c.PublicKey, &signCount,
 			&c.AttestationType, &aaguid, &transports, &c.CreatedAt, &lastUsedAt,
+			&c.BackupEligible, &c.BackupState,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan passkey credential: %w", err)
 		}
@@ -204,10 +211,17 @@ func (r *PostgresPasskeyCredentialRepo) ListByUserID(
 }
 
 // UpdateSignCount は当該 credential の sign_count と last_used_at を更新する
-// （Req 2.2 / NFR 1.4 の counter 記録用途 / task 5 で使用）。
+// （Req 2.2 / NFR 1.4 の counter 記録用途）。
+//
+// Issue #234 経過措置: 本メソッドは PasskeyCredentialRepository interface からは既に
+// 除去済みだが、passkey.PasskeyCredentialReader narrow interface（authentication_service.go）
+// および app.go の wiring が具体型 *PostgresPasskeyCredentialRepo を経由して本メソッドに
+// 依存しているため、当面残置している。task 5 で authentication_service の呼び出しが
+// UpdateAuthenticationState へ切替された後に本メソッドを併せて除去すること
+// （そうしないと orphan メソッドが残る）。
 //
 // sign_count は uint32 だが DB カラムは BIGINT（将来拡張余地）のため int64 に
-// 昇格して INSERT する。対象レコードが存在しない場合はエラーにせず 0 rows で成功する
+// 昇格して UPDATE する。対象レコードが存在しない場合はエラーにせず 0 rows で成功する
 // （呼び出し側が事前に FindByCredentialID で存在確認する前提）。
 func (r *PostgresPasskeyCredentialRepo) UpdateSignCount(
 	ctx context.Context, id string, signCount uint32, lastUsedAt time.Time,
@@ -221,6 +235,35 @@ func (r *PostgresPasskeyCredentialRepo) UpdateSignCount(
 	if err != nil {
 		// NFR 1.2: id の値もメッセージに含めない。
 		return fmt.Errorf("failed to update passkey credential sign_count: %w", err)
+	}
+	return nil
+}
+
+// UpdateAuthenticationState は認証 ceremony 成功時に当該 credential の
+// sign_count / backup_state / last_used_at の 3 列を更新する
+// （Issue #234 / Req 4.1, 4.2, 4.3）。
+//
+// backup_eligible は本メソッドで **一切更新しない**（引数にも SQL SET 句にも
+// 含めない）。これにより Req 4.3「BE は再認証時に上書き更新しない = 初回登録時の
+// 値を不変で保持する」を SQL レベルで構造的に保証する。将来 code 側で誤って BE を
+// 渡そうとしても、SQL に到達しない構造で担保している。
+//
+// sign_count は uint32 だが DB カラムは BIGINT（将来拡張余地）のため int64 に
+// 昇格して UPDATE する。対象レコードが存在しない場合はエラーにせず 0 rows で成功する
+// （UpdateSignCount と同流儀。呼び出し側が事前に FindByCredentialID で存在確認する前提）。
+// メッセージには credential_id / user_id 等の機密値を含めない（NFR 1.2）。
+func (r *PostgresPasskeyCredentialRepo) UpdateAuthenticationState(
+	ctx context.Context, id string, signCount uint32, backupState bool, lastUsedAt time.Time,
+) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE passkey_credentials
+		 SET sign_count = $2, backup_state = $3, last_used_at = $4
+		 WHERE id = $1`,
+		id, int64(signCount), backupState, lastUsedAt,
+	)
+	if err != nil {
+		// NFR 1.2: id の値もメッセージに含めない。
+		return fmt.Errorf("failed to update passkey credential authentication state: %w", err)
 	}
 	return nil
 }

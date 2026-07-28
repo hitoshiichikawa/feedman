@@ -8,6 +8,11 @@ import "time"
 // パスキー本体の秘密情報は保持しない（NFR 1.1）。
 // CredentialID はサービス全体で一意（DB 側 UNIQUE 制約）で、1 user あたり複数 credential
 // を保持できる（同一 UserID の複数行を許容）。
+//
+// Issue #234: BackupEligible / BackupState は WebAuthn CredentialFlags の永続化値。
+// 登録時に authenticator が報告した値を保存し、認証時の credential 復元で
+// webauthn.Credential.Flags に反映することで、library の login validation
+// （BE 一致判定 / login.go:371）を通過させる。
 type PasskeyCredential struct {
 	ID              string     // UUID
 	UserID          string     // users.id への FK
@@ -19,6 +24,18 @@ type PasskeyCredential struct {
 	Transports      []string   // "internal" / "usb" / "nfc" / "ble" 等
 	CreatedAt       time.Time  // 登録時刻
 	LastUsedAt      *time.Time // 最終ログイン時刻（未使用なら nil）
+
+	// BackupEligible は WebAuthn CredentialFlags.BackupEligible の永続化値
+	// （Issue #234 / Req 1.1〜1.4, 2.1〜2.3）。
+	// 登録時に authenticator が報告した値を保存し、認証時の flag 一致判定に用いる。
+	// Req 4.3: 認証成功時に上書き更新しない（初回登録時の値を不変で保持する）。
+	BackupEligible bool
+
+	// BackupState は WebAuthn CredentialFlags.BackupState の永続化値
+	// （Issue #234 / Req 1.1〜1.4, 2.1〜2.3, 4.2）。
+	// 登録時に authenticator が報告した値を保存し、認証成功時には検証層から
+	// 返却される最新値へ更新する（Req 4.2）。
+	BackupState bool
 }
 
 // PasskeyChallengeKind はパスキー challenge の種別を表す値オブジェクトである。
