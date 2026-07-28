@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/hitoshi/feedman/internal/model"
+	"github.com/hitoshi/feedman/internal/passkey"
 	"github.com/hitoshi/feedman/internal/repository"
 	"github.com/hitoshi/feedman/internal/user"
 )
@@ -175,6 +176,35 @@ func newTxUserService(
 	)
 }
 
+// passkeyRegistrationTxBeginnerAdapter は *repository.SQLTxBeginner を
+// passkey.RegistrationTxBeginner に適合させる（Issue #230 / Req 1.1〜1.6 / NFR 1.1）。
+//
+// *repository.SQLTxBeginner.BeginTx は *repository.SQLTx を返し、passkey.RegistrationTx
+// interface（Querier / Commit / Rollback）を構造的に充足するが、Go の interface 型
+// 変換の都合上、戻り値型を passkey.RegistrationTx に一致させるアダプタが必要となる。
+// user.TxBeginner 用の既存 txBeginnerAdapter は user.Tx（Commit / Rollback のみ）に
+// 適合させる別型のため流用できない（passkey 側は Querier を追加で公開する必要がある）。
+type passkeyRegistrationTxBeginnerAdapter struct {
+	beginner *repository.SQLTxBeginner
+}
+
+// BeginTx はトランザクションを開始し passkey.RegistrationTx として返す。
+func (a *passkeyRegistrationTxBeginnerAdapter) BeginTx(ctx context.Context) (passkey.RegistrationTx, error) {
+	tx, err := a.beginner.BeginTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// *repository.SQLTx は Querier() / Commit() / Rollback() を持つため
+	// passkey.RegistrationTx を構造的に充足する。
+	return tx, nil
+}
+
+// newPasskeyRegistrationTxBeginner は passkey.RegistrationService に注入するための
+// tx beginner アダプタを生成する（Issue #230 の 1 tx 化 wiring 用）。
+func newPasskeyRegistrationTxBeginner(beginner *repository.SQLTxBeginner) passkey.RegistrationTxBeginner {
+	return &passkeyRegistrationTxBeginnerAdapter{beginner: beginner}
+}
+
 // compile-time interface checks
 var (
 	_ user.TxBeginner                 = (*txBeginnerAdapter)(nil)
@@ -185,4 +215,5 @@ var (
 	_ user.TxAuthCodeDeleter          = (*txAuthCodeDeleterAdapter)(nil)
 	_ user.TxRefreshTokenDeleter      = (*txRefreshTokenDeleterAdapter)(nil)
 	_ user.TxPasskeyCredentialDeleter = (*txPasskeyCredentialDeleterAdapter)(nil)
+	_ passkey.RegistrationTxBeginner  = (*passkeyRegistrationTxBeginnerAdapter)(nil)
 )

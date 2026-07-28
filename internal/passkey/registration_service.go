@@ -35,7 +35,16 @@ type UserWriter interface {
 
 	// CreateUserOnly は identity を持たないユーザー行のみを INSERT する（Req 1.2 / 1.6）。
 	// username_normalized の UNIQUE 制約違反時は repository.ErrUsernameTaken を返す（race 防衛）。
+	//
+	// 追加登録経路（FinishAddCredential）等、単独 INSERT で十分な用途向け。新規登録
+	// finish で users と credential を 1 tx で INSERT するには CreateUserOnlyExec を用いる
+	// （Issue #230 / Req 1.1〜1.6）。
 	CreateUserOnly(ctx context.Context, u *model.User) error
+
+	// CreateUserOnlyExec は指定の共有トランザクション（repository.DBTX）上で
+	// users 行を INSERT する（Issue #230 / Req 1.1〜1.6 / NFR 1.1 の 1 tx 化）。
+	// username_normalized の UNIQUE 制約違反時は repository.ErrUsernameTaken を返す。
+	CreateUserOnlyExec(ctx context.Context, q repository.DBTX, u *model.User) error
 
 	// FindByID は追加登録の begin 時に既存 user を取得する（Req 3.1）。
 	// 未存在は (nil, nil)。
@@ -57,7 +66,40 @@ type PasskeyCredentialWriter interface {
 
 	// Create は credential を新規保存する。credential_id UNIQUE 衝突時は
 	// repository.ErrCredentialAlreadyRegistered を返す（Req 3.6 / 1.7 の防衛線）。
+	//
+	// 追加登録経路（FinishAddCredential）等、単独 INSERT で十分な用途向け。新規登録
+	// finish で users と credential を 1 tx で INSERT するには CreateExec を用いる
+	// （Issue #230 / Req 1.1〜1.6）。
 	Create(ctx context.Context, c *model.PasskeyCredential) error
+
+	// CreateExec は指定の共有トランザクション（repository.DBTX）上で credential を
+	// INSERT する（Issue #230 / Req 1.1〜1.6 / NFR 1.1 の 1 tx 化）。
+	// credential_id UNIQUE 衝突時は repository.ErrCredentialAlreadyRegistered を返す。
+	CreateExec(ctx context.Context, q repository.DBTX, c *model.PasskeyCredential) error
+}
+
+// RegistrationTx は新規パスキー登録 finish で users / passkey_credentials を 1 tx で
+// INSERT するためのトランザクションハンドル（Issue #230 / Req 1.1〜1.6 / NFR 1.1）。
+//
+// repository.SQLTx は構造的にこれを充足するため、wiring 時にアダプタ経由で渡す
+// （tests では fake 実装に差し替えられるよう抽象化している）。
+type RegistrationTx interface {
+	// Querier は当該トランザクション上でクエリを実行するための DBTX を返す
+	// （*Exec 系リポジトリメソッドに渡す）。
+	Querier() repository.DBTX
+	// Commit は当該トランザクションを確定する。
+	Commit() error
+	// Rollback は当該トランザクションを取り消す。確定済みの場合の挙動は database/sql
+	// と同等（sql.ErrTxDone 相当を返す）。
+	Rollback() error
+}
+
+// RegistrationTxBeginner は RegistrationTx を開始する（Issue #230）。
+// repository.SQLTxBeginner の BeginTx は *repository.SQLTx を返すため、本 interface
+// に適合させるには app パッケージ側の薄いアダプタで戻り値型を変換する。
+type RegistrationTxBeginner interface {
+	// BeginTx は新しい RegistrationTx を開始する。
+	BeginTx(ctx context.Context) (RegistrationTx, error)
 }
 
 // challengeStore は RegistrationService が challenge lifecycle に必要とする最小
@@ -75,22 +117,32 @@ type challengeStore interface {
 //
 // 依存はすべて最小 interface として宣言し（interface segregation / CLAUDE.md §5）、
 // テストでは stub / mock を差し込むことで外部ネットワーク非依存の検証を可能にする（NFR 4.1）。
+//
+// txBeginner は新規登録 finish（FinishRegistrationNew）で users / passkey_credentials
+// を 1 tx で INSERT するのに用いる（Issue #230 / Req 1.1〜1.6）。追加登録
+// （FinishAddCredential）は credential 単体 INSERT のため tx を用いない（Issue #230
+// requirements Out of Scope 参照）。
 type RegistrationService struct {
 	adapter     WebAuthnAdapter
 	challenges  challengeStore
 	users       UserWriter
 	credentials PasskeyCredentialWriter
+	txBeginner  RegistrationTxBeginner
 	now         func() time.Time
 }
 
 // NewRegistrationService は RegistrationService を生成する。
 //
 // now が nil の場合は time.Now を既定として採用する（テストからは差し替え可能）。
+// txBeginner は新規登録 finish で users / passkey_credentials を 1 tx で INSERT する
+// ために必須（Issue #230 / Req 1.1〜1.6 / NFR 1.1）。nil を渡すことは許容せず、
+// wiring 側で常に非 nil を注入する契約とする。
 func NewRegistrationService(
 	adapter WebAuthnAdapter,
 	challenges challengeStore,
 	users UserWriter,
 	credentials PasskeyCredentialWriter,
+	txBeginner RegistrationTxBeginner,
 	now func() time.Time,
 ) *RegistrationService {
 	if now == nil {
@@ -101,6 +153,7 @@ func NewRegistrationService(
 		challenges:  challenges,
 		users:       users,
 		credentials: credentials,
+		txBeginner:  txBeginner,
 		now:         now,
 	}
 }
@@ -206,7 +259,7 @@ func (s *RegistrationService) BeginRegistrationNew(
 }
 
 // FinishRegistrationNew は未認証クライアントの新規登録 ceremony の finish 段階を担う
-// （Req 1.2, 1.3, 1.6, 1.7）。
+// （Req 1.2, 1.3, 1.6, 1.7、Issue #230 / Req 1.1〜1.6 / NFR 1.1・1.2）。
 //
 // 処理フロー:
 //  1. ChallengeStore.Consume(kind=registration_new) → 期限切れ / 二重消費 /
@@ -215,13 +268,21 @@ func (s *RegistrationService) BeginRegistrationNew(
 //     challenge.PendingUsername（normalized）で WebAuthnUser を再構築
 //  3. WebAuthnAdapter.FinishRegistration で ParsedCredential を得る
 //     （拒否は ErrRegistrationFailed に正規化）
-//  4. CreateUserOnly で users 行を INSERT（仮 UUID を users.id として確定）。
-//     UNIQUE 衝突（race）は ErrRegistrationFailed（Req 1.7）
-//  5. PasskeyCredentialWriter.Create で credential 行を INSERT。
-//     credential_id UNIQUE 衝突は ErrRegistrationFailed に正規化（Req 1.7）
+//  4. RegistrationTxBeginner.BeginTx で共有トランザクションを開始
+//  5. CreateUserOnlyExec で users 行を INSERT（仮 UUID を users.id として確定）。
+//     UNIQUE 衝突（race）は tx rollback + ErrRegistrationFailed（Issue #230 Req 1.5）
+//  6. PasskeyCredentialWriter.CreateExec で credential 行を INSERT。
+//     credential_id UNIQUE 衝突・インフラ障害は tx rollback + ErrRegistrationFailed
+//     （Issue #230 Req 1.3, 1.4）
+//  7. tx.Commit で users / passkey_credentials の合成成功を確定（Issue #230 Req 1.1）
 //
 // email は begin 時に受け取っていないため、本 method のシグネチャでは追加受付しない。
 // design/tasks 上の想定通り email = "" のまま user 行を作成する（Req 1.6）。
+//
+// トランザクション境界は #216 design.md L797〜802「登録 finish: users INSERT と
+// passkey_credentials INSERT の合成成功を保証する（1 tx）」に対応する（Issue #230 の
+// 修正対象）。追加登録 finish（FinishAddCredential）は credential 単体 INSERT のため
+// tx を用いない（本 Issue の Out of Scope）。
 //
 // 平文 attestation / requestBody / challenge / username 生値をログ・エラー・レスポンスに
 // 出さない（NFR 1.2 / 1.3 / 3.2）。
@@ -274,16 +335,34 @@ func (s *RegistrationService) FinishRegistrationNew(
 		return "", ErrRegistrationFailed
 	}
 
+	// Issue #230 / Req 1.1〜1.6: users INSERT と passkey_credentials INSERT を 1 tx で
+	// 実行することで、途中失敗（credential 重複・インフラ障害・username race のいずれか）
+	// でも「部分的に永続化された孤立ユーザー / 孤立 credential」を残さない。
+	// 既存 withdrawTx（internal/user/service.go）と同じ tx オーケストレーションパターン。
+	tx, err := s.txBeginner.BeginTx(ctx)
+	if err != nil {
+		// tx begin 自体の失敗はインフラ障害。uniform 拒否ではなく wrap して返す
+		// （handler で 500）。username / challenge 生値をメッセージに含めない（NFR 1.2）。
+		return "", fmt.Errorf("failed to begin registration transaction: %w", err)
+	}
+	// 確定前に関数を抜けた場合は必ずロールバックする。コミット済みなら no-op。
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
 	newUser := &model.User{
 		ID:                 pendingUserID,
 		Email:              "", // Req 1.6: リカバリ用メールなしを許容
 		Username:           normalized,
 		UsernameNormalized: normalized,
 	}
-	if err := s.users.CreateUserOnly(ctx, newUser); err != nil {
+	if err := s.users.CreateUserOnlyExec(ctx, tx.Querier(), newUser); err != nil {
 		if errors.Is(err, repository.ErrUsernameTaken) {
-			// begin 時 pre-check 後の race。tasks.md L105 に従い finish 段階の
-			// username UNIQUE 衝突は ErrRegistrationFailed に正規化する（uniform 拒否）。
+			// begin 時 pre-check 後の race（Issue #230 Req 1.5）。tx rollback により
+			// 対応 credential 行が永続化されないことを保証したうえで、uniform 拒否側に倒す。
 			s.logRejection("passkey registration finish (new) rejected: username race",
 				shortID(challengeID))
 			return "", ErrRegistrationFailed
@@ -300,15 +379,24 @@ func (s *RegistrationService) FinishRegistrationNew(
 		AAGUID:          parsed.AAGUID,
 		Transports:      parsed.Transports,
 	}
-	if err := s.credentials.Create(ctx, cred); err != nil {
+	if err := s.credentials.CreateExec(ctx, tx.Querier(), cred); err != nil {
 		if errors.Is(err, repository.ErrCredentialAlreadyRegistered) {
-			// Req 1.7: 内部詳細を反射しない uniform 拒否。
+			// Req 1.7 / Issue #230 Req 1.3: 内部詳細を反射しない uniform 拒否。
+			// tx rollback により対応 users 行が永続化されないことを保証する。
 			s.logRejection("passkey registration finish (new) rejected: credential duplicate",
 				shortID(challengeID))
 			return "", ErrRegistrationFailed
 		}
+		// Issue #230 Req 1.4: credential 側のインフラ障害でも tx rollback により
+		// 対応 users 行が残らない。wrap して返す（handler で 500）。
 		return "", fmt.Errorf("failed to save passkey credential: %w", err)
 	}
+	if err := tx.Commit(); err != nil {
+		// commit 自体の失敗は稀だが、defer rollback により整合性は保たれる。
+		// NFR 1.2: username / credential_id 生値をメッセージに含めない。
+		return "", fmt.Errorf("failed to commit registration transaction: %w", err)
+	}
+	committed = true
 	return newUser.ID, nil
 }
 
