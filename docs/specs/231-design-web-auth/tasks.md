@@ -26,11 +26,12 @@ PR #229 が本差分を needs-iteration で取り込む**。
     `CreateExec(ctx, q DBTX, s *model.Session) error` を **新規追加**し、既存 `Create` を
     `CreateExec(ctx, r.db, s)` への委譲に変更する（差分等価 / 既存 `DeleteByUserIDExec` の DBTX 変種
     パターンに準拠）。**#230 由来の `CreateUserOnlyExec` / credential `CreateExec` / `tx.go` は変更しない**
-  - `internal/auth/service.go` の `generateSessionID` を参照可能にする export helper
-    `NewSessionID() (string, error)` を同ファイルに追加する（既存 `createSession` の挙動は差分等価）
   - `internal/auth/session_factory.go` を **新規追加**し、`SessionFactory`（`NewSession(userID) (*model.Session, error)`
     が ID + 単一 `now` + `CreatedAt=now` + `ExpiresAt=now+TTL` を一貫生成）と、RegistrationService が受ける
-    最小 IF `SessionFactoryFunc` を定義する。`now` はテスト差し替え可（既定 `time.Now`）
+    最小 IF `SessionFactoryFunc` を定義する。`now`（既定 `time.Now`）と **`newID func() (string, error)`（既定 =
+    同一 package の unexported `generateSessionID`）** をいずれもテスト差し替え可能な seam として持たせる。
+    **`internal/auth/service.go` は変更しない**（`generateSessionID` は unexported のまま同一 package から参照する。
+    薄い public `NewSessionID` は追加しない / Blocker #2）
   - `internal/auth/session_exchange.go` の session 構築を `SessionFactory.NewSession` 呼び出しに差し替える
     （`SessionExchangeService` の外部契約・挙動は不変 / 差分等価）
   - `internal/handler/session_cookie.go` を **新規追加**し、canonical builder
@@ -38,20 +39,24 @@ PR #229 が本差分を needs-iteration で取り込む**。
     既存 `auth_handler.go::Callback` / `native_auth_handler.go::Session` のインライン Cookie 生成を
     本 builder 呼び出しに差し替える（属性は現行と完全一致・差分等価）
   - `internal/config/config.go` に `WebPasskeyAllowedOrigin string` を **新規追加**する
-    （`os.Getenv("CORS_ALLOWED_ORIGIN")` の生値。空/未設定 → `""`。localhost へ default しない）。
+    （`os.Getenv("CORS_ALLOWED_ORIGIN")` を **trim + strict exact-Origin validation** に通した値。
+    trim 後空 / scheme・host を欠く / path・query・fragment・userinfo 付き / 末尾スラッシュ / 空白・カンマで
+    複数 origin を含む、のいずれかは **`""` に倒す**（fail-closed）。localhost へ default しない / Blocker #6）。
     既存 `CORSAllowedOrigin`（CORS 層。既定 `http://localhost:3000`）は **変更しない**。新規 env は追加しない
   - テスト:
     - `internal/handler/session_cookie_test.go`（新規）: `buildSessionCookie` の属性
       （Name / HttpOnly / SameSite=Lax / Secure / Path / Domain / Max-Age）が Google OAuth Callback と一致
     - `internal/auth/session_factory_test.go`（新規）: `NewSession` が ID / `CreatedAt` / `ExpiresAt=CreatedAt+TTL`
-      を単一 now で返し、ID 生成失敗時に error（部分構築なし）
+      を単一 `now` で返し、**`newID` seam に失敗関数を注入**して ID 生成失敗時に error（部分構築なし）を検証する
+      （`crypto/rand.Reader` の global 差替えをしない / Blocker #2）
     - `internal/auth/session_exchange_test.go`（既存編集）: factory 差し替え後も既存アサーションが pass し、
       `CreatedAt` / `ExpiresAt` 検証を追加
-    - `internal/config/config_test.go`（既存編集）: `CORS_ALLOWED_ORIGIN` set → `WebPasskeyAllowedOrigin=値` /
-      unset・empty → `""`、`CORSAllowedOrigin` は既定 localhost:3000 を維持
+    - `internal/config/config_test.go`（既存編集）: `CORS_ALLOWED_ORIGIN` valid set → `WebPasskeyAllowedOrigin=正規化値` /
+      unset・empty・**malformed（前後空白 / 末尾スラッシュ / path・query・fragment 付き / 複数 origin）→ `""`**（fail-closed / Blocker #6）、
+      `CORSAllowedOrigin` は既定 localhost:3000 を維持
     - session repo `CreateExec` の委譲は既存 `Create` テストの差分等価で担保
   - _Requirements: 1.3, 3.6, 4.5, 6.5, NFR 2.1, NFR 3.1_
-  - _Boundary: repository/postgres_session_repo, auth/session_factory, auth/session_exchange, auth/service, handler/session_cookie, config/config_
+  - _Boundary: repository/postgres_session_repo, auth/session_factory, auth/session_exchange, handler/session_cookie, handler/auth_handler, handler/native_auth_handler, config/config_
 
 - [ ] 2. サーバ: `RegistrationService.FinishRegistrationNew` を既存 #230 tx クロージャ内の session INSERT に拡張し、wiring を更新する
   - `internal/passkey/registration_service.go`:
@@ -136,54 +141,71 @@ PR #229 が本差分を needs-iteration で取り込む**。
   - _Depends: 1_
 
 - [ ] 5. Web: `api.ts` に 2xx parse 失敗の型付き正規化を追加し、`use-passkey-registration.ts` から二度目 ceremony を除去して `registration_uncertain` を分類する
-  - `web/src/lib/api.ts`: `ResponseParseError`（`status: number`）を追加し、`request<T>` 末尾の
-    `response.json()` を try/catch で包んで 2xx の parse 失敗を `ResponseParseError` に正規化する
-    （204/205 分岐・`credentials: "include"` は不変 / 差分等価）。これにより dispatch 前の plain `TypeError` と
-    「fetch 成功後の 2xx body parse 失敗」を呼出側が区別できる
+  - `web/src/lib/api.ts`: `ResponseParseError`（`status: number`）と `RequestPreparationError` を追加する。
+    `request<T>` の **request preparation（`JSON.stringify` / URL 構築）を try/catch で囲んで `RequestPreparationError`**
+    に、**末尾 `response.json()` を try/catch で囲んで 2xx parse 失敗を `ResponseParseError`** に正規化する
+    （204/205 分岐・`credentials: "include"` は不変 / 差分等価。`fetch()` reject の plain `TypeError` はそのまま透過）。
+    これにより「dispatch 前の preparation 失敗（commit 不成立確定）/ fetch reject（dispatch 後・不確定）/ 2xx parse
+    失敗（不確定）」の 3 起点を呼出側が **plain TypeError の発生位置を推測せず** 区別できる（Blocker #1）
   - `web/src/lib/api.test.ts`: 2xx body 欠損/途中切断/parse 不能 → `ResponseParseError`（status 2xx）、
-    dispatch 前 serialize 失敗 → plain `TypeError` で両者が区別できることを検証する
+    dispatch 前の preparation 失敗（`JSON.stringify` 循環参照 / URL 構築失敗）→ `RequestPreparationError`、
+    `fetch()` reject → plain `TypeError` の **3 起点が機械的に区別できる**ことを検証する（Blocker #1）
   - `web/src/types/passkey.ts`: `PasskeyRegistrationErrorKind` に `"registration_uncertain"` を追加する。
+    さらに authentication error 種別に **finish の一律 `AUTHENTICATION_FAILED` のみを表す machine-readable kind**
+    （例: `authentication_failed`）を追加する（Blocker #3。raw body / 内部理由は保持しない）。
     `RegistrationFinishResponse` は `{user_id}` のまま **auth_code を追加しない**
   - `web/src/hooks/use-passkey-registration.ts`:
     - `mutationFn` chain を「begin → create → finish → invalidateQueries」に短縮し、
       `authentication/begin` / `navigator.credentials.get` / `authentication/finish` / 登録用
       `POST /api/auth/session` を **完全に削除**する（Req 1.1 / 1.2）。`code_challenge` は #216 契約維持のため
       送るが `code_verifier` は使用しない。registration 経路は `session_exchange_failed` を発生させない
-    - finish 段の error を分類する: `ResponseParseError`（2xx body 不能）/ `AbortError` / 5xx /
-      送出後 `TypeError`（fetch reject）→ `registration_uncertain`。**全 4xx（400/401/403/404/409/422 等）→
-      `server_rejected`（拒否確定。400 だけに限定しない）**。dispatch 前ローカル失敗 → `server_error`
-      （design §Delta 5 §安全側 fail 原則）
+    - finish 段の error を分類する（`RequestPreparationError` を最優先で判定）: `RequestPreparationError`
+      （dispatch 前 = commit 不成立確定）→ `server_error`。`ResponseParseError`（2xx body 不能）/ `AbortError` / 5xx /
+      **`fetch()` reject の plain `TypeError`（dispatch 後）** → `registration_uncertain`。**全 4xx（400/401/403/404/409/422 等）→
+      `server_rejected`（拒否確定。400 だけに限定しない）**（design §Delta 5 §安全側 fail 原則 / Blocker #1）
     - `code_verifier` / attestation 生値を `console.*` / storage / URL に書かない（NFR 2.1）
   - `web/src/hooks/use-passkey-registration.test.tsx`:
     - 正常系: begin → create → finish の 3 呼び出しのみで `authentication/*` / 登録用 `/api/auth/session` が
       呼ばれない（二度目 ceremony 除去の回帰）
     - `registration_uncertain` × fetch reject / 5xx / AbortError / `ResponseParseError`(2xx) の 4 サブケース
     - 回帰: 全 4xx（400/401/403/404/409/422）が `server_rejected` で uncertain に誤分類されない
-    - dispatch 前 `TypeError` が `server_error`（非-uncertain）に分類される
+    - dispatch 前の `RequestPreparationError` が `server_error`（非-uncertain）に分類され、fetch reject の
+      plain `TypeError`（uncertain）と取り違えられない（Blocker #1）
     - begin 段の `invalid_username` / `username_taken` / `cancelled` は既存挙動維持
   - _Requirements: 1.1, 1.2, 1.4, 1.5, 5.1, 5.5, NFR 2.1, NFR 3.1_
   - _Boundary: lib/api, hooks/use-passkey-registration, types/passkey_
   - _Depends: 3_
 
-- [ ] 6. Web: `passkey-signup-dialog.tsx` に完了不明状態 UI と discoverable ログイン復旧導線（段階提示）を追加する
+- [ ] 6. Web: discoverable ログイン結果を machine-readable kind に正規化し、`passkey-signup-dialog.tsx` に完了不明状態 UI と段階提示の復旧導線を追加する
+  - `web/src/hooks/use-passkey-authentication.ts`（既存編集 / Blocker #3）:
+    - discoverable ログインの **finish 一律 `AUTHENTICATION_FAILED` のみを表す machine-readable kind**
+      （例: `authentication_failed`）を付与する。判定は response の status / code のみで行い、
+      **raw body / 内部理由（credential 未解決 等）を error に含めない**（NFR 2.1）
+    - begin 拒否 / cancel（`NotAllowedError`）/ network（fetch reject）/ 5xx / session 交換段
+      （`/api/auth/session`）失敗は **`authentication_failed` 以外の別 kind** に保つ（再作成条件に該当させない）
+  - `web/src/hooks/use-passkey-authentication.test.tsx`（既存編集 / Blocker #3）:
+    - finish 一律 `AUTHENTICATION_FAILED` → `authentication_failed` kind
+    - begin 拒否 / cancel / network / 5xx / session 交換失敗が別 kind になる negative test
+    - error に内部理由 / raw body が含まれない（NFR 2.1）
   - `web/src/components/passkey-signup-dialog.tsx`:
     - `error.kind === "registration_uncertain"` 分岐を追加する。初期表示は見出し「登録が完了したかどうかを
       確認できませんでした」+ 「ログインで確認する」ボタンのみとし、**「再度作成する」を同列に並置しない**（Req 5.2）
     - 「ログインで確認する」押下で `usePasskeyAuthentication` の **discoverable ログイン**
       （ユーザー名入力なし）を起動する（Req 5.2）。成功時は通常の Cookie セッションに到達（Req 5.3）
-    - discoverable ログインが一律 `AUTHENTICATION_FAILED`（内部理由を区別しない）で失敗した **後にのみ**
-      「再度作成する」を提示し、押下で `mutation.reset()` で Idle に戻す（Req 5.4）
+    - discoverable ログインの結果 error kind が `authentication_failed`（finish 一律失敗 / §auth hook）の **後にのみ**
+      「再度作成する」を提示し、押下で `mutation.reset()` で Idle に戻す（Req 5.4）。他 kind では提示しない
     - 文言にサーバ内部詳細（スタックトレース / SQL / DB 名 / session ID 生値）を含めない（Req 5.5 / NFR 2.1）
   - `web/src/components/passkey-signup-dialog.test.tsx`:
     - `registration_uncertain` で専用見出しが表示され、初期に「再度作成する」が表示されない（Req 5.2）
     - 「ログインで確認する」押下で discoverable ログインが起動
     - discoverable ログイン一律失敗の後に「再度作成する」が表示され `mutation.reset()` が呼ばれる（Req 5.4）
-    - login の cancel / network / 5xx では初期画面に「再度作成する」が出ない（一律 AUTHENTICATION_FAILED の後のみ）
+    - 復旧ログインの kind が `authentication_failed` のときのみ「再度作成する」が出る。begin 拒否 / cancel /
+      network / 5xx / session 交換失敗では初期画面にも失敗後にも出ない（一律 `AUTHENTICATION_FAILED` の後のみ / Blocker #3）
     - 文言中にサーバ内部詳細 / 他 kind の代表文言が含まれない（Req 5.5 / 5.6）
   - `web/src/components/login-page-recovery.test.tsx`: `registration_uncertain` →「ログインで確認する」→
     discoverable ログイン成功 → 2 ペイン UI 到達（Req 5.3。unit で組めない場合は E2E 委譲を PR 本文に明記）
   - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, NFR 2.1_
-  - _Boundary: components/passkey-signup-dialog, components/login-page-recovery_
+  - _Boundary: hooks/use-passkey-authentication, components/passkey-signup-dialog, components/login-page-recovery_
   - _Depends: 5_
 
 - [ ] 7. Config: `.env.sample` に CORS_ALLOWED_ORIGIN の fail-closed 接続を明記し、`docker-compose.yml` の `api` CORS 既定を空へ変更する（新規 env なし）
@@ -215,20 +237,32 @@ PR #229 が本差分を needs-iteration で取り込む**。
 
 本 spec の実装反映後、watcher（stage-a-verify gate）が独立に再実行して build / test / lint を
 検証する。サーバ側は `go test ./...` + `go vet ./...`、Web 側は `npm test` + `npm run lint` +
-`npm run build`。加えて `docker-compose.yml` の CORS 既定変更は **Go の config テストでは検証されない**
-ため、代表 env 値を与えた `docker compose config`（YAML + env 置換の妥当性検証）を Verify に含める。
+`npm run build`。加えて `docker-compose.yml` の CORS 既定変更（`${CORS_ALLOWED_ORIGIN:-}` の
+default-empty 経路）は **Go の config テストでは検証されない**ため、代表 env 値を与えた
+`docker compose config` を **`CORS_ALLOWED_ORIGIN` set / unset の 2 通り**で実行し、api サービスへ
+展開された値（set=明示 origin / unset=空）を **exit 0 だけでなく実値で assertion** する（Blocker #7）。
 
 `docker compose config` は `SESSION_SECRET` / `POSTGRES_PASSWORD` を必須（`:?...required`）とするため、
 両者に代表値を与える。`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` も既定を持たず空だと警告になるため
-代表値を与える（いずれもダミー値で config 検証のみ / 秘密値ではない）。
+代表値を与える（いずれもダミー値で config 検証のみ / 秘密値ではない）。set ケースは
+`CORS_ALLOWED_ORIGIN=https://example.com` を与えて api の展開値が明示 origin であること、unset ケースは
+`CORS_ALLOWED_ORIGIN` を **unset** して `${CORS_ALLOWED_ORIGIN:-}` の default-empty を通り api の展開値が
+空になることを検証する（従来の明示設定のみの Verify では default-empty 経路を一度も通らなかった / Blocker #7）。
 
 <!-- stage-a-verify -->
 ```sh
-go test ./... && go vet ./... && \
-SESSION_SECRET=dummy-session-secret POSTGRES_PASSWORD=dummy-postgres-pass \
-GOOGLE_CLIENT_ID=dummy GOOGLE_CLIENT_SECRET=dummy \
-CORS_ALLOWED_ORIGIN=https://example.com NATIVE_AUTH_JWT_SECRET=dummy-secret \
-WEBAUTHN_RP_ID=example.com WEBAUTHN_ORIGINS=https://example.com \
-docker compose config >/dev/null && \
-( cd web && npm test && npm run lint && npm run build )
+set -eu
+go test ./...
+go vet ./...
+COMMON="SESSION_SECRET=dummy-session-secret POSTGRES_PASSWORD=dummy-postgres-pass GOOGLE_CLIENT_ID=dummy GOOGLE_CLIENT_SECRET=dummy NATIVE_AUTH_JWT_SECRET=dummy-secret WEBAUTHN_RP_ID=example.com WEBAUTHN_ORIGINS=https://example.com"
+# set: 明示 origin が api の CORS_ALLOWED_ORIGIN へ展開される（実値 assertion）
+set_cfg=$(env $COMMON CORS_ALLOWED_ORIGIN=https://example.com docker compose config)
+printf '%s\n' "$set_cfg" | grep -E '^[[:space:]]*CORS_ALLOWED_ORIGIN:[[:space:]]*"?https://example\.com"?[[:space:]]*$'
+# unset: ${CORS_ALLOWED_ORIGIN:-} の default-empty を通り api の値が空へ展開される（実値 assertion）
+unset_cfg=$(env -u CORS_ALLOWED_ORIGIN $COMMON docker compose config)
+printf '%s\n' "$unset_cfg" | grep -E '^[[:space:]]*CORS_ALLOWED_ORIGIN:[[:space:]]*("")?[[:space:]]*$'
+cd web
+npm test
+npm run lint
+npm run build
 ```

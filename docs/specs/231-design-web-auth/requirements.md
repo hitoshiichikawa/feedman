@@ -27,8 +27,10 @@ design PR merge 後に PR #229 の needs-iteration 1 回で製品コードと im
 
 ### Requirement 1: 新規作成 finish 直後の追加 WebAuthn 操作の禁止
 
-**Objective:** As a パスキーで新規作成を完了しようとする Web 訪問者, I want 登録の生体認証を
-一度だけ行い、以降は追加のブラウザ生体認証プロンプトなしで Web の 2 ペイン UI に到達したい,
+**Objective:** As a パスキーで新規作成を完了しようとする Web 訪問者, I want 登録の authorization
+gesture（パスキー作成の WebAuthn ceremony。現設定は user verification を必須化しないため、必ずしも
+生体認証プロンプトではない）を一度だけ行い、以降は追加のブラウザ WebAuthn プロンプト（追加の
+authorization gesture）なしで Web の 2 ペイン UI に到達したい,
 so that 新規作成体験が「登録操作 → 完了」の 1 ステップとして完結する
 
 **Supersedes:** 本要件は #223 Requirement 2.3 および #223 Requirement 3.1 の「追加操作なしで
@@ -39,8 +41,8 @@ Cookie セッション合流」の意味を、#223 design.md 「新規作成フ�
 #### Acceptance Criteria
 
 1. When 新規作成の登録 finish がサーバから成功応答を受け取ったとき, the Web Passkey Registration
-   Flow shall 追加のブラウザ生体認証プロンプト（追加の WebAuthn 認証セレモニー）を
-   起動せずに、Cookie セッションベース認証状態への合流処理を進行させる
+   Flow shall 追加のブラウザ WebAuthn プロンプト（追加の authorization gesture / WebAuthn 認証
+   セレモニー）を起動せずに、Cookie セッションベース認証状態への合流処理を進行させる
 2. If ブラウザまたはユーザーが登録セレモニーとは別の第 2 の認証セレモニー実行を要求される場合,
    the Web Passkey Registration Flow shall そのフローを新規作成の正常系と扱わず、実装として
    採用しない
@@ -161,6 +163,8 @@ Origin-bound challenge 拡張）は本 spec では要求せず、下記に列挙
    発行経路を防御しないこと（登録 begin の `code_challenge` は #216 契約維持のための形式検証
    のみで、永続化・束縛せず、session 発行に用いない）を明記し、PKCE の役割を login auth_code
    交換経路（`POST /api/auth/session`）に限定して記述する
+
+### Requirement 5: 登録完了不明状態（第 3 状態）の提示と discoverable ログイン復旧導線
 
 **Objective:** As a パスキー新規作成中にネットワーク断・サーバ 5xx を経験した Web 訪問者,
 I want 「登録が確定した／されていない」を単純な二値で誤って断定されず、次に取れる行動を
