@@ -164,18 +164,21 @@ I want 「登録が確定した／されていない」を単純な二値で誤�
 
 #### Acceptance Criteria
 
-1. When 登録 finish のリクエスト送出後にクライアントがレスポンスを受け取れなかった
-   （ネットワーク断・timeout・サーバから応答なしの 5xx 等）とき, the Web Passkey
-   Registration Flow shall そのケースを「登録成功」「登録失敗」のいずれとも断定せず、
-   「登録が確定したかどうか判別できない」旨の第 3 の完了不明状態としてユーザーに提示する
+1. When 登録 finish のリクエスト送出後に確定的な pre-commit の 4xx 応答を得られなかった
+   （ネットワーク断・timeout・送出後 Abort・応答なしの 5xx・commit 済みを示唆する 2xx だが
+   応答 body が欠損／途中切断／parse 不能）とき, the Web Passkey Registration Flow shall
+   そのケースを「登録成功」「登録失敗」のいずれとも断定せず、「登録が確定したかどうか判別
+   できない」旨の第 3 の完了不明状態としてユーザーに提示する
 2. When 完了不明状態を提示するとき, the Web Passkey Registration Flow shall ユーザーが
-   次に取るべき行動として「ログイン導線から同じユーザー名でログインを試すことで、登録の
-   成否を確認する」旨の案内を同一画面上に提示する
-3. If 完了不明状態のユーザーがログイン導線でログイン試行して成功したとき, the Web App
-   shall 通常の Cookie セッション認証状態に到達し 2 ペイン UI を提示する
-4. If 完了不明状態のユーザーがログイン導線でログイン試行して credential 未解決を理由に
-   拒否されたとき, the Web Passkey Registration Flow shall ユーザーに再度新規作成を試みる
-   導線を提示する
+   次に取るべき行動として「ログイン導線から discoverable なパスキーログイン（ユーザー名の
+   入力を伴わない）を試すことで、登録の成否を確認する」旨の案内を提示し、再作成導線は
+   同列に並置せず、この確認ログインが失敗した後にのみ提示する
+3. If 完了不明状態のユーザーが discoverable なパスキーログインを試行して成功したとき,
+   the Web App shall 通常の Cookie セッション認証状態に到達し 2 ペイン UI を提示する
+4. If 完了不明状態のユーザーが discoverable なパスキーログインを試行して一律の認証失敗
+   （AUTHENTICATION_FAILED）で拒否されたとき, the Web Passkey Registration Flow shall
+   内部理由（credential 未解決等）を区別して提示せず、その一律失敗の後にはじめてユーザーに
+   再度新規作成を試みる導線を提示する
 5. The Web Passkey Registration Flow shall 完了不明状態の表示テキストにサーバの内部詳細
    （スタックトレース・内部エラー原因・SQL / DB 名等）を反射しない
 6. The Web Passkey Registration Flow shall 完了不明状態を、ユーザー名形式不正・
@@ -242,9 +245,11 @@ I want `.env.sample` と `docker-compose.yml` の変更を PR #229 に正式な�
 
 ## Out of Scope
 
-- Issue #230 で扱う「user レコードと credential レコードの単一 DB トランザクションでの
-  作成」実装（本 spec は Requirement 1 の合流方式の要件宣言までを扱い、その実装形態は
-  #230 に委ねる）
+- Issue #230 が扱う範囲は「user レコードと credential レコードの作成」までであり、Web 直接
+  session（Requirement 1）で必要となる **session 行を含む単一 DB トランザクションへの拡張
+  （3 行 atomic）は本 spec / PR #229 の責務**である（#230 に委ねない）。本 spec は
+  Requirement 1 の合流方式（追加 ceremony なしで finish 応答が Cookie session を確定する）を
+  要件として宣言し、その 3 行トランザクション化の設計形態は #231 design.md で確定する
 - 本 spec 内で PR #229 の製品コード（`internal/**` / `web/src/**` の実装ファイル）を直接
   変更すること（実反映は design PR merge 後の PR #229 needs-iteration 1 回で行う）
 - #216 で確定済みの iOS 向けパスキー API 契約
@@ -257,30 +262,36 @@ I want `.env.sample` と `docker-compose.yml` の変更を PR #229 に正式な�
 - パスキー credential のセルフサービス管理 UI・アカウント統合・Sign in with Apple の Web
   導入など、#223 spec が既に Out of Scope としている事項
 
+## 確定済み決定事項（人間運用者による #231 決定）
+
+以下は Issue #231 の人間運用者コメントで確定済みであり、本 spec の前提として組み込む
+（Open Questions からは除外する）:
+
+- **合流方式**: Requirement 1 は **`POST /api/passkey/registration/finish` の検証成功から
+  同一 DB トランザクションで user・credential・Web session の 3 行を作成し、commit 後に同じ
+  finish 応答で `Set-Cookie` する直接 session 方式**で満たす。登録用 auth_code / 二度目の
+  `navigator.credentials.get()` / 登録専用の `/api/auth/session` 呼び出し / exchange artifact は
+  導入しない。`/api/auth/session` は既存パスキー **ログイン** 用（auth_code 交換）として残す
+- **#216 JSON 契約**: `registration/begin` / `registration/finish` の request / response JSON
+  フィールドは変更しない（finish 応答は Web / iOS とも `{user_id}` のまま。Web の差分は
+  `Set-Cookie` ヘッダのみ）。iOS には session 行も Cookie も作らない
+- **PKCE の役割分離**: 登録 begin の `code_challenge` は #216 契約維持のためフィールドを残すが
+  **形式検証のみ**で永続化・束縛しない。PKCE は直接登録経路を防御せず、ログイン auth_code
+  交換にのみ役割を持つ
+- **fail-closed 表の列**: Web capability / Web login exchange / Web registration direct session /
+  iOS registration/* / iOS authentication/* を **別列** として表現する（env 軸は
+  `WEBAUTHN_RP_ID`+`WEBAUTHN_ORIGINS` / `NATIVE_AUTH_JWT_SECRET` / `CORS_ALLOWED_ORIGIN`）
+
 ## Open Questions
 
-- **登録 finish の応答形態を additive に変更する具体方式**: Requirement 1 を「追加の WebAuthn
-  ceremony なしで」満たすための、`POST /api/passkey/registration/finish` の応答に auth_code
-  相当を additive に含めるか、別 endpoint を切って登録トランザクションから直接 session を
-  発行するか、その他か、の具体方式は #231 design.md（Architect）の領分とする。本 spec は
-  「登録トランザクションに紐付いた形で追加操作なく合流する」という user-observable な
-  要件までを規定する
 - **完了不明状態の UI 実現方式**: Requirement 5.1 / 5.2 の「第 3 状態」を提示する UI 実現
-  （dialog 内での状態表示か、ログイン画面への遷移＋メッセージか、専用完了画面か）は
-  design 判断とする
-- **PKCE 束縛を維持したまま登録トランザクションと合流する方式**: 現行 #216 の PKCE 契約
-  （認証 begin リクエストで `code_challenge` を必須とし、finish 応答で得た auth_code を
-  code_verifier と併せて交換する形式）を維持したまま、Requirement 1 の「追加 ceremony
-  なし」を満たす合流方式（登録 begin で code_challenge を先渡し、finish 応答で PKCE
-  束縛済み auth_code を返す方式など）の具体は design 判断とする
-- **fail-closed 表の env 分割粒度**: Requirement 3.1 / 3.2 の「独立した列」を、既存
-  `NATIVE_AUTH_JWT_SECRET` / `WEBAUTHN_RP_ID` / `WEBAUTHN_ORIGINS` の 3 変数を組み合わせた
-  行として表現するか、Web 用セッション交換 env と WebAuthn 系 env の 2 グループとして
-  表現するかは design 判断とする（本 spec は「iOS API が独立に維持される」ことを
-  user-observable / operator-observable に要件化するに留める）
+  （dialog 内での状態表示か、専用完了画面か）は design 判断とする。ただし「discoverable
+  ログインで確認 → 一律失敗の後にのみ再作成導線」という提示順序（Requirement 5.2 / 5.4）は
+  確定済みで、UI 実現方式はこの順序を満たす範囲に限定される
 - **完了不明状態と Requirement 3.4 の関係**: #223 Requirement 3.4（合流失敗時のログイン画面
   復帰）と本 spec Requirement 5（登録 commit 済み・応答喪失）の状態遷移・表示重複関係は
-  design で整理する
+  design で整理する（直接 session 化により registration 経路の「session 交換段の失敗」は
+  消滅し、両者は finish 応答が確定したか否かで分岐する）
 
 ## 関連
 
