@@ -326,10 +326,13 @@ func TestPostgresPasskeyCredentialRepo_DB(t *testing.T) {
 		}
 
 		// 期待列（design.md §Physical Data Model と 1:1）
+		// Issue #234: BackupEligible / BackupState 列を追加（NFR 1.1 の許容範囲 = 既存列不変 +
+		// 検証情報のみに限定）。BE/BS は WebAuthn credential 検証情報のため NFR 1.1 に整合する。
 		want := map[string]bool{
 			"id": true, "user_id": true, "credential_id": true, "public_key": true,
 			"sign_count": true, "attestation_type": true, "aaguid": true,
 			"transports": true, "created_at": true, "last_used_at": true,
+			"backup_eligible": true, "backup_state": true,
 		}
 		if len(cols) != len(want) {
 			t.Errorf("カラム数が期待と異なる（秘密情報用の列が追加されている可能性 / NFR 1.1）: got %d cols %v, want %d",
