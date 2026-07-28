@@ -2,6 +2,7 @@ package passkey
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -113,12 +114,17 @@ func (s *stubChallengeStoreForRegistration) Consume(
 
 // stubUserWriter は UserWriter interface を差し替えるスタブ。
 type stubUserWriter struct {
-	findByNormalizedFn func(ctx context.Context, normalized string) (*model.User, error)
-	createUserOnlyFn   func(ctx context.Context, u *model.User) error
-	findByIDFn         func(ctx context.Context, id string) (*model.User, error)
+	findByNormalizedFn   func(ctx context.Context, normalized string) (*model.User, error)
+	createUserOnlyFn     func(ctx context.Context, u *model.User) error
+	createUserOnlyExecFn func(ctx context.Context, q repository.DBTX, u *model.User) error
+	findByIDFn           func(ctx context.Context, id string) (*model.User, error)
 
-	createUserOnlyCalled int
-	lastCreated          *model.User
+	createUserOnlyCalled     int
+	createUserOnlyExecCalled int
+	lastCreated              *model.User
+	// lastCreateExecQuerier は Issue #230 のテストで CreateUserOnlyExec が
+	// 期待する共有トランザクション上の querier で呼ばれたかを検証するために保持する。
+	lastCreateExecQuerier repository.DBTX
 }
 
 func (u *stubUserWriter) FindByNormalizedUsername(ctx context.Context, normalized string) (*model.User, error) {
@@ -137,6 +143,16 @@ func (u *stubUserWriter) CreateUserOnly(ctx context.Context, user *model.User) e
 	return nil
 }
 
+func (u *stubUserWriter) CreateUserOnlyExec(ctx context.Context, q repository.DBTX, user *model.User) error {
+	u.createUserOnlyExecCalled++
+	u.lastCreated = user
+	u.lastCreateExecQuerier = q
+	if u.createUserOnlyExecFn != nil {
+		return u.createUserOnlyExecFn(ctx, q, user)
+	}
+	return nil
+}
+
 func (u *stubUserWriter) FindByID(ctx context.Context, id string) (*model.User, error) {
 	if u.findByIDFn != nil {
 		return u.findByIDFn(ctx, id)
@@ -149,10 +165,15 @@ type stubCredentialWriter struct {
 	findByCredentialIDFn func(ctx context.Context, credentialID []byte) (*model.PasskeyCredential, error)
 	listByUserIDFn       func(ctx context.Context, userID string) ([]*model.PasskeyCredential, error)
 	createFn             func(ctx context.Context, c *model.PasskeyCredential) error
+	createExecFn         func(ctx context.Context, q repository.DBTX, c *model.PasskeyCredential) error
 
 	createCalled     int
+	createExecCalled int
 	lastCreatedCred  *model.PasskeyCredential
 	listByUserCalled int
+	// lastCreateExecQuerier は Issue #230 のテストで CreateExec が
+	// 期待する共有トランザクション上の querier で呼ばれたかを検証するために保持する。
+	lastCreateExecQuerier repository.DBTX
 }
 
 func (c *stubCredentialWriter) FindByCredentialID(ctx context.Context, credentialID []byte) (*model.PasskeyCredential, error) {
@@ -179,27 +200,102 @@ func (c *stubCredentialWriter) Create(ctx context.Context, cred *model.PasskeyCr
 	return nil
 }
 
+func (c *stubCredentialWriter) CreateExec(ctx context.Context, q repository.DBTX, cred *model.PasskeyCredential) error {
+	c.createExecCalled++
+	c.lastCreatedCred = cred
+	c.lastCreateExecQuerier = q
+	if c.createExecFn != nil {
+		return c.createExecFn(ctx, q, cred)
+	}
+	return nil
+}
+
+// stubRegistrationTx / stubRegistrationTxBeginner は RegistrationTx /
+// RegistrationTxBeginner を差し替えるスタブ（Issue #230 / Req 1.1〜1.6 / NFR 4.1）。
+//
+// stubRegistrationTx は Querier / Commit / Rollback の呼び出し回数を記録し、
+// FinishRegistrationNew が「両成功時のみ Commit」「失敗時は Rollback」の契約を
+// 満たしているかを検証する。
+type stubRegistrationTx struct {
+	querier        repository.DBTX
+	commitCalled   int
+	rollbackCalled int
+	commitErr      error
+}
+
+func (t *stubRegistrationTx) Querier() repository.DBTX { return t.querier }
+func (t *stubRegistrationTx) Commit() error {
+	t.commitCalled++
+	return t.commitErr
+}
+func (t *stubRegistrationTx) Rollback() error {
+	t.rollbackCalled++
+	return nil
+}
+
+type stubRegistrationTxBeginner struct {
+	beginErr    error
+	beginCalled int
+	// 発行済み tx を保持し、テスト側から Commit/Rollback の呼び出し回数を検証できるようにする。
+	lastTx *stubRegistrationTx
+	// querier は Querier() が返す値。stub なので任意の senyinel を渡せる（nil でも可）。
+	querier repository.DBTX
+}
+
+func (b *stubRegistrationTxBeginner) BeginTx(ctx context.Context) (RegistrationTx, error) {
+	b.beginCalled++
+	if b.beginErr != nil {
+		return nil, b.beginErr
+	}
+	tx := &stubRegistrationTx{querier: b.querier}
+	b.lastTx = tx
+	return tx, nil
+}
+
+// stubDBTX は repository.DBTX を充足する sentinel。実際にクエリを実行することは
+// なく、tx.Querier() が返した値と *Exec に渡された値が同一であることの検証にのみ使う。
+// stub 内の *Exec 実装で呼ばれない前提のため、全メソッドは panic する。
+type stubDBTX struct {
+	label string
+}
+
+func (s *stubDBTX) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	panic("stubDBTX.ExecContext should not be called in unit tests")
+}
+func (s *stubDBTX) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	panic("stubDBTX.QueryContext should not be called in unit tests")
+}
+func (s *stubDBTX) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	panic("stubDBTX.QueryRowContext should not be called in unit tests")
+}
+
 // validPKCEChallenge は auth.ValidatePKCES256 の形式（43 文字 base64url）を通過する
 // テスト用固定値。
 const validPKCEChallenge = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"
 
 // newRegistrationServiceFixture は RegistrationService の全依存を stub 化した
 // 標準セットを返すヘルパー。テストごとに必要な stub の挙動だけを差し替える。
+//
+// Issue #230 / Req 1.1〜1.6: 新規登録 finish の 1 tx 化に伴い RegistrationTxBeginner を
+// 追加で注入する。tx stub の Querier は sentinel *stubDBTX を返し、CreateUserOnlyExec /
+// CreateExec に同一 querier が渡ることをテスト側で検証できるようにする。
 func newRegistrationServiceFixture(t *testing.T) (
 	*RegistrationService,
 	*stubWebAuthnAdapter,
 	*stubChallengeStoreForRegistration,
 	*stubUserWriter,
 	*stubCredentialWriter,
+	*stubRegistrationTxBeginner,
 ) {
 	t.Helper()
 	adapter := &stubWebAuthnAdapter{}
 	challenges := &stubChallengeStoreForRegistration{}
 	users := &stubUserWriter{}
 	creds := &stubCredentialWriter{}
+	txBeginner := &stubRegistrationTxBeginner{querier: &stubDBTX{label: "tx-querier"}}
 	now := func() time.Time { return time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC) }
-	svc := NewRegistrationService(adapter, challenges, users, creds, now)
-	return svc, adapter, challenges, users, creds
+	svc := NewRegistrationService(adapter, challenges, users, creds, txBeginner, now)
+	return svc, adapter, challenges, users, creds, txBeginner
 }
 
 // ------------------------------------------------------------
@@ -211,7 +307,7 @@ func TestRegistrationService_BeginRegistrationNew(t *testing.T) {
 
 	t.Run("有効な username と PKCE で challenge_id と options を返す", func(t *testing.T) {
 		// Arrange
-		svc, adapter, challenges, users, _ := newRegistrationServiceFixture(t)
+		svc, adapter, challenges, users, _, _ := newRegistrationServiceFixture(t)
 		challenges.issueFn = func(ctx context.Context, kind model.PasskeyChallengeKind, userID *string,
 			pendingUsername *string, sessionData []byte, rawChallenge []byte,
 		) (string, error) {
@@ -256,7 +352,7 @@ func TestRegistrationService_BeginRegistrationNew(t *testing.T) {
 
 	t.Run("username 形式不正 (空) は ErrInvalidUsername を返し ceremony を起動しない", func(t *testing.T) {
 		// Arrange
-		svc, adapter, challenges, users, _ := newRegistrationServiceFixture(t)
+		svc, adapter, challenges, users, _, _ := newRegistrationServiceFixture(t)
 
 		// Act
 		_, _, err := svc.BeginRegistrationNew(ctx, "", "", validPKCEChallenge)
@@ -278,7 +374,7 @@ func TestRegistrationService_BeginRegistrationNew(t *testing.T) {
 
 	t.Run("username 形式不正 (許容外文字) は ErrInvalidUsername を返す", func(t *testing.T) {
 		// Arrange
-		svc, _, _, _, _ := newRegistrationServiceFixture(t)
+		svc, _, _, _, _, _ := newRegistrationServiceFixture(t)
 
 		// Act
 		_, _, err := svc.BeginRegistrationNew(ctx, "invalid space", "", validPKCEChallenge)
@@ -291,7 +387,7 @@ func TestRegistrationService_BeginRegistrationNew(t *testing.T) {
 
 	t.Run("username 重複は ErrUsernameTaken を返し WebAuthn を起動しない", func(t *testing.T) {
 		// Arrange
-		svc, adapter, challenges, users, _ := newRegistrationServiceFixture(t)
+		svc, adapter, challenges, users, _, _ := newRegistrationServiceFixture(t)
 		users.findByNormalizedFn = func(ctx context.Context, normalized string) (*model.User, error) {
 			// 既存 user を返す = 重複
 			return &model.User{ID: "existing-user-id", UsernameNormalized: normalized}, nil
@@ -314,7 +410,7 @@ func TestRegistrationService_BeginRegistrationNew(t *testing.T) {
 
 	t.Run("PKCE 形式不正は ErrRegistrationFailed を返し ceremony を起動しない", func(t *testing.T) {
 		// Arrange
-		svc, adapter, challenges, _, _ := newRegistrationServiceFixture(t)
+		svc, adapter, challenges, _, _, _ := newRegistrationServiceFixture(t)
 
 		// Act
 		_, _, err := svc.BeginRegistrationNew(ctx, "alice", "", "invalid-pkce")
@@ -333,7 +429,7 @@ func TestRegistrationService_BeginRegistrationNew(t *testing.T) {
 
 	t.Run("email 未指定 (empty) でも begin は成功する (Req 1.6 の前提)", func(t *testing.T) {
 		// Arrange
-		svc, _, _, _, _ := newRegistrationServiceFixture(t)
+		svc, _, _, _, _, _ := newRegistrationServiceFixture(t)
 
 		// Act
 		_, _, err := svc.BeginRegistrationNew(ctx, "alice", "", validPKCEChallenge)
@@ -346,7 +442,7 @@ func TestRegistrationService_BeginRegistrationNew(t *testing.T) {
 
 	t.Run("FindByNormalizedUsername infra エラーは wrap して返す", func(t *testing.T) {
 		// Arrange
-		svc, _, _, users, _ := newRegistrationServiceFixture(t)
+		svc, _, _, users, _, _ := newRegistrationServiceFixture(t)
 		infraErr := errors.New("db down")
 		users.findByNormalizedFn = func(ctx context.Context, normalized string) (*model.User, error) {
 			return nil, infraErr
@@ -395,9 +491,9 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		}
 	}
 
-	t.Run("成功: user 行と credential 行を作成し userID を返す (email は空でも作成 / Req 1.6)", func(t *testing.T) {
+	t.Run("成功: user 行と credential 行を単一 tx で作成し Commit / userID を返す (Req 1.1 / Req 1.6 / Issue #230 Req 1.1・1.2)", func(t *testing.T) {
 		// Arrange
-		svc, adapter, challenges, users, creds := newRegistrationServiceFixture(t)
+		svc, adapter, challenges, users, creds, txBeginner := newRegistrationServiceFixture(t)
 		challenges.consumeFn = newConsumedFn()
 
 		// Act
@@ -410,8 +506,40 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		if userID != pendingUserID {
 			t.Errorf("userID = %q, want %q (pending UUID promoted to users.id)", userID, pendingUserID)
 		}
-		if users.createUserOnlyCalled != 1 {
-			t.Errorf("CreateUserOnly called %d times, want 1", users.createUserOnlyCalled)
+		// tx 契約: BeginTx が 1 回、Commit が 1 回、Rollback は defer no-op（既 commit 済み）
+		if txBeginner.beginCalled != 1 {
+			t.Errorf("BeginTx called %d times, want 1", txBeginner.beginCalled)
+		}
+		if txBeginner.lastTx == nil {
+			t.Fatal("txBeginner.lastTx is nil")
+		}
+		if txBeginner.lastTx.commitCalled != 1 {
+			t.Errorf("Commit called %d times, want 1 (成功時のみ Commit)", txBeginner.lastTx.commitCalled)
+		}
+		// defer は committed=true なので Rollback を呼ばない
+		if txBeginner.lastTx.rollbackCalled != 0 {
+			t.Errorf("Rollback called %d times, want 0 (Commit 済みは Rollback しない)", txBeginner.lastTx.rollbackCalled)
+		}
+		// CreateUserOnlyExec / CreateExec の呼び出しと同一 tx querier での実行を検証
+		if users.createUserOnlyExecCalled != 1 {
+			t.Errorf("CreateUserOnlyExec called %d times, want 1", users.createUserOnlyExecCalled)
+		}
+		if users.createUserOnlyCalled != 0 {
+			t.Errorf("CreateUserOnly (non-Exec) must not be called; got %d (finish は Exec 経由が正)", users.createUserOnlyCalled)
+		}
+		if creds.createExecCalled != 1 {
+			t.Errorf("credential.CreateExec called %d times, want 1", creds.createExecCalled)
+		}
+		if creds.createCalled != 0 {
+			t.Errorf("credential.Create (non-Exec) must not be called; got %d", creds.createCalled)
+		}
+		// tx.Querier() と CreateUserOnlyExec / CreateExec に渡された DBTX が同一
+		wantQuerier := txBeginner.querier
+		if users.lastCreateExecQuerier != wantQuerier {
+			t.Errorf("CreateUserOnlyExec に渡された querier が tx.Querier() と一致しない (users)")
+		}
+		if creds.lastCreateExecQuerier != wantQuerier {
+			t.Errorf("CreateExec に渡された querier が tx.Querier() と一致しない (credentials)")
 		}
 		if users.lastCreated == nil {
 			t.Fatalf("lastCreated user is nil")
@@ -426,9 +554,6 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 			t.Errorf("created user.UsernameNormalized = %q, want %q",
 				users.lastCreated.UsernameNormalized, pendingUsername)
 		}
-		if creds.createCalled != 1 {
-			t.Errorf("credential.Create called %d times, want 1", creds.createCalled)
-		}
 		if creds.lastCreatedCred == nil || creds.lastCreatedCred.UserID != pendingUserID {
 			t.Errorf("credential.UserID mismatch: %+v", creds.lastCreatedCred)
 		}
@@ -438,9 +563,9 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		}
 	})
 
-	t.Run("challenge 期限切れ (Consume が ErrChallengeNotUsable) は ErrRegistrationFailed に正規化", func(t *testing.T) {
+	t.Run("challenge 期限切れ (Consume が ErrChallengeNotUsable) は ErrRegistrationFailed に正規化 / tx 未開始", func(t *testing.T) {
 		// Arrange
-		svc, _, challenges, users, creds := newRegistrationServiceFixture(t)
+		svc, _, challenges, users, creds, txBeginner := newRegistrationServiceFixture(t)
 		challenges.consumeFn = func(ctx context.Context, challengeID string,
 			expectedKind model.PasskeyChallengeKind,
 		) (*model.PasskeyChallenge, error) {
@@ -454,14 +579,17 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		if !errors.Is(err, ErrRegistrationFailed) {
 			t.Fatalf("expected ErrRegistrationFailed, got %v", err)
 		}
-		if users.createUserOnlyCalled != 0 || creds.createCalled != 0 {
+		if users.createUserOnlyExecCalled != 0 || creds.createExecCalled != 0 {
 			t.Errorf("no writes should occur on expired challenge")
+		}
+		if txBeginner.beginCalled != 0 {
+			t.Errorf("BeginTx must not be called on expired challenge (early return before tx)")
 		}
 	})
 
-	t.Run("attestation 検証失敗 (adapter が ErrRegistrationFailed) は そのまま返し user/credential を作らない", func(t *testing.T) {
+	t.Run("attestation 検証失敗 (adapter が ErrRegistrationFailed) は そのまま返し tx を開始しない", func(t *testing.T) {
 		// Arrange
-		svc, adapter, challenges, users, creds := newRegistrationServiceFixture(t)
+		svc, adapter, challenges, users, creds, txBeginner := newRegistrationServiceFixture(t)
 		challenges.consumeFn = newConsumedFn()
 		adapter.finishRegistrationFn = func(user WebAuthnUser, sessionData []byte, requestBody []byte) (
 			*ParsedCredential, error,
@@ -476,19 +604,22 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		if !errors.Is(err, ErrRegistrationFailed) {
 			t.Fatalf("expected ErrRegistrationFailed, got %v", err)
 		}
-		if users.createUserOnlyCalled != 0 {
-			t.Errorf("CreateUserOnly must not be called after attestation failure")
+		if users.createUserOnlyExecCalled != 0 {
+			t.Errorf("CreateUserOnlyExec must not be called after attestation failure")
 		}
-		if creds.createCalled != 0 {
-			t.Errorf("credential.Create must not be called after attestation failure")
+		if creds.createExecCalled != 0 {
+			t.Errorf("credential.CreateExec must not be called after attestation failure")
+		}
+		if txBeginner.beginCalled != 0 {
+			t.Errorf("BeginTx must not be called after attestation failure (attestation は tx 開始より前)")
 		}
 	})
 
-	t.Run("CreateUserOnly の UNIQUE 衝突 (race) は ErrRegistrationFailed に正規化 (Req 1.7)", func(t *testing.T) {
+	t.Run("CreateUserOnlyExec の UNIQUE 衝突 (username race) は tx rollback + ErrRegistrationFailed / credential は永続化されない (Issue #230 Req 1.5)", func(t *testing.T) {
 		// Arrange
-		svc, _, challenges, users, creds := newRegistrationServiceFixture(t)
+		svc, _, challenges, users, creds, txBeginner := newRegistrationServiceFixture(t)
 		challenges.consumeFn = newConsumedFn()
-		users.createUserOnlyFn = func(ctx context.Context, u *model.User) error {
+		users.createUserOnlyExecFn = func(ctx context.Context, q repository.DBTX, u *model.User) error {
 			return repository.ErrUsernameTaken
 		}
 
@@ -499,16 +630,28 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		if !errors.Is(err, ErrRegistrationFailed) {
 			t.Fatalf("expected ErrRegistrationFailed (uniform), got %v", err)
 		}
-		if creds.createCalled != 0 {
-			t.Errorf("credential.Create must not be called after user race conflict")
+		if creds.createExecCalled != 0 {
+			t.Errorf("credential.CreateExec must not be called after user race conflict (順序: user → credential)")
+		}
+		if txBeginner.beginCalled != 1 {
+			t.Errorf("BeginTx called %d times, want 1", txBeginner.beginCalled)
+		}
+		if txBeginner.lastTx == nil {
+			t.Fatal("txBeginner.lastTx is nil")
+		}
+		if txBeginner.lastTx.commitCalled != 0 {
+			t.Errorf("Commit must not be called on user race conflict; got %d", txBeginner.lastTx.commitCalled)
+		}
+		if txBeginner.lastTx.rollbackCalled != 1 {
+			t.Errorf("Rollback must be called exactly once on user race conflict; got %d (Req 1.5)", txBeginner.lastTx.rollbackCalled)
 		}
 	})
 
-	t.Run("credential 重複 (ErrCredentialAlreadyRegistered) は ErrRegistrationFailed に正規化 (Req 1.7)", func(t *testing.T) {
+	t.Run("credential 重複 (ErrCredentialAlreadyRegistered) は tx rollback + ErrRegistrationFailed / user 行は永続化されない (Issue #230 Req 1.3)", func(t *testing.T) {
 		// Arrange
-		svc, _, challenges, _, creds := newRegistrationServiceFixture(t)
+		svc, _, challenges, users, creds, txBeginner := newRegistrationServiceFixture(t)
 		challenges.consumeFn = newConsumedFn()
-		creds.createFn = func(ctx context.Context, c *model.PasskeyCredential) error {
+		creds.createExecFn = func(ctx context.Context, q repository.DBTX, c *model.PasskeyCredential) error {
 			return repository.ErrCredentialAlreadyRegistered
 		}
 
@@ -519,11 +662,95 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		if !errors.Is(err, ErrRegistrationFailed) {
 			t.Fatalf("expected ErrRegistrationFailed, got %v", err)
 		}
+		// user は 1 回 tx 上で CreateUserOnlyExec が呼ばれる（先行）
+		if users.createUserOnlyExecCalled != 1 {
+			t.Errorf("CreateUserOnlyExec should be called before credential.CreateExec; got %d", users.createUserOnlyExecCalled)
+		}
+		// credential も 1 回 CreateExec が呼ばれ、そこで重複が返る
+		if creds.createExecCalled != 1 {
+			t.Errorf("credential.CreateExec should be called; got %d", creds.createExecCalled)
+		}
+		// tx 契約: Commit されず Rollback が呼ばれる（Req 1.3 の孤立ユーザー禁止）
+		if txBeginner.lastTx == nil {
+			t.Fatal("txBeginner.lastTx is nil")
+		}
+		if txBeginner.lastTx.commitCalled != 0 {
+			t.Errorf("Commit must not be called on credential duplicate; got %d (Req 1.3)", txBeginner.lastTx.commitCalled)
+		}
+		if txBeginner.lastTx.rollbackCalled != 1 {
+			t.Errorf("Rollback must be called on credential duplicate; got %d", txBeginner.lastTx.rollbackCalled)
+		}
 	})
 
-	t.Run("challenge の PendingUsername が nil の場合は ErrRegistrationFailed", func(t *testing.T) {
+	t.Run("credential インフラ障害 (任意の error) は tx rollback + wrap して返す / user 行は永続化されない (Issue #230 Req 1.4)", func(t *testing.T) {
 		// Arrange
-		svc, _, challenges, _, _ := newRegistrationServiceFixture(t)
+		svc, _, challenges, users, creds, txBeginner := newRegistrationServiceFixture(t)
+		challenges.consumeFn = newConsumedFn()
+		infraErr := errors.New("simulated postgres down")
+		creds.createExecFn = func(ctx context.Context, q repository.DBTX, c *model.PasskeyCredential) error {
+			return infraErr
+		}
+
+		// Act
+		_, err := svc.FinishRegistrationNew(ctx, "id", []byte("body"))
+
+		// Assert
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		// infra error は uniform sentinel ではなく wrap で返す（handler で 500 相当）。
+		if !errors.Is(err, infraErr) {
+			t.Errorf("expected wrapped %v, got %v", infraErr, err)
+		}
+		if errors.Is(err, ErrRegistrationFailed) {
+			t.Errorf("infra error must not be re-mapped to ErrRegistrationFailed uniform sentinel: %v", err)
+		}
+		if users.createUserOnlyExecCalled != 1 {
+			t.Errorf("CreateUserOnlyExec should be called before credential.CreateExec; got %d", users.createUserOnlyExecCalled)
+		}
+		if creds.createExecCalled != 1 {
+			t.Errorf("credential.CreateExec should be called; got %d", creds.createExecCalled)
+		}
+		// Req 1.4: 孤立ユーザーを残さない = Rollback される
+		if txBeginner.lastTx == nil {
+			t.Fatal("txBeginner.lastTx is nil")
+		}
+		if txBeginner.lastTx.commitCalled != 0 {
+			t.Errorf("Commit must not be called on credential infra error; got %d (Req 1.4)", txBeginner.lastTx.commitCalled)
+		}
+		if txBeginner.lastTx.rollbackCalled != 1 {
+			t.Errorf("Rollback must be called on credential infra error; got %d", txBeginner.lastTx.rollbackCalled)
+		}
+	})
+
+	t.Run("BeginTx 自体の失敗は wrap して返す / 各 Exec は呼ばれない", func(t *testing.T) {
+		// Arrange
+		svc, _, challenges, users, creds, txBeginner := newRegistrationServiceFixture(t)
+		challenges.consumeFn = newConsumedFn()
+		beginErr := errors.New("simulated begin tx failure")
+		txBeginner.beginErr = beginErr
+
+		// Act
+		_, err := svc.FinishRegistrationNew(ctx, "id", []byte("body"))
+
+		// Assert
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !errors.Is(err, beginErr) {
+			t.Errorf("expected wrapped %v, got %v", beginErr, err)
+		}
+		if errors.Is(err, ErrRegistrationFailed) {
+			t.Errorf("tx begin failure must not be re-mapped to ErrRegistrationFailed")
+		}
+		if users.createUserOnlyExecCalled != 0 || creds.createExecCalled != 0 {
+			t.Errorf("no writes should occur when BeginTx fails")
+		}
+	})
+
+	t.Run("challenge の PendingUsername が nil の場合は ErrRegistrationFailed / tx 未開始", func(t *testing.T) {
+		// Arrange
+		svc, _, challenges, _, _, txBeginner := newRegistrationServiceFixture(t)
 		challenges.consumeFn = func(ctx context.Context, challengeID string,
 			expectedKind model.PasskeyChallengeKind,
 		) (*model.PasskeyChallenge, error) {
@@ -542,11 +769,14 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		if !errors.Is(err, ErrRegistrationFailed) {
 			t.Fatalf("expected ErrRegistrationFailed on malformed challenge, got %v", err)
 		}
+		if txBeginner.beginCalled != 0 {
+			t.Errorf("BeginTx must not be called on malformed challenge (early return before tx)")
+		}
 	})
 
-	t.Run("sessionData に user handle (仮 UUID) が無い場合は ErrRegistrationFailed", func(t *testing.T) {
+	t.Run("sessionData に user handle (仮 UUID) が無い場合は ErrRegistrationFailed / tx 未開始", func(t *testing.T) {
 		// Arrange
-		svc, _, challenges, users, creds := newRegistrationServiceFixture(t)
+		svc, _, challenges, users, creds, txBeginner := newRegistrationServiceFixture(t)
 		challenges.consumeFn = func(ctx context.Context, challengeID string,
 			expectedKind model.PasskeyChallengeKind,
 		) (*model.PasskeyChallenge, error) {
@@ -566,8 +796,11 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		if !errors.Is(err, ErrRegistrationFailed) {
 			t.Fatalf("expected ErrRegistrationFailed on malformed session, got %v", err)
 		}
-		if users.createUserOnlyCalled != 0 || creds.createCalled != 0 {
+		if users.createUserOnlyExecCalled != 0 || creds.createExecCalled != 0 {
 			t.Errorf("no writes should occur on malformed session")
+		}
+		if txBeginner.beginCalled != 0 {
+			t.Errorf("BeginTx must not be called on malformed session")
 		}
 	})
 }
@@ -582,7 +815,7 @@ func TestRegistrationService_BeginAddCredential(t *testing.T) {
 
 	t.Run("既存 credential を excludeCredentials として WebAuthnAdapter に渡す", func(t *testing.T) {
 		// Arrange
-		svc, adapter, challenges, users, creds := newRegistrationServiceFixture(t)
+		svc, adapter, challenges, users, creds, _ := newRegistrationServiceFixture(t)
 		users.findByIDFn = func(ctx context.Context, id string) (*model.User, error) {
 			return &model.User{ID: id, Username: "bob"}, nil
 		}
@@ -627,7 +860,7 @@ func TestRegistrationService_BeginAddCredential(t *testing.T) {
 
 	t.Run("user 未存在 (FindByID が nil) は ErrRegistrationFailed", func(t *testing.T) {
 		// Arrange
-		svc, adapter, challenges, users, _ := newRegistrationServiceFixture(t)
+		svc, adapter, challenges, users, _, _ := newRegistrationServiceFixture(t)
 		users.findByIDFn = func(ctx context.Context, id string) (*model.User, error) {
 			return nil, nil
 		}
@@ -667,7 +900,7 @@ func TestRegistrationService_FinishAddCredential(t *testing.T) {
 
 	t.Run("成功: 別 credential を追加登録し credential 行を作成 (同 user 複数登録可 / Req 3.4)", func(t *testing.T) {
 		// Arrange
-		svc, _, challenges, users, creds := newRegistrationServiceFixture(t)
+		svc, _, challenges, users, creds, _ := newRegistrationServiceFixture(t)
 		challenges.consumeFn = newAddConsumedFn(authedUserID)
 		users.findByIDFn = func(ctx context.Context, id string) (*model.User, error) {
 			return &model.User{ID: id, Username: "bob"}, nil
@@ -699,7 +932,7 @@ func TestRegistrationService_FinishAddCredential(t *testing.T) {
 
 	t.Run("challenge userID と authenticatedUserID の不一致は ErrRegistrationFailed", func(t *testing.T) {
 		// Arrange
-		svc, adapter, challenges, users, creds := newRegistrationServiceFixture(t)
+		svc, adapter, challenges, users, creds, _ := newRegistrationServiceFixture(t)
 		// challenge には otherUserID が入っているが、context は authedUserID を提示
 		challenges.consumeFn = newAddConsumedFn(otherUserID)
 		users.findByIDFn = func(ctx context.Context, id string) (*model.User, error) {
@@ -723,7 +956,7 @@ func TestRegistrationService_FinishAddCredential(t *testing.T) {
 
 	t.Run("別 user に既登録の credential 提示は ErrRegistrationFailed に正規化 (Req 3.6)", func(t *testing.T) {
 		// Arrange
-		svc, _, challenges, users, creds := newRegistrationServiceFixture(t)
+		svc, _, challenges, users, creds, _ := newRegistrationServiceFixture(t)
 		challenges.consumeFn = newAddConsumedFn(authedUserID)
 		users.findByIDFn = func(ctx context.Context, id string) (*model.User, error) {
 			return &model.User{ID: id}, nil
@@ -750,7 +983,7 @@ func TestRegistrationService_FinishAddCredential(t *testing.T) {
 
 	t.Run("challenge 期限切れは ErrRegistrationFailed に正規化", func(t *testing.T) {
 		// Arrange
-		svc, adapter, challenges, users, creds := newRegistrationServiceFixture(t)
+		svc, adapter, challenges, users, creds, _ := newRegistrationServiceFixture(t)
 		challenges.consumeFn = func(ctx context.Context, challengeID string,
 			expectedKind model.PasskeyChallengeKind,
 		) (*model.PasskeyChallenge, error) {
@@ -773,7 +1006,7 @@ func TestRegistrationService_FinishAddCredential(t *testing.T) {
 
 	t.Run("credential.Create の UNIQUE 衝突 race は ErrRegistrationFailed に正規化", func(t *testing.T) {
 		// Arrange
-		svc, _, challenges, users, creds := newRegistrationServiceFixture(t)
+		svc, _, challenges, users, creds, _ := newRegistrationServiceFixture(t)
 		challenges.consumeFn = newAddConsumedFn(authedUserID)
 		users.findByIDFn = func(ctx context.Context, id string) (*model.User, error) {
 			return &model.User{ID: id}, nil

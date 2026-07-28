@@ -279,8 +279,13 @@ func runServe(cfg *config.Config) error {
 		}
 		challengeStore := passkey.NewChallengeStore(passkeyChallengeRepo, cfg.PasskeyChallengeTTL)
 		// now=nil で time.Now を既定採用（Task 5 impl-notes 参照）。
+		// Issue #230 / Req 1.1〜1.6: 新規パスキー登録 finish の users / passkey_credentials
+		// を 1 tx で INSERT するため、退会 tx と同じ *repository.SQLTxBeginner を
+		// passkeyRegistrationTxBeginnerAdapter 経由で注入する（DB 接続は共有）。
+		passkeyRegTxBeginner := newPasskeyRegistrationTxBeginner(txBeginner)
 		registrationSvc := passkey.NewRegistrationService(
-			webAuthnAdapter, challengeStore, userRepo, passkeyCredentialRepo, nil,
+			webAuthnAdapter, challengeStore, userRepo, passkeyCredentialRepo,
+			passkeyRegTxBeginner, nil,
 		)
 		authenticationSvc := passkey.NewAuthenticationService(
 			webAuthnAdapter, challengeStore, passkeyCredentialRepo, userRepo, authCodeRepo, nil,

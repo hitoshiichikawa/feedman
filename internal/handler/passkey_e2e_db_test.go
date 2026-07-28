@@ -139,8 +139,13 @@ func newPasskeyE2ERouter(t *testing.T, db *sql.DB) (http.Handler, string) {
 		t.Fatalf("NewGoWebAuthnAdapter: %v", err)
 	}
 	challengeStore := passkey.NewChallengeStore(passkeyChallengeRepo, 5*time.Minute)
+	// Issue #230: 新規登録 finish の 1 tx 化に必要な RegistrationTxBeginner を real DB で組む。
+	// *repository.SQLTx は passkey.RegistrationTx を構造的に充足するため、
+	// e2eRealPasskeyRegTxBeginner で戻り値型を interface に一致させる（本ファイル末尾に定義）。
+	regTxBeginner := &e2ePasskeyRegTxBeginner{beginner: repository.NewSQLTxBeginner(db)}
 	registrationSvc := passkey.NewRegistrationService(
-		webAuthnAdapter, challengeStore, userRepo, passkeyCredRepo, nil,
+		webAuthnAdapter, challengeStore, userRepo, passkeyCredRepo,
+		regTxBeginner, nil,
 	)
 	authenticationSvc := passkey.NewAuthenticationService(
 		webAuthnAdapter, challengeStore, passkeyCredRepo, userRepo, authCodeRepo, nil,
@@ -360,4 +365,21 @@ func TestE2E_PasskeyFullFlow_DBBacked(t *testing.T) {
 		t.Errorf("Bearer API body %q does not contain %q (passkey 由来 JWT sub 解決失敗)",
 			wRec.Body.String(), "sub-of-"+regFinishResp.UserID)
 	}
+}
+
+// e2ePasskeyRegTxBeginner は E2E DB テスト向けに *repository.SQLTxBeginner を
+// passkey.RegistrationTxBeginner に適合させる薄いアダプタ（Issue #230 / Req 1.1〜1.6）。
+// 本番 wiring は internal/app/withdraw_wiring.go の passkeyRegistrationTxBeginnerAdapter
+// を使うが、handler パッケージから app パッケージを import できない（循環回避）ため、
+// 本ファイル内に同構造の最小アダプタを置く。
+type e2ePasskeyRegTxBeginner struct {
+	beginner *repository.SQLTxBeginner
+}
+
+func (a *e2ePasskeyRegTxBeginner) BeginTx(ctx context.Context) (passkey.RegistrationTx, error) {
+	tx, err := a.beginner.BeginTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return tx, nil
 }
