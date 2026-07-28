@@ -19,8 +19,21 @@ func NewPostgresSessionRepo(db *sql.DB) *PostgresSessionRepo {
 }
 
 // Create はセッションを作成する。
+//
+// 実体は CreateExec への委譲であり、通常の *sql.DB 上で INSERT する（差分等価）。
+// 共有トランザクション上で INSERT する場合は CreateExec に DBTX を直接渡す
+// （Issue #231 / Web 直接登録 session の 3 行 atomic 化 / DeleteByUserIDExec と同 idiom）。
 func (r *PostgresSessionRepo) Create(ctx context.Context, session *model.Session) error {
-	_, err := r.db.ExecContext(ctx,
+	return r.CreateExec(ctx, r.db, session)
+}
+
+// CreateExec は指定の DBTX（*sql.DB または共有トランザクション）上でセッションを作成する。
+//
+// Web パスキー登録 finish（Issue #231）では、user・credential・session の 3 行を単一 DB
+// トランザクションで INSERT するため本メソッドに tx（repository.DBTX）を渡す。既存
+// DeleteByUserIDExec の DBTX 変種パターンに準拠する。
+func (r *PostgresSessionRepo) CreateExec(ctx context.Context, q DBTX, session *model.Session) error {
+	_, err := q.ExecContext(ctx,
 		`INSERT INTO sessions (id, user_id, data, expires_at, created_at)
 		 VALUES ($1, $2, $3, $4, $5)`,
 		session.ID, session.UserID, []byte("{}"), session.ExpiresAt, session.CreatedAt,

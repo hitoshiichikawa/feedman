@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"time"
 
 	"github.com/hitoshi/feedman/internal/model"
 	"github.com/hitoshi/feedman/internal/repository"
@@ -31,20 +30,21 @@ type SessionCreator interface {
 // TokenService とは異なり refresh token family / access token JWT を扱わないため、
 // 依存を AuthCodeConsumer + SessionCreator の 2 最小 IF に絞る（interface segregation）。
 type SessionExchangeService struct {
-	authCodes  AuthCodeConsumer
-	sessions   SessionCreator
-	now        func() time.Time
-	sessionTTL time.Duration
+	authCodes      AuthCodeConsumer
+	sessions       SessionCreator
+	sessionFactory SessionFactoryFunc
 }
 
 // NewSessionExchangeService は依存を受け取って SessionExchangeService を生成する。
-// テストは生成後に内部 now を上書きできる（package 内）。
-func NewSessionExchangeService(authCodes AuthCodeConsumer, sessions SessionCreator, sessionTTL time.Duration) *SessionExchangeService {
+//
+// session の ID / CreatedAt / ExpiresAt 生成は共有 SessionFactory（Issue #231 §Delta 1）に
+// 委譲する。これにより registration direct session（RegistrationService）と同一の session
+// 構築ロジック（generateSessionID + now + TTL）を共有する。auth_code 交換の外部挙動は不変。
+func NewSessionExchangeService(authCodes AuthCodeConsumer, sessions SessionCreator, sessionFactory SessionFactoryFunc) *SessionExchangeService {
 	return &SessionExchangeService{
-		authCodes:  authCodes,
-		sessions:   sessions,
-		now:        time.Now,
-		sessionTTL: sessionTTL,
+		authCodes:      authCodes,
+		sessions:       sessions,
+		sessionFactory: sessionFactory,
 	}
 }
 
@@ -56,7 +56,7 @@ func NewSessionExchangeService(authCodes AuthCodeConsumer, sessions SessionCreat
 //  1. auth_code を HashNativeSecret → AuthCodeConsumer.FindByHash（未検出 → ErrInvalidGrant）
 //  2. VerifyPKCES256Verifier（不一致 / 形式不正 → ErrInvalidGrant）
 //  3. AuthCodeConsumer.MarkUsed（既に used / 期限切れ / 消失 → ErrInvalidGrant）
-//  4. generateSessionID で 32 バイト crypto random / hex の session_id を生成
+//  4. SessionFactory.NewSession で ID / CreatedAt / ExpiresAt を一貫生成
 //  5. SessionCreator.Create で永続化
 //
 // 拒否時は session を一切永続化しない（手順 4 / 5 に進まない）。infra エラーは
@@ -92,28 +92,22 @@ func (s *SessionExchangeService) ExchangeAuthCodeForSession(ctx context.Context,
 		return nil, fmt.Errorf("session exchange: mark used: %w", err)
 	}
 
-	// 4. session_id 生成（既存 Service.createSession と同じ crypto random 32 バイト /
-	//    hex エンコード方針を維持するため generateSessionID を再利用）
-	sessionID, err := generateSessionID()
+	// 4. session 生成（共有 SessionFactory / Issue #231 §Delta 1）。
+	//    既存 Service.createSession と同じ crypto random 32 バイト / hex エンコードの
+	//    generateSessionID を factory 経由で再利用し、ID / CreatedAt / ExpiresAt を単一 now で整合させる。
+	session, err := s.sessionFactory.NewSession(stored.UserID)
 	if err != nil {
-		return nil, fmt.Errorf("session exchange: generate session id: %w", err)
+		return nil, fmt.Errorf("session exchange: generate session: %w", err)
 	}
 
 	// 5. session 永続化
-	now := s.now()
-	session := &model.Session{
-		ID:        sessionID,
-		UserID:    stored.UserID,
-		ExpiresAt: now.Add(s.sessionTTL),
-		CreatedAt: now,
-	}
 	if err := s.sessions.Create(ctx, session); err != nil {
 		return nil, fmt.Errorf("session exchange: create session: %w", err)
 	}
 
 	// 機密値の追跡用に hash 先頭 8 文字のみログに残す（既存 TokenService.ExchangeAuthCode
 	// と同方針 / NFR 1.1）。平文 authCode / codeVerifier / sessionID は残さない。
-	sessionIDHash := HashNativeSecret(sessionID)
+	sessionIDHash := HashNativeSecret(session.ID)
 	slog.Info("session exchange succeeded",
 		slog.String("user_id", stored.UserID),
 		slog.String("auth_code_hash", codeHash[:8]),

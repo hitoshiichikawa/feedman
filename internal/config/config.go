@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -57,6 +58,17 @@ type Config struct {
 
 	// CORS
 	CORSAllowedOrigin string
+
+	// WebPasskeyAllowedOrigin は Web パスキー導線（GET /api/passkey/capability・
+	// POST /api/auth/session・registration/finish の Web mode）が信頼する唯一の exact Origin
+	// （Issue #231 §Delta 6 / Blocker #6）。CORS_ALLOWED_ORIGIN env の値を trim + strict
+	// exact-Origin validation に通した結果を採用する。trim 後空 / scheme が http(s) 以外 /
+	// host を欠く / userinfo・opaque・path・RawPath・query・fragment・ForceQuery 付き /
+	// 末尾スラッシュ / 内部空白・カンマで複数 origin を含む / canonical serialization と不一致、
+	// のいずれかは "" に倒す（fail-closed）。CORS 層の CORSAllowedOrigin（既定 localhost:3000）
+	// とは別 field であり、こちらは localhost へ default しない。invalid 時は運用者向けに
+	// generic な warn を 1 件出すが、生 Origin 値はログしない（NFR 2.2）。
+	WebPasskeyAllowedOrigin string
 
 	// Security
 	// HSTSEnabled は HSTS（Strict-Transport-Security）ヘッダーの出力可否を制御する。
@@ -169,6 +181,10 @@ func Load() (*Config, error) {
 	cfg.CookieSecure = strings.HasPrefix(cfg.BaseURL, "https://")
 	cfg.CookieDomain = getEnvString("COOKIE_DOMAIN", "")
 	cfg.CORSAllowedOrigin = getEnvString("CORS_ALLOWED_ORIGIN", "http://localhost:3000")
+	// Web パスキー専用の exact Origin（Issue #231 §Delta 6）。CORS 層の CORSAllowedOrigin とは
+	// 別に、CORS_ALLOWED_ORIGIN の生値を strict validation に通した値を採用する（fail-closed）。
+	// localhost へは default しない（未設定なら "" = capability 404 / Origin 検証 403）。
+	cfg.WebPasskeyAllowedOrigin = validateWebPasskeyAllowedOrigin(os.Getenv("CORS_ALLOWED_ORIGIN"))
 	cfg.HSTSEnabled = getEnvBool("HSTS_ENABLED", false)
 	cfg.TrustedCIDRs = parseCommaSeparated(os.Getenv("METRICS_TRUSTED_CIDRS"))
 	cfg.MetricsPort = getEnvString("METRICS_PORT", "9090")
@@ -188,6 +204,60 @@ func Load() (*Config, error) {
 	cfg.PasskeyChallengeTTL = time.Duration(getEnvInt("PASSKEY_CHALLENGE_TTL_SECONDS", 300)) * time.Second
 
 	return cfg, nil
+}
+
+// validateWebPasskeyAllowedOrigin は CORS_ALLOWED_ORIGIN の生値を strict exact-Origin
+// validation に通し、valid な単一 exact Origin のみを返す（Issue #231 §Delta 6 / Blocker #6）。
+//
+// 判定手順:
+//  1. 前後空白（" \t\r\n" 等）を trim し、以後は trim 済み値を検証・採用する
+//  2. trim 後が空なら "" を返す（未設定 = 通常の fail-closed。warn は出さない）
+//  3. 内部に空白・カンマを含む（複数 origin 列挙 / 途中改行）なら invalid
+//  4. url.Parse で scheme（http / https）と host（非空）を持ち、User == nil / Opaque == "" /
+//     Path == "" / RawPath == "" / RawQuery == "" / Fragment == "" / ForceQuery == false を
+//     すべて満たし、かつ trim 済み入力が "scheme://host" の canonical serialization と完全一致すること
+//  5. 上記いずれか不成立なら "" を返す（fail-closed / capability 404 / Origin 検証 403）
+//
+// invalid（非空だが exact Origin でない）を検知した場合は運用者向けに generic な warn を
+// 1 件出すが、生 Origin 値はログに含めない（userinfo 誤設定時の資格情報漏出防止 / NFR 2.2）。
+func validateWebPasskeyAllowedOrigin(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		// 未設定 / 空 / whitespace-only は通常の fail-closed。誤設定ではないため warn しない。
+		return ""
+	}
+	if isInvalidExactOrigin(trimmed) {
+		// 生 Origin 値を出さず、invalid を検知した旨だけを generic に記録する（NFR 2.2）。
+		slog.Warn("CORS_ALLOWED_ORIGIN is not a valid single exact Origin; Web passkey degrades to fail-closed (capability 404 / Origin check 403)")
+		return ""
+	}
+	return trimmed
+}
+
+// isInvalidExactOrigin は trim 済み文字列が単一 exact Origin として invalid かを返す
+// （validateWebPasskeyAllowedOrigin の内部判定 / Issue #231 §Delta 6 §exact Origin validation）。
+func isInvalidExactOrigin(trimmed string) bool {
+	// 内部空白・カンマ（複数 origin 列挙 / 途中改行）を含むものは invalid。
+	if strings.ContainsAny(trimmed, " \t\r\n\v\f,") {
+		return true
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil {
+		return true
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return true
+	}
+	if u.Host == "" {
+		return true
+	}
+	// path / query / fragment / userinfo / opaque / RawPath / ForceQuery を持つものは exact Origin ではない。
+	if u.User != nil || u.Opaque != "" || u.Path != "" || u.RawPath != "" ||
+		u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
+		return true
+	}
+	// canonical "scheme://host" と完全一致しなければ invalid（末尾スラッシュ等を弾く）。
+	return trimmed != u.Scheme+"://"+u.Host
 }
 
 // parseCommaSeparated はカンマ区切りの文字列を要素スライスに分解する。

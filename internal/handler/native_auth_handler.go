@@ -255,18 +255,12 @@ func (h *NativeAuthHandler) Session(w http.ResponseWriter, r *http.Request) {
 
 	// 既存 Google OAuth Callback（internal/handler/auth_handler.go の Callback 手順 5）
 	// と完全同一の Cookie 属性で Set-Cookie する（Name / Path / Domain / MaxAge /
-	// HttpOnly / Secure / SameSite）。定数 sessionCookieName / http.SameSiteLaxMode を
+	// HttpOnly / Secure / SameSite）。canonical builder（session_cookie.go）を 3 経路で
 	// 共有し、Domain / Secure / MaxAge は wiring 時に注入された値を使用する。
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    session.ID,
-		Path:     "/",
-		Domain:   h.cookieDomain,
-		MaxAge:   h.sessionMaxAge,
-		HttpOnly: true,
-		Secure:   h.cookieSecure,
-		SameSite: http.SameSiteLaxMode,
-	})
+	http.SetCookie(w, buildSessionCookie(
+		sessionCookieName, session.ID,
+		h.cookieDomain, h.cookieSecure, h.sessionMaxAge,
+	))
 
 	// 応答ボディは空（204 No Content）。Web は credentials: "include" により自動的に
 	// Cookie を保存し、以降の /auth/me が認証済み状態になる（design.md §NativeAuthHandler.Session）。

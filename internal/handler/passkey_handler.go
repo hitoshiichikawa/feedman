@@ -29,9 +29,12 @@ import (
 // `*passkey.RegistrationService` が構造的にこれを充足する。
 type PasskeyRegistrationService interface {
 	BeginRegistrationNew(ctx context.Context, rawUsername, optionalEmail, codeChallenge string) (challengeID string, options []byte, err error)
-	FinishRegistrationNew(ctx context.Context, challengeID string, requestBody []byte) (userID string, err error)
+	FinishRegistrationNew(ctx context.Context, challengeID string, requestBody []byte, issueWebSession bool) (userID string, webSession *model.Session, err error)
 	BeginAddCredential(ctx context.Context, authenticatedUserID string) (challengeID string, options []byte, err error)
 	FinishAddCredential(ctx context.Context, authenticatedUserID, challengeID string, requestBody []byte) error
+	// WebSessionReady は Web mode の直接 session 発行に必要な依存が配線済みかを返す
+	// （Issue #231 §Delta 3 / readiness 判定）。*passkey.RegistrationService が充足する。
+	WebSessionReady() bool
 }
 
 // PasskeyAuthenticationService は PasskeyHandler が認証 2 メソッドに必要とする最小
@@ -51,16 +54,62 @@ type PasskeyAuthenticationService interface {
 type PasskeyHandler struct {
 	registration   PasskeyRegistrationService
 	authentication PasskeyAuthenticationService
+
+	// Web 直接登録 session（Issue #231 §Delta 1 / §Delta 3）用の設定。WEBAUTHN_* 設定時に
+	// wiring から Option で注入される。allowedOrigin が空のときは registration/finish は
+	// native/iOS mode（Origin 不在）と Origin 非空拒否（403）のみを扱い、Web mode は成立しない。
+	allowedOrigin string // = WebPasskeyAllowedOrigin（明示された exact Origin）
+	cookieDomain  string // session Cookie の Domain（空も有効な構成）
+	cookieSecure  bool   // session Cookie の Secure（本番 https で true）
+	cookieMaxAge  int    // session Cookie の Max-Age（= SessionMaxAge / 秒）
+}
+
+// PasskeyHandlerOption は NewPasskeyHandler の functional option（既存 NativeAuthHandler の
+// WithSession* Option idiom を踏襲 / Issue #231）。
+type PasskeyHandlerOption func(*PasskeyHandler)
+
+// WithWebRegistrationSession は Web 直接登録 session（registration/finish の Web mode）に
+// 必要な許可 Origin と Cookie 属性を注入する Option（Issue #231 §Delta 1）。
+//
+// allowedOrigin は config.WebPasskeyAllowedOrigin（strict validation 済みの exact Origin）を
+// 渡す。Cookie 属性（Domain / Secure / Max-Age）は既存 Google OAuth Callback と一致させるため
+// cfg.CookieDomain / cfg.CookieSecure / cfg.SessionMaxAge をそのまま渡す。
+func WithWebRegistrationSession(allowedOrigin, cookieDomain string, cookieSecure bool, cookieMaxAge int) PasskeyHandlerOption {
+	return func(h *PasskeyHandler) {
+		h.allowedOrigin = allowedOrigin
+		h.cookieDomain = cookieDomain
+		h.cookieSecure = cookieSecure
+		h.cookieMaxAge = cookieMaxAge
+	}
 }
 
 // NewPasskeyHandler は PasskeyHandler を生成する。両依存とも非 nil を要求する契約とし、
 // router 側は「passkey wiring 全体が組めているとき」にのみ本 handler を生成する
-// （fail-closed 縮退は wiring 層の責務）。
-func NewPasskeyHandler(reg PasskeyRegistrationService, authn PasskeyAuthenticationService) *PasskeyHandler {
-	return &PasskeyHandler{
+// （fail-closed 縮退は wiring 層の責務）。Web 直接登録 session の設定は
+// WithWebRegistrationSession Option で任意注入する（未注入なら Web mode は成立しない
+// = fail-closed）。
+func NewPasskeyHandler(reg PasskeyRegistrationService, authn PasskeyAuthenticationService, opts ...PasskeyHandlerOption) *PasskeyHandler {
+	h := &PasskeyHandler{
 		registration:   reg,
 		authentication: authn,
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
+}
+
+// webRegistrationReady は Web mode の直接 session 発行が配線済みかを返す
+// （Issue #231 §Delta 3 §capability の readiness 強化 / Blocker #3）。
+//
+// 条件: allowedOrigin != ""（明示された exact Origin）&& cookieMaxAge > 0（正の Cookie
+// MaxAge = SessionMaxAge）&& registration.WebSessionReady()（session writer / session
+// factory / txBeginner がすべて非 nil）。cookieDomain 空・cookieSecure=false は有効な構成
+// （本番 https で Secure=true、単一ドメインなら Domain 空が正）のため readiness 条件に
+// 含めない。router の capability 登録 gate と、RegistrationFinish の Web mode fail-closed に
+// 共有する。
+func (h *PasskeyHandler) webRegistrationReady() bool {
+	return h.allowedOrigin != "" && h.cookieMaxAge > 0 && h.registration.WebSessionReady()
 }
 
 // --- リクエスト / レスポンス DTO ---

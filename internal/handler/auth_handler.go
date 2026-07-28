@@ -189,17 +189,13 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 5. セッションCookieを設定（HTTP Only）
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    session.ID,
-		Path:     "/",
-		Domain:   h.config.CookieDomain,
-		MaxAge:   h.config.SessionMaxAge,
-		HttpOnly: true,
-		Secure:   h.config.CookieSecure,
-		SameSite: http.SameSiteLaxMode,
-	})
+	// 5. セッションCookieを設定（HTTP Only）。
+	//    canonical builder（session_cookie.go）で属性を集約し、パスキー経路
+	//    （native_auth_handler.go::Session / passkey_handler.go）と完全同一属性を保証する。
+	http.SetCookie(w, buildSessionCookie(
+		sessionCookieName, session.ID,
+		h.config.CookieDomain, h.config.CookieSecure, h.config.SessionMaxAge,
+	))
 
 	// 6. フロントエンドにリダイレクト（GET 化のため 303 See Other）
 	http.Redirect(w, r, h.config.BaseURL, http.StatusSeeOther)
