@@ -44,9 +44,12 @@ Cookie セッション合流」の意味を、#223 design.md 「新規作成フ�
 2. If ブラウザまたはユーザーが登録セレモニーとは別の第 2 の認証セレモニー実行を要求される場合,
    the Web Passkey Registration Flow shall そのフローを新規作成の正常系と扱わず、実装として
    採用しない
-3. When 登録 finish の成功応答を受け取ったとき, the Web Passkey Registration Flow shall
-   登録トランザクションと結び付いた形で Cookie セッション合流に必要な情報を Web に返す経路を
-   利用し、ユーザーに追加操作を要求しない
+3. When Web（許可オリジンからのリクエスト）の登録 finish が検証に成功したとき, the Feedman
+   API shall user・credential・Web session の 3 行を **単一 DB トランザクション**で作成し、
+   commit 後に同一 finish 応答（JSON body は `{user_id}` のまま不変）へ session Cookie を
+   `Set-Cookie` で付与し、追加の request・追加 ceremony・auth_code 交換を一切要求しない
+   （native/iOS からの同一 endpoint は user・credential の **2 行のみ**を作成し、session 行も
+   Cookie も発行しない）
 4. When 新規作成が完了し Cookie セッションに合流したとき, the Web App shall Google OAuth
    経由でログインしたときと同一の 2 ペイン UI を初期表示する
 5. The Web Passkey Registration Flow shall #223 Requirement 4（既存パスキーによるログイン）で
@@ -113,6 +116,11 @@ authentication endpoint 群の提供状態を、env 組合せごとに **別列*
    （`/api/passkey/registration/*` / `/api/passkey/authentication/*` の request / response
    の各フィールド構造）を破壊的に変更しないことを、fail-closed 表の記述および
    File Structure Plan の変更対象から明示的に排除する形で示す
+6. If Web 直接登録 session の発行に必要な readiness（許可 exact Origin・session 書込・
+   登録トランザクション・session factory・正の TTL / Cookie MaxAge のいずれか）が未充足の
+   環境で運用したとき, the Feedman API shall Web 用 capability probe を 404 とし
+   （公式 UI からパスキー導線を出さない fail-closed）、登録 endpoint が 200 を返すのに
+   capability だけ 200 になって signup が 500 で破綻する不整合を発生させない
 
 ### Requirement 4: CSRF / PKCE 説明の正確化と残余リスクの明示
 
@@ -149,8 +157,10 @@ Origin-bound challenge 拡張）は本 spec では要求せず、下記に列挙
 6. If 将来 XSS 由来の CSRF 突破や credential 差し替え型攻撃を封じる必要が発生したとき,
    the #231 Design shall 残余リスクとして列挙した箇所を出発点に再検討する導線を残す
    （追加防御を導入する Issue を将来切り出す前提を明示する）
-
-### Requirement 5: 登録 finish の完了不明状態と復旧導線
+7. The #231 Design shall PKCE（`code_challenge` / `code_verifier`）が Web 直接登録 session の
+   発行経路を防御しないこと（登録 begin の `code_challenge` は #216 契約維持のための形式検証
+   のみで、永続化・束縛せず、session 発行に用いない）を明記し、PKCE の役割を login auth_code
+   交換経路（`POST /api/auth/session`）に限定して記述する
 
 **Objective:** As a パスキー新規作成中にネットワーク断・サーバ 5xx を経験した Web 訪問者,
 I want 「登録が確定した／されていない」を単純な二値で誤って断定されず、次に取れる行動を
@@ -281,17 +291,15 @@ I want `.env.sample` と `docker-compose.yml` の変更を PR #229 に正式な�
 - **fail-closed 表の列**: Web capability / Web login exchange / Web registration direct session /
   iOS registration/* / iOS authentication/* を **別列** として表現する（env 軸は
   `WEBAUTHN_RP_ID`+`WEBAUTHN_ORIGINS` / `NATIVE_AUTH_JWT_SECRET` / `CORS_ALLOWED_ORIGIN`）
-
-## Open Questions
-
-- **完了不明状態の UI 実現方式**: Requirement 5.1 / 5.2 の「第 3 状態」を提示する UI 実現
-  （dialog 内での状態表示か、専用完了画面か）は design 判断とする。ただし「discoverable
-  ログインで確認 → 一律失敗の後にのみ再作成導線」という提示順序（Requirement 5.2 / 5.4）は
-  確定済みで、UI 実現方式はこの順序を満たす範囲に限定される
-- **完了不明状態と Requirement 3.4 の関係**: #223 Requirement 3.4（合流失敗時のログイン画面
-  復帰）と本 spec Requirement 5（登録 commit 済み・応答喪失）の状態遷移・表示重複関係は
-  design で整理する（直接 session 化により registration 経路の「session 交換段の失敗」は
-  消滅し、両者は finish 応答が確定したか否かで分岐する）
+- **完了不明状態の UI 実現方式（旧 Open Question / design で確定）**: Requirement 5.1 / 5.2 の
+  「第 3 状態」は **既存 `passkey-signup-dialog.tsx` 内の状態分岐**（専用完了画面を新設しない）で
+  提示する。提示順序は「discoverable ログインで確認 → 一律 `AUTHENTICATION_FAILED` の後にのみ
+  再作成導線」に固定する（design.md §Delta 5 §状態遷移図で確定）。未決事項として残さない
+- **完了不明状態と Requirement 3.4 の関係（旧 Open Question / design で確定）**: 直接 session 化に
+  より registration 経路の「session 交換段の失敗」は消滅するため、#223 Requirement 3.4（合流
+  失敗時のログイン画面復帰）と本 spec Requirement 5 は **finish 応答が確定したか否か**で分岐する
+  （2xx=成功 / 確定 4xx=拒否 / それ以外=uncertain）。両者の状態遷移は design.md §Delta 5 §状態
+  遷移図に統合済みで、表示重複は生じない。未決事項として残さない
 
 ## 関連
 

@@ -17,6 +17,16 @@ registration/finish` の検証成功から同一 DB トランザクションで 
 用（auth_code 交換）としてそのまま残す。本設計は初版 design（auth_code additive 案 = 仮案 B）を
 全面的に置き換える。
 
+**前提となる先行実装（#230 / PR #232）**: 新規登録 finish の user + credential を単一
+トランザクションで INSERT する基盤は Issue #230（PR #232）が既に実装済みである
+（`passkey.RegistrationTx` / `RegistrationTxBeginner` / `RegistrationService.txBeginner` の
+`BeginTx → defer Rollback → Commit` パターン、`UserWriter.CreateUserOnlyExec` /
+`PasskeyCredentialWriter.CreateExec`、`app` 側の `passkeyRegistrationTxBeginnerAdapter`）。
+本 spec は **その既存トランザクションを session 行まで拡張する**（新しい tx 実行機構を作らない）。
+`internal/repository/tx.go` は #231 では変更しない。`CreateUserOnlyExec` / credential `CreateExec` /
+`txBeginner` は **#230 由来の既存前提**であり #231 の新規作業には数えない。運用順序は
+**#230（PR #232）を develop に merge → PR #229 がその実装を取り込む** とし、tasks の依存で明示する。
+
 **Users**: 未認証 Web 訪問者（パスキーで新規作成する層／ iOS #216 で作成したパスキーで Web
 にログインする層）と、既存 Google OAuth ユーザー、Feedman 運用者。iOS #216 ユーザーへの
 影響はゼロ（`/api/passkey/registration/*` / `/api/passkey/authentication/*` の request/response
@@ -24,43 +34,55 @@ JSON を変更しない。Web の差分は `Set-Cookie` ヘッダのみ / NFR 3.
 
 **Impact**: 本 spec は独立した実装 PR を作らない。design PR merge 後、PR #229 の
 `needs-iteration` 1 回で製品コード（`internal/passkey/` / `internal/handler/` /
-`internal/repository/` / `web/src/`）・テスト・spec の `impl-notes.md` / `context-map.md`
-（**#223 / #216 spec の requirements.md / design.md / tasks.md は書き換えない**）へ差分を反映する。
+`internal/repository/` / `internal/auth/` / `internal/config/` / `web/src/`）・テスト・spec の
+`impl-notes.md` / `context-map.md`（**#223 / #216 / #230 spec の requirements.md / design.md /
+tasks.md は書き換えない**）へ差分を反映する。
 
 ### 補正する 6 つの Delta サマリ
 
 - **Delta 1（Requirement 1）— 直接 Cookie session**: 登録 finish で二度目の WebAuthn ceremony を
-  廃止する。`internal/passkey/RegistrationService.FinishRegistrationNew` を、既存
-  `internal/repository/tx.go` のトランザクション基盤を用いて **user → credential → session の
-  3 行を単一トランザクションで作成** する構成に拡張し、handler が commit 後に既存 Cookie 属性で
-  `Set-Cookie` する。`registration/finish` の request/response JSON は Web / iOS とも `{user_id}`
-  のまま変更しない（Web だけ `Set-Cookie` が付く / NFR 3.2）。登録 begin の `code_challenge` は
-  #216 契約維持のためフィールドを残すが **形式検証のみ** で永続化・束縛しない。
+  廃止する。#230（PR #232）の既存 `RegistrationService.FinishRegistrationNew`（`txBeginner` の
+  `BeginTx → defer Rollback → Commit` で user → credential を作成）を、**credential INSERT の後・
+  commit の前に session 行 INSERT を 1 つ加える** 形に拡張する（3 行 atomic）。session の
+  ID / `CreatedAt` / `ExpiresAt` は既存 login session 発行と共有する **session factory** で一貫生成する。
+  handler は commit 後に既存 Cookie 属性で `Set-Cookie` する。`registration/finish` の request/response
+  JSON は Web / iOS とも `{user_id}` のまま変更しない（Web だけ `Set-Cookie` が付く / NFR 3.2）。
+  登録 begin の `code_challenge` は #216 契約維持のためフィールドを残すが **形式検証のみ** で
+  永続化・束縛しない。
 - **Delta 2（Requirement 2）— File Structure Plan 補正**: PR #229 の実変更ファイルを
-  File Structure Plan 差分に完全列挙する（`web/src/lib/api.ts` / `api.test.ts` /
-  `.env.sample` / `docker-compose.yml` を含む）。本設計で新規追加する session tx 対応
-  （`CreateExec` 群・共有 Cookie builder・実 DB tx test）も列挙する。
-- **Delta 3（Requirement 3）— fail-closed 表 5 列化**: fail-closed 表を
+  File Structure Plan 差分に **exact-path で完全列挙**し、「#231 でさらに編集するもの」と
+  「PR #229 / #232 に既に含まれるが #231 では不変のもの」を分離する（`web/src/lib/api.ts` /
+  `api.test.ts` / `.env.sample` / `docker-compose.yml` / `review-notes.md` /
+  `router_unauth_ratelimit_test.go` / `session_exchange_test.go` /
+  `use-passkey-authentication.contract.test.tsx` を含む）。本設計で新規追加する
+  session tx 対応（session repo `CreateExec`・共有 session factory・共有 Cookie builder・
+  `WebPasskeyAllowedOrigin` config）も列挙する。
+- **Delta 3（Requirement 3）— fail-closed 表 5 列化 + readiness 強化**: fail-closed 表を
   Web capability / Web login exchange / Web registration direct session / iOS registration/* /
   iOS authentication/* の **5 列独立** で組み直す。router の capability / `/api/auth/session` gate は
-  PR #229 の `NativeAuthHandler.SessionReady()` を **維持**（`NativeAuthHandler != nil` に弱めない）し、
-  Origin 検証が不能な構成（`CORS_ALLOWED_ORIGIN` 未設定）でも fail-closed に倒す。
+  PR #229 の `NativeAuthHandler.SessionReady()` を **維持**（弱めない）し、capability には
+  **direct-registration readiness（`webRegistrationReady()`）と明示された exact Origin** を
+  **追加要件**として課す（capability 200 なのに signup 500 の不整合を防ぐ）。
 - **Delta 4（Requirement 4）— CSRF / PKCE 正確化**: 「攻撃者は (auth_code, code_verifier) ペアを
-  取得できない」の誤記述を撤回する。直接登録 session の主防御（exact Origin / JSON Content-Type /
-  CORS preflight / SameSite / **必須ユーザー生体ジェスチャ**）と、ログイン auth_code 交換の主防御
+  取得できない」の誤記述を撤回する。直接登録 session の主防御（authenticator の
+  **authorization gesture**（user presence、場合により user verification）+ exact Origin +
+  JSON Content-Type + CORS preflight / SameSite）と、ログイン auth_code 交換の主防御
   （上記 + PKCE 単回 60s TTL）を **分離** して明記し、PKCE が直接登録を防御しないことを述べる。
-  既存 `/api/auth/session`（login）の Origin 検証も **Origin 不在・不一致・allowedOrigin 未設定を
+  既存 `/api/auth/session`（login）の Origin 検証も **Origin 不在・不一致・許可 Origin 未設定を
   拒否** する fail-closed へ補正する。
 - **Delta 5（Requirement 5）— 完了不明状態**: 「finish dispatch 後に確定的な pre-commit 4xx を
   得られない」ケース（network reject / timeout / 送出後 Abort / 5xx / commit 済みを示唆する 2xx だが
   body 欠損・途中切断・parse 不能）を **第 3 の完了不明状態** `registration_uncertain` として定義する。
-  復旧は「**discoverable なパスキーログイン**（ユーザー名入力なし）で確認 → 成功なら完了 →
-  一律の `AUTHENTICATION_FAILED` の後にのみ再作成導線」に統一する（login と再作成を初期画面に
-  同列並置しない）。
+  この判別を成立させるため **API 層（`api.ts`）で「fetch 成功後の 2xx body parse 失敗」を status
+  付きの型に正規化**し、dispatch 前のローカル失敗と区別できるようにする。復旧は
+  「**discoverable なパスキーログイン**（ユーザー名入力なし）で確認 → 成功なら完了 →
+  一律の `AUTHENTICATION_FAILED` の後にのみ再作成導線」に統一する。
 - **Delta 6（Requirement 6）— 運用 config 統合**: `.env.sample` / `docker-compose.yml` の記述差分を
   PR #229 のスコープに統合する（別 prerequisite PR に分離しない）。`CORS_ALLOWED_ORIGIN` の
-  未設定・不一致と fail-closed 挙動の接続を明示し、Verify に代表 env 値付き `docker compose config` を
-  追加する。
+  **既定を空へ変更**し、config が「明示設定された exact Origin のみを Web パスキーで信頼する」
+  ように補正することで、fail-closed（未設定 → capability 404 / Origin 検証 403）を **到達可能・
+  検証可能**にする。Verify には代表 env 値（`SESSION_SECRET` / `POSTGRES_PASSWORD` を含む）付き
+  `docker compose config` を追加する。
 
 ### Goals
 
@@ -74,196 +96,177 @@ JSON を変更しない。Web の差分は `Set-Cookie` ヘッダのみ / NFR 3.
   - PR #229 に本差分を反映した後の `go test ./...` / `go vet ./...` / `web` の test / lint / build が green
   - `POST /api/passkey/registration/finish` が Web（Origin 一致）で 200 `{user_id}` + `Set-Cookie` を返し、
     二度目 ceremony なしで 2 ペイン UI に到達する
-  - 実 PostgreSQL で「session 書込失敗時に user / credential も作成されない（3 行 atomic）」ことを検証
+  - 実 PostgreSQL で「session 書込失敗時に user / credential も作成されず Set-Cookie も出ない
+    （3 行 atomic）」ことを検証
+  - `CORS_ALLOWED_ORIGIN` 未設定時に capability=404、明示設定時に capability=200 となることを config テストと router テストで検証
   - `NATIVE_AUTH_JWT_SECRET` 未設定 + `WEBAUTHN_*` 設定済み env で iOS 用
     `/api/passkey/registration/*` / `/api/passkey/authentication/*` が引き続き 200 応答する
 
 ### Non-Goals
 
-- **#223 / #216 spec の物理ファイル書換え**（各 requirements.md / design.md / tasks.md）— 本 spec は
-  差分宣言のみを行い、物理ファイルは触らない（NFR 1.1 / 1.3）
+- **#223 / #216 / #230 spec の物理ファイル書換え**（各 requirements.md / design.md / tasks.md）— 本 spec は
+  差分宣言のみを行い、それら物理ファイルは触らない（NFR 1.1 / 1.3）
 - **独立した実装 PR の作成** — 差分は PR #229 の needs-iteration 1 回で反映（NFR 1.2）
 - **#216 iOS パスキー API の request/response JSON 契約の破壊的変更**（NFR 1.3 / NFR 3.2）
+- **新しいトランザクション実行機構（`WithinTx` / `txRunner` 等）の追加** — #230 の
+  `RegistrationTxBeginner` を再利用する（`internal/repository/tx.go` は不変）
 - **登録用 auth_code / 二度目 ceremony / 登録専用 session 交換 endpoint / exchange artifact の導入**
   （決定 1.A により不採用）
 - **browser-bound state（transaction cookie / 追加 CSRF token / Origin-bound challenge 拡張）の導入**
   （Requirement 4 の決定事項）
 - **`.env.sample` / `docker-compose.yml` を別 prerequisite PR に分離すること**（Requirement 6 の決定事項）
+- **WebAuthn の user verification（生体認証）を必須化する設計**（現 adapter は
+  `userVerification=required` を指定せず、authorization gesture は user presence の場合もある。Delta 4 参照）
 
 ## Architecture
 
-### Existing Architecture Analysis（PR #229 head 実装に基づく）
+### Existing Architecture Analysis（PR #229 / #232 head 実装に基づく）
 
-本差分は #216 / PR #229 が確立した以下の既存アーキテクチャを **維持する前提** で補正する。
+本差分は #216 / PR #229 / #230(PR #232) が確立した以下の既存アーキテクチャを **維持する前提** で補正する。
 責務境界・依存方向は変更しない（`handler → service → repository → model` の一方向 / CLAUDE.md §1）:
 
 - **維持する既存要素**:
-  - `internal/passkey/` の ceremony 責務（`RegistrationService` / `AuthenticationService`）と
-    `internal/handler/passkey_handler.go` の HTTP I/O 責務の分離（#216 で確立）
-  - `challengeStore.Issue/Consume` を通じた TTL 付き単回消費（#216 で確立）
-  - `internal/repository/tx.go` のトランザクション基盤（`SQLTx` / `BeginTx` / `Querier() DBTX` /
-    `Commit` / `Rollback`）と、repo の `*Exec(ctx, q DBTX, ...)` 変種パターン
-    （既存例: `PostgresUserRepo.DeleteByIDExec` / `PostgresSessionRepo.DeleteByUserIDExec`）
-  - `NativeAuthHandler.Session`（`POST /api/auth/session`）+ `auth.SessionExchangeService`
-    （auth_code → Web Cookie session 交換 / PR #229）と `SessionReady()` readiness
-  - `NativeAuthHandler.Session` の CSRF 防御（Content-Type application/json 必須 / Origin allowlist）
-  - Google OAuth Callback（`auth_handler.go::Callback`）の Cookie 属性
-    （`session_id` / HttpOnly / SameSite=Lax / Secure / Path=/ / Domain / Max-Age）
-  - fail-closed による route 未登録判定（`if <条件> { register }` パターン）
-- **本差分が変更する点**:
-  - `RegistrationService.FinishRegistrationNew` を **user → credential → session の単一トランザクション**
-    に拡張（session 発行は Web mode のみ）。シグネチャに `issueWebSession bool` を追加し、返り値に
-    `*model.Session`（Web session、iOS では nil）を追加
-  - `PasskeyHandler.RegistrationFinish` に Origin ベースの Web / iOS mode 判定と Web mode の
-    `Set-Cookie` を追加
-  - repo に session 作成の tx 変種 `PostgresSessionRepo.CreateExec(ctx, DBTX, *model.Session)` と、
-    user / credential の tx 変種 `CreateUserOnlyExec` / `CreateExec` を追加
-  - Cookie 生成を **canonical builder に集約**（`auth_handler.Callback` /
-    `native_auth_handler.Session` / `passkey_handler.RegistrationFinish` で共有 / 重複排除）
-  - `router.go` の capability route 登録条件に `CORS_ALLOWED_ORIGIN` 設定要件を追加（Origin 検証不能時の
-    fail-closed）
-  - `native_auth_handler.Session` の Origin 検証を fail-closed（不在・不一致・allowedOrigin 未設定を拒否）へ補正
-  - Web hook `use-passkey-registration.ts` の chain（二度目 ceremony 除去 + `registration_uncertain` 追加）
-  - Web UI `passkey-signup-dialog.tsx` の完了不明状態 UI と discoverable ログイン復旧導線
-  - `.env.sample` / `docker-compose.yml` の既存 WebAuthn env documentation / passthrough 整備
+  - `internal/passkey/` の ceremony 責務と `internal/handler/passkey_handler.go` の HTTP I/O 責務の分離、
+    `challengeStore.Issue/Consume` の TTL 付き単回消費（#216 で確立）
+  - **#230（PR #232）の新規登録 tx 基盤**: `passkey.RegistrationTx`（`Querier() repository.DBTX` /
+    `Commit` / `Rollback`）/ `passkey.RegistrationTxBeginner`（`BeginTx(ctx) (RegistrationTx, error)`）/
+    `RegistrationService.txBeginner` / `FinishRegistrationNew` の
+    `BeginTx → defer Rollback → CreateUserOnlyExec → CreateExec → Commit` パターン /
+    `app` 側 `passkeyRegistrationTxBeginnerAdapter`、および
+    `UserWriter.CreateUserOnlyExec` / `PasskeyCredentialWriter.CreateExec`（**すべて #230 既存**。UNIQUE 衝突を
+    `ErrUsernameTaken` / `ErrCredentialAlreadyRegistered` に正規化）。`internal/repository/tx.go` は **#231 では変更しない**
+  - login session 発行: `auth.Service.createSession` と `auth.SessionExchangeService`（PR #229）は
+    いずれも `generateSessionID`（**`internal/auth/service.go` に定義**）+ `now` + `CreatedAt=now` +
+    `ExpiresAt=now+TTL` で `model.Session{ID, UserID, ExpiresAt, CreatedAt}` を構築する
+  - `NativeAuthHandler.Session` + `SessionReady()` / `PasskeyHandler.Capability`（到達 = `{available:true}`）/
+    Google OAuth Callback の Cookie 属性（`session_id` / HttpOnly / SameSite=Lax / Secure / Path=/ / Domain / Max-Age）
+  - `config.go` の `CORSAllowedOrigin`（既定 `http://localhost:3000`）/ `CookieDomain`（既定空）/
+    `CookieSecure`（`BaseURL` が https で true）/ `SessionMaxAge`（既定 86400）、fail-closed route 判定パターン
+- **本差分が変更する点**（詳細ファイルは §File Structure Plan [E]/[N] を参照）: 既存 #230 tx クロージャ内へ
+  session 行 INSERT を追加（`FinishRegistrationNew` に `issueWebSession bool` + `*model.Session` 返却）/
+  session repo `CreateExec`（#231 新規）と **共有 session factory**（`internal/auth/session_factory.go`）で
+  session 構築を一元化 / `PasskeyHandler.RegistrationFinish` の Origin mode 判定 + `Set-Cookie` /
+  Cookie 生成を canonical builder に集約 / `config.go` の `WebPasskeyAllowedOrigin`（明示設定 exact Origin。
+  `CORSAllowedOrigin` 既定は不変）/ capability gate に origin + `webRegistrationReady()` 追加（`SessionReady()` 維持）/
+  `native_auth_handler.Session` の Origin fail-closed 補正 / Web の二度目 ceremony 除去 + `registration_uncertain` +
+  `api.ts` の 2xx parse 型付き正規化 + 完了不明状態 UI / `.env.sample`・`docker-compose.yml` の CORS 既定変更
 - **尊重すべき制約**:
   - iOS #216 の request/response 契約：`registration/begin` request `{username, email?, code_challenge}`、
     `registration/finish` request `{challenge_id, credential}` / response `{user_id}`、
     `authentication/*` の各フィールド構造をそのまま維持する（Web も response は `{user_id}` 不変。
     差分は `Set-Cookie` ヘッダのみで JSON body には現れない）
-  - NFR 1.1（#223 spec 物理ファイル不変）/ NFR 1.3（#216 spec 物理ファイル・API 契約不変）
+  - NFR 1.1（#223 spec 物理ファイル不変）/ NFR 1.3（#216 / #230 spec 物理ファイル・API 契約不変）
 
 ### 差分適用の運用境界
 
 ```mermaid
 flowchart LR
     subgraph This231 [#231 spec（本 design）]
-        R231[requirements.md]
         D231[design.md<br/>Delta 1〜6]
         T231[tasks.md<br/>PR #229 への差分作業]
     end
+    subgraph Prior230 [#230 / PR #232（先行 merge）]
+        TX230[RegistrationTx 基盤<br/>user+credential 1 tx]
+    end
     subgraph Existing223 [#223 spec（物理不変）]
         D223[design.md<br/>該当節を supersede]
-    end
-    subgraph Existing216 [#216 spec（物理不変 / API 契約不変）]
-        D216[design.md]
     end
     subgraph PR229 [PR #229 実装]
         S229[製品コード<br/>internal/**, web/src/**]
         SPEC229[spec 補助<br/>context-map.md / impl-notes.md]
         CONF229[運用 config<br/>.env.sample / docker-compose.yml]
     end
+    TX230 -->|develop merge 先行| S229
     D231 -.supersedes.-> D223
+    D231 -.extends.-> TX230
     T231 -->|needs-iteration 1| S229
     T231 -->|needs-iteration 1| SPEC229
     T231 -->|needs-iteration 1| CONF229
-    T231 -.non-invasive.-> D216
 ```
 
 ### Technology Stack
 
 本差分は **技術スタック追加なし**。既存の技術選定（Go 1.25 / chi/v5 / PostgreSQL 16 /
 go-webauthn / `database/sql` トランザクション / Next.js 15 / TanStack Query / shadcn/ui /
-Vitest）をそのまま使用する。session ID 生成は既存 `auth.SessionExchangeService` /
-Google OAuth Callback と同一の生成器を再利用する（重複しない）。
+Vitest）をそのまま使用する。session ID 生成は既存 `internal/auth/service.go` の
+`generateSessionID`（32 バイト crypto random / hex）を **共有 session factory 経由で再利用**する
+（新たな生成器を作らない）。
 
 ## File Structure Plan（PR #229 に適用する差分の変更対象 / 新規追加）
 
-本セクションは PR #229 の `needs-iteration` 1 回で反映する対象ファイルを **変更対象** と
-**新規追加** に分けて明示する。**#223 design.md「File Structure Plan」節を supersede する**
-（Requirement 2）。Reviewer は本節を canonical として PR #229 の全変更ファイル被覆を確認できる
-（Requirement 2.5）。
+本セクションは PR #229 の `needs-iteration` 1 回で反映する対象ファイルを、Reviewer が
+`git diff --name-only develop..<PR#229 head>` と 1:1 で突合できるよう **exact-path** で列挙する
+（Requirement 2 / 2.5）。**#223 design.md「File Structure Plan」節を supersede する**。
+各ファイルを 3 区分に分類する:
 
-### Modified Files（サーバ側）
+- **[E]** = #231 でさらに編集する（PR #229 の needs-iteration 1 回で本差分を反映）
+- **[U]** = PR #229 / #232 に既に含まれるが **#231 ではさらに編集しない**（記録のみ / 過剰変更でない証跡）
+- **[N]** = 本差分で新規追加する
 
-- `internal/repository/tx.go` — **変更**（3 行 tx orchestration の helper 追加）
-  - closure 型のトランザクション実行ヘルパー `WithinTx(ctx, fn func(q DBTX) error) error` を
-    `SQLTxBeginner` に追加（`BeginTx` → `fn(tx.Querier())` → 正常時 `Commit` / エラー・panic 時
-    `Rollback`）。既存 `SQLTx` / `BeginTx` / `Querier` / `Commit` / `Rollback` は変更しない
-- `internal/repository/postgres_session_repo.go` — **変更**
-  - `CreateExec(ctx, q DBTX, s *model.Session) error` を追加（既存 `DeleteByUserIDExec` の
-    DBTX 変種パターンに準拠）。既存 `Create(ctx, s)` は `CreateExec(ctx, r.db, s)` へ委譲に変更
-    （差分等価 / 挙動不変）
-- `internal/repository/postgres_user_repo.go` — **変更**
-  - `CreateUserOnlyExec(ctx, q DBTX, u *model.User) error` を追加。既存 `CreateUserOnly` は
-    `CreateUserOnlyExec(ctx, r.db, u)` へ委譲（`ErrUsernameTaken` 正規化は変えない）
-- `internal/repository/postgres_passkey_credential_repo.go` — **変更**
-  - `CreateExec(ctx, q DBTX, c *model.PasskeyCredential) error` を追加。既存 `Create` は
-    `CreateExec(ctx, r.db, c)` へ委譲（`ErrCredentialAlreadyRegistered` 正規化は変えない）
-- `internal/passkey/registration_service.go` — **変更**（Delta 1 サーバ中核）
-  - 最小 IF を追加/拡張: `SessionWriter{CreateExec}`、`UserWriter` に `CreateUserOnlyExec`、
-    `PasskeyCredentialWriter` に `CreateExec`、tx 実行 IF `txRunner{WithinTx}`
-  - 構造体に `sessions SessionWriter` / `tx txRunner` / `newSessionID func() (string, error)` /
-    `sessionTTL time.Duration` を追加（**auth_code 関連依存は追加しない**）
-  - `FinishRegistrationNew` を単一 tx + `issueWebSession bool` 対応に変更（後述 §Delta 1）
-  - `WebSessionReady() bool`（session writer / tx / 生成器が非 nil）を追加
-- `internal/passkey/registration_service_test.go` — **変更**（新シグネチャ追従 + branch/正規化テスト）
-- `internal/handler/session_cookie.go` — **新規**（後述 §New Files）
-- `internal/handler/passkey_handler.go` — **変更**（Delta 1 handler + Delta 3）
-  - `PasskeyHandler` に `allowedOrigin string` と Cookie 設定（domain / secure / maxAge）を
-    Option で注入（既存 `NativeAuthHandler` の `WithSession*` Option idiom を踏襲）
-  - `RegistrationFinish` に Origin ベース mode 判定・Web mode の JSON Content-Type 検証・
-    readiness fail-closed・commit 後 `Set-Cookie` を追加（response は 200 `{user_id}` 不変）
-- `internal/handler/passkey_handler_test.go` — **変更**（mode 判定 / Set-Cookie / iOS `{user_id}` 回帰）
-- `internal/handler/native_auth_handler.go` — **変更**（Delta 4 login Origin fail-closed 補正）
-  - `Session` の Origin 検証を「Origin 不在・不一致・allowedOrigin 未設定を拒否（403）」に補正
-- `internal/handler/native_auth_handler_test.go` — **変更**（Origin fail-closed の異常系追加）
-- `internal/handler/router.go` — **変更**（Delta 3）
-  - capability route 条件に `deps.CORSAllowedOrigin != ""` を追加（`SessionReady()` は維持）
-  - `/api/auth/session` 条件は既存 `NativeAuthHandler != nil && SessionReady()` を維持
-  - iOS `/api/passkey/registration/*` / `/api/passkey/authentication/*`（および Web と共有する
-    `registration/finish`）は `PasskeyHandler != nil` を維持（#216 契約 / NFR 3.2）
-- `internal/handler/router_test.go` — **変更**（fail-closed 5 列に対応する route 登録テスト）
-- `internal/handler/passkey_e2e_db_test.go` — **変更**（実 PostgreSQL で 3 行 commit / rollback 原子性）
-- `internal/auth/session_exchange.go` — **変更**（session ID 生成器を `auth.GenerateSessionID` として
-  export し RegistrationService と共有 / 重複排除。`SessionExchangeService` の契約は不変）
-- `internal/app/app.go` — **変更**（wiring）
-  - `passkey.NewRegistrationService(...)` に `sessionRepo`（SessionWriter）/ tx runner /
-    `auth.GenerateSessionID` / `sessionTTL` を注入
-  - `handler.NewPasskeyHandler(...)` に `allowedOrigin`（`cfg.CORSAllowedOrigin`）と Cookie 設定
-    （`cfg.CookieDomain` / `cfg.CookieSecure` / `cfg.SessionMaxAge`）を注入
-  - 注記: session 発行依存（sessionRepo / cookie / origin）は `NATIVE_AUTH_JWT_SECRET` に依存せず、
-    `WEBAUTHN_*` 設定時（passkey handler 生成時）に常時配線する
+> #216 / #230 spec 本体（`docs/specs/216--app-store-4-8/**` / `docs/specs/230-fix-passkey-credential/**`）は
+> いずれの区分にも入れない（NFR 1.3。tasks に編集タスクを置かない）。
 
-### Modified Files（Web 側）
+### サーバ（Go）
 
-- `web/src/hooks/use-passkey-registration.ts` — **変更**（Delta 1 Web + Delta 5 hook）
-  - chain を「begin → create → finish（2xx + Set-Cookie）→ invalidateQueries」に短縮
-    （`authentication/begin` / `get` / `authentication/finish` / 登録用 `/api/auth/session` を除去）
-  - `PasskeyRegistrationErrorKind` に `"registration_uncertain"` を追加。registration 経路は
-    `session_exchange_failed` を発生させない（直接 session 化により該当段が消滅）
-- `web/src/hooks/use-passkey-registration.test.ts` — **変更**（uncertain 4 サブケース + 二度目 ceremony 不在回帰）
-- `web/src/components/passkey-signup-dialog.tsx` — **変更**（Delta 5 UI: 完了不明 + discoverable 復旧導線）
-- `web/src/components/passkey-signup-dialog.test.tsx` — **変更**
-- `web/src/hooks/use-passkey-authentication.ts` — 既存維持（discoverable ログイン復旧で **再利用**、変更なし）
-- `web/src/components/login-page.tsx` / `login-page.test.tsx` / `login-page-recovery.test.tsx` —
-  **変更**（PR #229 で追加済み。完了不明 → discoverable ログイン → 成功で 2 ペイン到達の recovery テスト整合）
-- `web/src/lib/api.ts` — **変更対象として列挙**（Requirement 2.1 / #223 design の「無変更」記述を訂正。
-  PR #229 で `credentials: "include"` 経路等が変更済み。本差分自身は api.ts をさらに触る必要はない）
-- `web/src/lib/api.test.ts` — **変更対象として列挙**（PR #229 で追加済みだが #223 design 未列挙 / Req 2.1）
-- `web/src/types/passkey.ts` — **変更**（`PasskeyRegistrationErrorKind` に uncertain 追加。
-  `RegistrationFinishResponse` は `{user_id}` のまま **auth_code を追加しない**）
-- `web/src/lib/webauthn.ts` / `pkce.ts` / `passkey-capability.ts` / `use-passkey-capability.ts` /
-  `passkey-buttons.tsx`（各 `.test`）— 既存維持（変更なし）
+| 区分 | パス | #231 での扱い |
+|---|---|---|
+| [U] | `internal/repository/tx.go` | #230/#232 の tx 基盤を **そのまま再利用**。#231 変更なし |
+| [U] | `internal/repository/postgres_user_repo.go` | `CreateUserOnlyExec` は **#230 既存**。#231 変更なし |
+| [U] | `internal/repository/postgres_passkey_credential_repo.go` | `CreateExec` は **#230 既存**。#231 変更なし |
+| [N] | `internal/repository/postgres_session_repo.go` | session 作成の tx 変種 `CreateExec(ctx, q DBTX, s)` を追加、既存 `Create` は委譲（差分等価） |
+| [N] | `internal/auth/session_factory.go` | 共有 session factory（ID + 単一 now + CreatedAt + ExpiresAt）。`SessionExchangeService` と RegistrationService が共有 |
+| [N] | `internal/auth/session_factory_test.go` | factory の ID / CreatedAt / ExpiresAt / 単一 now / generator 失敗を検証 |
+| [E] | `internal/auth/service.go` | `generateSessionID` は本ファイルに定義済み（File Plan の旧「session_exchange.go から export」は誤り）。factory から参照できるよう **同 package の export helper `NewSessionID`** を追加（`Service.createSession` の挙動は差分等価） |
+| [E] | `internal/auth/session_exchange.go` | session 構築を新 factory 呼び出しに差し替え（`SessionExchangeService` の外部契約・挙動は不変 / 差分等価） |
+| [E] | `internal/auth/session_exchange_test.go` | factory 差し替え後も既存アサーションが pass することを確認（CreatedAt / ExpiresAt 検証を追加） |
+| [E] | `internal/passkey/registration_service.go` | `FinishRegistrationNew` を既存 tx クロージャ内 session INSERT + `issueWebSession bool` + `*model.Session` 返却に拡張。session factory / session writer を注入、`WebSessionReady()` 追加 |
+| [E] | `internal/passkey/registration_service_test.go` | 新シグネチャ追従 + Web/iOS branch + 全 rollback + session の ID/CreatedAt/ExpiresAt 検証 |
+| [E] | `internal/handler/passkey_handler.go` | `allowedOrigin` + Cookie 設定 Option 注入、`RegistrationFinish` の mode 判定 / JSON Content-Type / readiness fail-closed / commit 後 `Set-Cookie`、`webRegistrationReady()` |
+| [E] | `internal/handler/passkey_handler_test.go` | mode 判定 / Set-Cookie / iOS `{user_id}` + Cookie なし回帰 / partial readiness fail-closed |
+| [N] | `internal/handler/session_cookie.go` | canonical Cookie builder `buildSessionCookie(...)` を 3 handler で共有 |
+| [N] | `internal/handler/session_cookie_test.go` | builder の属性が Google OAuth Callback と一致することを検証 |
+| [E] | `internal/handler/native_auth_handler.go` | `Session` の Origin 検証を fail-closed（不在・不一致・許可 Origin 未設定を 403）へ補正 |
+| [E] | `internal/handler/native_auth_handler_test.go` | Origin fail-closed の異常系追加 |
+| [E] | `internal/handler/router.go` | capability 条件に `WebPasskeyAllowedOrigin != ""` + `PasskeyHandler.webRegistrationReady()` を追加（`SessionReady()` 維持）。iOS route 条件 `PasskeyHandler != nil` は不変 |
+| [E] | `internal/handler/router_test.go` | fail-closed 表 5 列 + partial wiring（capability/session/registration の登録一致）を table-driven で検証 |
+| [U] | `internal/handler/router_unauth_ratelimit_test.go` | PR #229 で追加済み。#231 変更なし（記録） |
+| [E] | `internal/handler/passkey_e2e_db_test.go` | 実 PostgreSQL で 3 行 commit / session 失敗時の全 rollback + Set-Cookie なし |
+| [E] | `internal/config/config.go` | `WebPasskeyAllowedOrigin`（明示設定された exact Origin、未設定/空 → `""`）を追加。`CORSAllowedOrigin` 既定は不変（新規 env は追加しない） |
+| [E] | `internal/config/config_test.go` | `CORS_ALLOWED_ORIGIN` set/unset/empty での `WebPasskeyAllowedOrigin` を検証 |
+| [E] | `internal/app/app.go` | RegistrationService へ session writer / session factory / TTL を注入、PasskeyHandler へ `WebPasskeyAllowedOrigin` + Cookie 設定を注入（`NATIVE_AUTH_JWT_SECRET` 非依存で `WEBAUTHN_*` 設定時に配線） |
 
-### Modified Files（運用 config / Requirement 6）
+### Web（TypeScript）
 
-- `.env.sample` — **変更**（既存 WebAuthn env 群と `CORS_ALLOWED_ORIGIN` の documentation 整備 / 新規 env なし）
-- `docker-compose.yml` — **変更**（`api` サービスへ WebAuthn env passthrough 追加 / 新規 env なし）
+| 区分 | パス | #231 での扱い |
+|---|---|---|
+| [E] | `web/src/lib/api.ts` | 2xx の `response.json()` 失敗を status 付きの型（`ResponseParseError`）へ正規化し、dispatch 前失敗と区別可能にする |
+| [E] | `web/src/lib/api.test.ts` | 2xx body 欠損/途中切断/parse 不能で `ResponseParseError`（status 2xx）を投げ、pre-dispatch 失敗と区別されることを検証 |
+| [E] | `web/src/types/passkey.ts` | `PasskeyRegistrationErrorKind` に `"registration_uncertain"` を追加。`RegistrationFinishResponse` は `{user_id}` のまま（auth_code を追加しない） |
+| [E] | `web/src/hooks/use-passkey-registration.ts` | chain を「begin → create → finish → invalidateQueries」に短縮（二度目 ceremony / 登録用 `/api/auth/session` を除去）。finish の error を uncertain / rejected / 非-uncertain に分類 |
+| [E] | `web/src/hooks/use-passkey-registration.test.tsx` | 二度目 ceremony 不在回帰 + uncertain 4 サブケース + 全 4xx=rejected 回帰（ファイル拡張子は `.test.tsx` / PR #229 実体に一致） |
+| [E] | `web/src/components/passkey-signup-dialog.tsx` | 完了不明状態 UI + discoverable ログイン復旧導線（段階提示） |
+| [E] | `web/src/components/passkey-signup-dialog.test.tsx` | uncertain 見出し / 段階提示 / 内部詳細非漏出の回帰 |
+| [E] | `web/src/components/login-page-recovery.test.tsx` | uncertain → discoverable ログイン成功 → 2 ペイン到達の recovery 整合 |
+| [U] | `web/src/hooks/use-passkey-authentication.ts` | discoverable ログイン復旧で **再利用**。#231 変更なし |
+| [U] | `web/src/hooks/use-passkey-authentication.test.tsx` / `use-passkey-authentication.contract.test.tsx` | PR #229 追加済み。#231 変更なし（記録） |
+| [U] | `web/src/components/login-page.tsx` / `login-page.test.tsx` / `passkey-buttons.tsx` / `passkey-buttons.test.tsx` | PR #229 追加済み。#231 変更なし |
+| [U] | `web/src/hooks/use-passkey-capability.ts` / `use-passkey-capability.test.tsx` | 同上（#231 変更なし） |
+| [U] | `web/src/lib/webauthn.ts` / `webauthn.test.ts` / `pkce.ts` / `pkce.test.ts` / `passkey-capability.ts` / `passkey-capability.test.ts` | 同上（#231 変更なし） |
 
-### Modified Files（spec 補助 / #223 spec の本体 3 文書は不変）
+### 運用 config（Requirement 6）
 
-- `docs/specs/223-feat-web-web/impl-notes.md` — **変更**（#231 delta 適用結果の追記）
-- `docs/specs/223-feat-web-web/context-map.md` — **変更**（`finish → Cookie session` へ経路更新 /
-  fail-closed 表 supersede / 完了不明状態の遷移追加）
+| 区分 | パス | #231 での扱い |
+|---|---|---|
+| [E] | `.env.sample` | `CORS_ALLOWED_ORIGIN` の fail-closed 接続（未設定 → capability 404 / Origin 検証 403）をコメントで明記。WebAuthn env ブロックは PR #229 で追加済み（記述整備のみ） |
+| [E] | `docker-compose.yml` | `api` の `CORS_ALLOWED_ORIGIN=${CORS_ALLOWED_ORIGIN:-http://localhost:3000}` を `${CORS_ALLOWED_ORIGIN:-}` へ変更（未設定 → 空 → fail-closed 到達可能に）。WebAuthn passthrough は PR #229 で追加済み |
 
-### New Files（本差分で新規追加）
+### spec 補助（#223 spec 本体 3 文書は不変 / NFR 1.1）
 
-- `internal/handler/session_cookie.go` — **新規**: canonical な `session_id` Cookie builder
-  `buildSessionCookie(name, value, domain string, secure bool, maxAge int) *http.Cookie` を定義し、
-  `auth_handler.Callback` / `native_auth_handler.Session` / `passkey_handler.RegistrationFinish` の
-  3 箇所で共有する（Cookie 属性の重複定義を排除 / Delta 4 §Cookie 属性の維持）。
-  同ファイルに `session_cookie_test.go` を近接配置し、属性が Google OAuth Callback と一致することを検証する
+| 区分 | パス | #231 での扱い |
+|---|---|---|
+| [E] | `docs/specs/223-feat-web-web/impl-notes.md` | #231 delta 適用結果を追記 |
+| [E] | `docs/specs/223-feat-web-web/context-map.md` | `finish → 3 行 tx → commit → Set-Cookie` へ経路更新 / fail-closed 表 5 列 supersede / 完了不明状態遷移追加 |
+| [U] | `docs/specs/223-feat-web-web/requirements.md` / `design.md` / `tasks.md` / `review-notes.md` | PR #229 に既存。#231 では **書き換えない**（NFR 1.1。記録） |
 
 ## Requirements Traceability
 
@@ -271,26 +274,28 @@ Google OAuth Callback と同一の生成器を再利用する（重複しない�
 |-------------|---------|-----------|
 | 1.1 | 登録 finish 後の追加 WebAuthn ceremony 禁止 | Delta 1 §Sequence / §Web Hook |
 | 1.2 | 二度目 ceremony を実装として採用しない | Delta 1 §Before → After |
-| 1.3 | 登録トランザクションに紐付いた合流経路 | Delta 1 §3 行トランザクション / §Set-Cookie |
+| 1.3 | 3 行単一 tx → commit → Set-Cookie（iOS は 2 行・Cookie なし） | Delta 1 §3 行トランザクション / §Set-Cookie / §iOS 契約維持 |
 | 1.4 | 2 ペイン UI 初期表示 | Delta 1 §Sequence（invalidateQueries → AuthGuard） |
 | 1.5 | ログイン導線への影響なし | Delta 1 §影響範囲（`use-passkey-authentication` 未変更） |
-| 2.1 | api.ts / api.test.ts を変更対象に明示 | File Structure Plan §Web 側 |
+| 2.1 | api.ts / api.test.ts を変更対象に明示 | File Structure Plan §Web |
 | 2.2 | .env.sample / docker-compose.yml を変更対象に明示 | File Structure Plan §運用 config |
 | 2.3 | needs-iteration 1 回で完結する粒度のタスク | tasks.md 全体 |
-| 2.4 | #223 / #216 spec 書換タスクを含まない | tasks.md（spec 本体編集タスク不在） |
-| 2.5 | Reviewer が変更ファイルを突合できる状態 | File Structure Plan §Modified/New Files |
+| 2.4 | #223 / #216 / #230 spec 書換タスクを含まない | File Structure Plan（[U] 記録 / 本体編集タスク不在） |
+| 2.5 | Reviewer が変更ファイルを exact-path で突合できる | File Structure Plan（[E]/[U]/[N] 区分） |
 | 3.1 | Web login session 交換 endpoint を独立列に | Delta 3 §fail-closed 表（列 B） |
 | 3.2 | Web capability probe を独立列に | Delta 3 §fail-closed 表（列 A） |
 | 3.3 | NATIVE unset + WEBAUTHN set で iOS 継続 | Delta 3 §fail-closed 表 行 2 / §iOS 契約維持 |
 | 3.4 | WEBAUTHN unset で Web 縮退 + iOS 停止 | Delta 3 §fail-closed 表 行 4 / 5 |
 | 3.5 | iOS request/response 契約破壊禁止 | Delta 1 §iOS 契約維持 / Delta 3 §登録条件不変 |
-| 4.1 | CSRF 主防御要素を要素ごと・endpoint ごとに明記 | Delta 4 §主防御要素表（登録直接 / login 交換） |
+| 3.6 | direct-registration readiness 不足時に capability 404 | Delta 3 §capability readiness / §webRegistrationReady |
+| 4.1 | CSRF 主防御要素を要素ごと・endpoint ごとに明記 | Delta 4 §主防御要素表 |
 | 4.2 | 旧誤記述の撤回と正しい前提の明記 | Delta 4 §旧記述の撤回 |
 | 4.3 | 残余リスクの列挙 | Delta 4 §残余リスク |
 | 4.4 | browser-bound state 不要の決定明記 | Delta 4 §決定記録 |
 | 4.5 | Cookie 属性の既存 Google OAuth 一致維持 | Delta 4 §Cookie 属性の維持 / New Files（共有 builder） |
 | 4.6 | 将来検討導線を残す | Delta 4 §将来検討導線 |
-| 5.1 | 第 3 の完了不明状態としてユーザーに提示 | Delta 5 §状態定義 / §Hook 判定 |
+| 4.7 | PKCE を直接登録に適用せず login 交換に限定 | Delta 1 §mode 判定（code_challenge 形式検証のみ）/ Delta 4 §主防御要素表 |
+| 5.1 | 第 3 の完了不明状態としてユーザーに提示 | Delta 5 §状態定義 / §API 層の型付き正規化 / §Hook 判定 |
 | 5.2 | discoverable ログイン確認を提示（再作成は同列不可） | Delta 5 §UI 文言と復旧導線 |
 | 5.3 | 復旧ログイン成功で 2 ペイン UI | Delta 5 §状態遷移図（成功） |
 | 5.4 | 一律失敗の後にのみ再作成導線 | Delta 5 §状態遷移図（失敗） |
@@ -298,15 +303,15 @@ Google OAuth Callback と同一の生成器を再利用する（重複しない�
 | 5.6 | 他状態と混同されない文言 | Delta 5 §既存 error kind との弁別 |
 | 6.1 | .env.sample を変更対象に明示 | Delta 6 §反映内容 / File Structure Plan |
 | 6.2 | docker-compose.yml を変更対象に明示 | Delta 6 §反映内容 / File Structure Plan |
-| 6.3 | needs-iteration 1 回で完結する config タスク | tasks.md Task 6 |
+| 6.3 | needs-iteration 1 回で完結する config タスク | tasks.md Task 7 |
 | 6.4 | 別 prerequisite PR に分離しない決定明記 | Delta 6 §決定記録 |
 | 6.5 | 既存 env 流用に留め新規 env 追加なしを担保 | Delta 6 §既存 env 流用 |
-| NFR 1.1 | #223 spec 物理ファイル不変 | Non-Goals / File Structure Plan（#223 本体編集タスク不在） |
+| NFR 1.1 | #223 spec 物理ファイル不変 | Non-Goals / File Structure Plan（[U] 記録） |
 | NFR 1.2 | 独立実装 PR を作らず PR #229 needs-iteration 1 回で反映 | Non-Goals / tasks.md 全体 |
-| NFR 1.3 | #216 契約を破壊するタスクを含まない | Delta 1 §iOS 契約維持 / File Structure Plan（#216 本体編集タスク不在） |
+| NFR 1.3 | #216 / #230 契約を破壊するタスクを含まない | Delta 1 §iOS 契約維持 / File Structure Plan（[U] 記録） |
 | NFR 2.1 | 完了不明状態・session 発行の秘密情報非漏出 | Delta 1 §NFR / Delta 5 §秘密情報の非漏出 |
 | NFR 2.2 | CSRF / fail-closed 記述に秘密値を例示しない | Delta 3 / Delta 4（例示値なし） |
-| NFR 3.1 | Google OAuth 既存挙動を破壊しない | 全 Delta（Google 経路無変更）/ File Structure Plan（auth 経路本体未変更） |
+| NFR 3.1 | Google OAuth 既存挙動を破壊しない | 全 Delta（Google 経路無変更）/ Delta 6（CORS 層既定不変） |
 | NFR 3.2 | iOS #216 request/response 契約不変 | Delta 1 §iOS 契約維持 / Delta 3 §登録条件不変 |
 
 ## Delta 1: 登録 finish の直接 Cookie session（Requirement 1）
@@ -320,34 +325,12 @@ Google OAuth Callback と同一の生成器を再利用する（重複しない�
 
 ### Before → After Sequence
 
-#### Before（PR #229 head の現行実装 = 仮案 B の系譜）
+**Before（PR #229 head の現行実装 = 仮案 B の系譜 / 除去対象）**: finish 200 の後に
+`authentication/begin → navigator.credentials.get()`（**二度目 ceremony**）`→ authentication/finish`
+`→ POST /api/auth/session {auth_code, code_verifier}`（204 + Set-Cookie）という追加 chain で session に
+合流していた。この 4 呼び出しと二度目の authorization gesture を廃止する。
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant U as User
-    participant HR as usePasskeyRegistration
-    participant NC as navigator.credentials
-    participant SVR as Feedman API
-    U->>HR: mutate({username})
-    HR->>SVR: POST /api/passkey/registration/begin {username, email:"", code_challenge}
-    SVR-->>HR: 200 {challenge_id, options}
-    HR->>NC: create({publicKey})  %% 1 回目 ceremony
-    NC-->>HR: attestation
-    HR->>SVR: POST /api/passkey/registration/finish {challenge_id, credential}
-    SVR-->>HR: 200 {user_id}
-    Note over HR,SVR: 二度目 ceremony（除去対象）
-    HR->>SVR: POST /api/passkey/authentication/begin {code_challenge}
-    SVR-->>HR: 200 {challenge_id, options}
-    HR->>NC: get({publicKey})  %% 2 回目 ceremony（Face ID/Touch ID 再発火）
-    NC-->>HR: assertion
-    HR->>SVR: POST /api/passkey/authentication/finish
-    SVR-->>HR: 200 {auth_code}
-    HR->>SVR: POST /api/auth/session {auth_code, code_verifier}
-    SVR-->>HR: 204 + Set-Cookie
-```
-
-#### After（本 Delta 1 で確定する挙動 = 決定 1.A）
+**After（本 Delta 1 で確定する挙動 = 決定 1.A）**:
 
 ```mermaid
 sequenceDiagram
@@ -357,152 +340,161 @@ sequenceDiagram
     participant NC as navigator.credentials
     participant PH as PasskeyHandler.RegistrationFinish
     participant RS as RegistrationService
-    participant DB as PostgreSQL (single tx)
+    participant DB as PostgreSQL (RegistrationTx)
     U->>HR: mutate({username})
     HR->>PH: POST /api/passkey/registration/begin {username, email:"", code_challenge}
     Note over RS: code_challenge は形式検証のみ（永続化・束縛しない）
     PH-->>HR: 200 {challenge_id, options}
-    HR->>NC: create({publicKey})  %% 唯一の生体認証プロンプト
+    HR->>NC: create({publicKey})  %% 唯一の authorization gesture
     NC-->>HR: attestation
     HR->>PH: POST /api/passkey/registration/finish {challenge_id, credential}<br/>(Origin: 許可オリジン)
     Note over PH: JSON Content-Type / exact Origin を mutation 前に検証<br/>→ Web mode 判定
     PH->>RS: FinishRegistrationNew(..., issueWebSession=true)
-    RS->>DB: BEGIN
-    RS->>DB: INSERT user
-    RS->>DB: INSERT credential
-    RS->>DB: INSERT session (generateSessionID)
-    RS->>DB: COMMIT  %% いずれか失敗で全 ROLLBACK
+    RS->>DB: BeginTx (既存 #230 txBeginner)
+    RS->>DB: CreateUserOnlyExec (user)
+    RS->>DB: CreateExec (credential)
+    RS->>DB: CreateExec (session = factory.NewSession(userID))
+    RS->>DB: Commit  %% いずれか失敗で defer Rollback（全取消）
     RS-->>PH: (user_id, *Session)
     PH-->>HR: 200 {user_id} + Set-Cookie session_id  %% commit 後のみ
     HR->>HR: invalidateQueries(["auth","me"]) → AuthGuard → 2 ペイン UI
 ```
 
-追加のブラウザ生体認証プロンプト（`navigator.credentials.get`）が消滅し、体験する ceremony は
+追加のブラウザ authorization gesture（`navigator.credentials.get`）が消滅し、体験する ceremony は
 登録時の `create` 1 回のみになる（Requirement 1.1 / 1.2）。
 
 ### Web / iOS mode 判定（`PasskeyHandler.RegistrationFinish`）
 
 handler は challenge consume / DB mutation より **前** に、`Origin` ヘッダで mode を判定する
-（推奨境界。別実装でも「JSON body 追加・exchange artifact なしで直接 session」を満たせば可）:
+（推奨境界。別実装でも「JSON body 追加・exchange artifact なしで直接 session」を満たせば可）。
+判定に使う許可 Origin は `config.WebPasskeyAllowedOrigin`（**明示設定された** exact Origin。
+未設定/空なら `""`）を注入した `h.allowedOrigin` である:
 
-| `Origin` ヘッダ | `allowedOrigin`（`CORS_ALLOWED_ORIGIN`） | 判定 | 挙動 |
+| `Origin` ヘッダ | `h.allowedOrigin`（`WebPasskeyAllowedOrigin`） | 判定 | 挙動 |
 |---|---|---|---|
-| 一致（`origin == allowedOrigin`） | 設定済 | **Web mode** | JSON Content-Type 検証 → readiness 確認 → `issueWebSession=true` |
+| 一致（`origin == allowedOrigin` かつ `allowedOrigin != ""`） | 設定済 | **Web mode** | JSON Content-Type 検証 → readiness 確認 → `issueWebSession=true` |
 | 不在（`""`） | 任意 | **native/iOS mode** | 既存挙動（session 発行なし / `issueWebSession=false`） |
-| 非空・不一致、または `allowedOrigin` 未設定 | — | **拒否** | 403 FORBIDDEN_ORIGIN（mutation・consume なし / fail-closed） |
+| 非空・不一致、または `allowedOrigin` 未設定（`""`） | — | **拒否** | 403 FORBIDDEN_ORIGIN（mutation・consume なし / fail-closed） |
 
 - Web mode の追加検証（いずれも mutation 前）:
   - **JSON Content-Type 必須**（不一致は 415 UNSUPPORTED_MEDIA_TYPE）。native/iOS mode には
     本検証を **課さない**（#216 既存クライアント互換 / NFR 3.2）
-  - **readiness**（`PasskeyHandler.webRegistrationReady()` = `allowedOrigin != "" && Cookie 設定済み &&
-    RegistrationService.WebSessionReady()`）が false なら fail-closed（500 相当、mutation なし）。
-    通常 wiring では `WEBAUTHN_*` 設定時に session 発行依存が常時配線されるため、実質は
-    `allowedOrigin` 設定有無が支配的
+  - **readiness**（`PasskeyHandler.webRegistrationReady()`。定義は Delta 3）が false なら
+    fail-closed（500 相当、mutation なし）。通常 wiring では `WEBAUTHN_*` 設定時に session 発行依存が
+    常時配線されるため、実質は `WebPasskeyAllowedOrigin` の明示設定有無が支配的
 - iOS はネイティブ HTTP クライアントで `Origin` を送らないため native mode に落ち、session / Cookie を
   作らず `{user_id}` のみを返す（#216 と差分等価 / NFR 3.2）
 
 ### Server 側の実装差分
 
-#### `internal/passkey/registration_service.go`（Modified）
+#### 共有 session factory（`internal/auth/session_factory.go` / New / Blocker #2 対応）
+
+login session 発行（`Service.createSession` / `SessionExchangeService`）と registration direct session が
+**同一の session 構築ロジック**（ID 生成 + 単一 `now` + `CreatedAt=now` + `ExpiresAt=now+TTL`）を
+共有するための最小 factory を新設する。RegistrationService には具体型ではなく最小 interface を
+注入する（interface segregation / テスト可能性）:
 
 ```go
-// 追加/拡張する最小 IF（interface segregation / CLAUDE.md §5）
-type SessionWriter interface {
-    CreateExec(ctx context.Context, q repository.DBTX, s *model.Session) error
-}
-// UserWriter に追加: CreateUserOnlyExec(ctx, q repository.DBTX, u *model.User) error
-// PasskeyCredentialWriter に追加: CreateExec(ctx, q repository.DBTX, c *model.PasskeyCredential) error
-type txRunner interface {
-    WithinTx(ctx context.Context, fn func(q repository.DBTX) error) error
+// internal/auth/session_factory.go（New）
+// SessionFactory は model.Session を ID + 単一 now + CreatedAt + ExpiresAt で一貫生成する。
+// generateSessionID（internal/auth/service.go）と now / TTL を集約し、複製を排除する。
+type SessionFactory struct {
+    ttl time.Duration
+    now func() time.Time // テスト差し替え可（既定 time.Now）
 }
 
-// 構造体に追加（auth_code 関連は追加しない）
-type RegistrationService struct {
-    // ... 既存 adapter / challenges / users / credentials / now ...
-    sessions     SessionWriter
-    tx           txRunner
-    newSessionID func() (string, error) // = auth.GenerateSessionID（SessionExchangeService と共有）
-    sessionTTL   time.Duration          // = time.Duration(cfg.SessionMaxAge) * time.Second
+func NewSessionFactory(ttl time.Duration) *SessionFactory { /* now=time.Now 既定 */ }
+
+// NewSession は 1 度の now を用いて ID / CreatedAt / ExpiresAt を整合させた Session を返す。
+// ID 生成失敗（rand.Read 失敗）はそのまま error として返す（部分構築しない）。
+func (f *SessionFactory) NewSession(userID string) (*model.Session, error) {
+    id, err := NewSessionID() // = service.go の generateSessionID を export した薄い wrapper
+    if err != nil { return nil, err }
+    now := f.now()
+    return &model.Session{ID: id, UserID: userID, CreatedAt: now, ExpiresAt: now.Add(f.ttl)}, nil
 }
+
+// RegistrationService が受ける最小 IF（interface segregation）
+type SessionFactoryFunc interface {
+    NewSession(userID string) (*model.Session, error)
+}
+```
+
+- `SessionExchangeService` は現在の inline 構築（`generateSessionID` + `now` + `CreatedAt` + `ExpiresAt`）を
+  `SessionFactory.NewSession` 呼び出しに差し替える（外部契約・挙動は不変 / 差分等価）
+- `Service.createSession`（Google OAuth login）も同 factory 採用が望ましいが、最小差分として
+  少なくとも `SessionExchangeService` と registration direct session の 2 経路で factory を共有する
+  （review Blocker #2 の要求「at least existing SessionExchangeService and registration direct session」）
+- `generateSessionID` は **`internal/auth/service.go`** に定義されている（旧 File Plan の
+  「`session_exchange.go` から export」は誤り）。export helper `NewSessionID` を同ファイルに追加する
+
+#### `internal/passkey/registration_service.go`（Modified / #230 tx を拡張）
+
+```go
+// 追加する最小 IF（interface segregation / CLAUDE.md §5）。
+// user/credential の Exec 変種と RegistrationTxBeginner は #230 既存のため再宣言しない。
+type SessionWriter interface {
+    CreateExec(ctx context.Context, q repository.DBTX, s *model.Session) error // #231 新規（session repo）
+}
+
+// 構造体に追加（auth_code 関連依存は追加しない）:
+//   sessions       SessionWriter          // session 行 INSERT（tx 変種）
+//   sessionFactory auth.SessionFactoryFunc // ID + now + CreatedAt + ExpiresAt を一貫生成（共有）
+// 既存 txBeginner RegistrationTxBeginner（#230）はそのまま使用する。
 
 // WebSessionReady は Web mode の直接 session 発行が配線済みかを返す（defense-in-depth）。
 func (s *RegistrationService) WebSessionReady() bool {
-    return s.sessions != nil && s.tx != nil && s.newSessionID != nil
+    return s.sessions != nil && s.sessionFactory != nil && s.txBeginner != nil
 }
 
-// FinishRegistrationNew: 単一 tx で user → credential →（Web mode のみ）session を作成。
-//   - 既存 challenge consume / adapter.FinishRegistration（attestation 検証）は変更しない
-//   - user UNIQUE 衝突 → ErrRegistrationFailed / credential 重複 → ErrRegistrationFailed（既存正規化を維持）
-//   - session ID 生成失敗・session INSERT 失敗も含め、いずれかの失敗で全 ROLLBACK（3 行 atomic）
-//   - iOS（issueWebSession=false）は user + credential のみ作成し、webSession=nil を返す
+// FinishRegistrationNew: #230 の既存 BeginTx → defer Rollback → Commit を維持し、
+// credential CreateExec の後・Commit の前に session INSERT を 1 つ追加する（Web mode のみ）。
 func (s *RegistrationService) FinishRegistrationNew(
     ctx context.Context, challengeID string, requestBody []byte, issueWebSession bool,
 ) (userID string, webSession *model.Session, err error) {
-    // ... consume challenge / rebuild WebAuthnUser / adapter.FinishRegistration（既存どおり）...
-    newUser := &model.User{ ID: pendingUserID, Email: "", Username: normalized, UsernameNormalized: normalized }
-    cred := &model.PasskeyCredential{ /* parsed から既存どおり */ }
+    // ... challenge consume / adapter.FinishRegistration（#230 と同一。変更しない）...
+    tx, err := s.txBeginner.BeginTx(ctx)                       // #230 既存
+    if err != nil { return "", nil, fmt.Errorf("...: %w", err) }
+    committed := false
+    defer func() { if !committed { _ = tx.Rollback() } }()      // #230 既存の defer rollback
 
-    txErr := s.tx.WithinTx(ctx, func(q repository.DBTX) error {
-        if e := s.users.CreateUserOnlyExec(ctx, q, newUser); e != nil {
-            if errors.Is(e, repository.ErrUsernameTaken) { return ErrRegistrationFailed }
-            return fmt.Errorf("failed to create user: %w", e)
+    if err := s.users.CreateUserOnlyExec(ctx, tx.Querier(), newUser); err != nil { /* #230 既存の正規化 */ }
+    if err := s.credentials.CreateExec(ctx, tx.Querier(), cred); err != nil { /* #230 既存の正規化 */ }
+
+    if issueWebSession {                                        // ← #231 で追加する唯一の tx 内ステップ
+        sess, e := s.sessionFactory.NewSession(newUser.ID)     // ID + CreatedAt + ExpiresAt を factory で
+        if e != nil { return "", nil, fmt.Errorf("failed to build session: %w", e) }
+        if e := s.sessions.CreateExec(ctx, tx.Querier(), sess); e != nil {
+            return "", nil, fmt.Errorf("failed to create session: %w", e)
         }
-        if e := s.credentials.CreateExec(ctx, q, cred); e != nil {
-            if errors.Is(e, repository.ErrCredentialAlreadyRegistered) { return ErrRegistrationFailed }
-            return fmt.Errorf("failed to save passkey credential: %w", e)
-        }
-        if issueWebSession {
-            sid, e := s.newSessionID()
-            if e != nil { return fmt.Errorf("failed to generate session id: %w", e) }
-            webSession = &model.Session{ ID: sid, UserID: newUser.ID, ExpiresAt: s.now().Add(s.sessionTTL) }
-            if e := s.sessions.CreateExec(ctx, q, webSession); e != nil {
-                return fmt.Errorf("failed to create session: %w", e)
-            }
-        }
-        return nil
-    })
-    if txErr != nil {
-        webSession = nil // 部分状態を返さない（全 ROLLBACK 済み）
-        if errors.Is(txErr, ErrRegistrationFailed) { return "", nil, ErrRegistrationFailed }
-        return "", nil, txErr
+        webSession = sess
     }
+    if err := tx.Commit(); err != nil {                        // #230 既存
+        return "", nil, fmt.Errorf("...: %w", err)
+    }
+    committed = true
     return newUser.ID, webSession, nil
 }
 ```
 
-- Preconditions: `sessions` / `tx` / `newSessionID` は passkey handler 生成時（`WEBAUTHN_*` 設定時）に
-  非 nil で注入されている
+- Preconditions: `sessions` / `sessionFactory` は passkey handler 生成時（`WEBAUTHN_*` 設定時）に
+  非 nil で注入されている。`txBeginner` は #230 が既に注入している
 - Postconditions:
-  - 成功（Web mode）: user / credential / session の **3 行が同一 tx で永続化**される
+  - 成功（Web mode）: user / credential / session の **3 行が同一 tx で永続化**され、`webSession` は
+    factory が生成した ID / `CreatedAt=now` / `ExpiresAt=now+TTL` を持つ
   - 成功（iOS mode）: user / credential の 2 行のみ永続化（session なし / `{user_id}` 応答）
-  - 失敗: 部分保存は残さない（tx の atomic rollback。#216 の「非 tx で部分保存し得る」旧挙動を改善）
+  - 失敗: 部分保存は残さない（既存 defer Rollback により session INSERT 失敗 / commit 失敗でも
+    user / credential 行が残らない。3 行 atomic）
 - Invariants: `auth_code` 平文 / session ID 生値をログ・エラー・レスポンスに残さない（NFR 2.1。
   session ID は Set-Cookie でのみクライアントへ渡し、ログには出さない）
 
 #### `internal/handler/passkey_handler.go`（Modified）
 
-```go
-// RegistrationFinish（イメージ）:
-//   origin := r.Header.Get("Origin")
-//   webMode := false
-//   switch {
-//   case origin == "":
-//       // native/iOS: 既存挙動（JSON Content-Type 追加検証なし）
-//   case h.allowedOrigin != "" && origin == h.allowedOrigin:
-//       if !hasJSONContentType(r) { 415; return }          // mutation 前
-//       if !h.webRegistrationReady() { 500; return }        // fail-closed / mutation 前
-//       webMode = true
-//   default:
-//       middleware.WriteErrorResponse(w, 403, forbiddenOriginError()); return  // mutation 前
-//   }
-//   // decode {challenge_id, credential}（既存）
-//   userID, sess, err := h.regService.FinishRegistrationNew(ctx, req.ChallengeID, req.Credential, webMode)
-//   // 既存 error mapping（ErrRegistrationFailed → 400 REGISTRATION_FAILED / infra → 500）
-//   if sess != nil {
-//       http.SetCookie(w, buildSessionCookie(sessionCookieName, sess.ID, h.cookieDomain, h.cookieSecure, h.cookieMaxAge))
-//   }
-//   respond 200 {user_id: userID}   // JSON は Web / iOS とも不変
-```
+`RegistrationFinish` は上表の mode 判定（Origin と `h.allowedOrigin` で Web/iOS/拒否を分岐。Web mode は
+mutation 前に JSON Content-Type 検証 + `webRegistrationReady()` fail-closed）を行い、既存の
+`{challenge_id, credential}` decode → `FinishRegistrationNew(ctx, challengeID, credential, webMode)` を呼ぶ。
+既存 error mapping（`ErrRegistrationFailed` → 400 / infra → 500）を維持し、`webSession != nil` のとき
+`buildSessionCookie(...)` で `Set-Cookie` を付け、レスポンスは Web / iOS とも 200 `{user_id}`（不変）とする。
 
 #### iOS #216 契約が破壊されない論証（NFR 3.2 / Req 3.5）
 
@@ -510,7 +502,7 @@ func (s *RegistrationService) FinishRegistrationNew(
   ままで、差分は HTTP **ヘッダ** の `Set-Cookie` のみ（iOS は Origin を送らず native mode に落ちるため
   Cookie を受け取らない）
 - request JSON（`{challenge_id, credential}`）・`registration/begin` の JSON も不変。登録 begin の
-  `code_challenge` はフィールドを維持（形式検証のみ）
+  `code_challenge` はフィールドを維持（形式検証のみ / Req 4.7）
 - JSON Content-Type / Origin の追加検証は **Web mode のみ** に課すため、iOS の既存リクエスト経路は不変
 
 ### Web 側の実装差分（`use-passkey-registration.ts`）
@@ -533,17 +525,20 @@ async function mutationFn({ username }: { username: string }) {
 - `authentication/begin` / `navigator.credentials.get` / `authentication/finish` / 登録用
   `POST /api/auth/session` の 4 呼び出しを **完全削除**（Req 1.1 / 1.2）
 - `apiClient` は `credentials: "include"` で Cookie を受理・送出する（既存 PR #229 の api.ts 経路）
-- error 分類は §Delta 5 で `registration_uncertain` を追加
+- error 分類は §Delta 5 で `registration_uncertain` を追加（`api.ts` の型付き正規化に依拠）
 
 ### 影響範囲
 
-- 変更: `RegistrationService` / `PasskeyHandler.RegistrationFinish` / repo Exec 変種 / tx helper /
-  共有 Cookie builder / `use-passkey-registration.ts` / `passkey-signup-dialog.tsx` / `app.go`
+- 変更: `RegistrationService.FinishRegistrationNew` / `PasskeyHandler.RegistrationFinish` /
+  session repo `CreateExec` / 共有 session factory / 共有 Cookie builder /
+  `use-passkey-registration.ts` / `api.ts` / `passkey-signup-dialog.tsx` / `config.go` / `app.go`
 - **無変更で維持**:
+  - #230 の `RegistrationTx` / `RegistrationTxBeginner` / `txBeginner` / user・credential Exec 変種 /
+    `internal/repository/tx.go`（session ステップの追加以外は既存フローそのまま）
   - `AuthenticationService` / `use-passkey-authentication.ts` / `PasskeyButtons`
     （ログイン導線は影響を受けない。discoverable ログイン復旧で再利用のみ / Req 1.5）
-  - `SessionExchangeService` / `NativeAuthHandler.Session`（login の auth_code 交換として不変。
-    Delta 4 で Origin 検証の fail-closed 補正のみ）
+  - `SessionExchangeService` の外部契約（login の auth_code 交換として不変。session 構築のみ factory 化 /
+    Delta 4 で Origin 検証の fail-closed 補正）
   - iOS 用 `registration/*` / `authentication/*`（#216 契約不変 / NFR 3.2）
   - Google OAuth 経路一式（NFR 3.1）
 
@@ -557,15 +552,17 @@ async function mutationFn({ username }: { username: string }) {
 
 ### canonical 定義
 
-本 spec §File Structure Plan（Modified/New Files）が canonical。Reviewer は同節と PR #229 の
-`git diff --name-only` を突き合わせ、以下を確認できる（Requirement 2.5）:
+本 spec §File Structure Plan（[E]/[U]/[N] 区分表）が canonical。Reviewer は同節と PR #229 の
+`git diff --name-only develop..<head>` を突き合わせ、以下を確認できる（Requirement 2.5）:
 
-1. PR #229 の全変更ファイルが Modified/New Files に列挙されている
-2. Modified/New Files に列挙されているが PR #229 に含まれないファイルがない（過剰な予告なし）
-3. `web/src/lib/api.ts` / `api.test.ts` / `.env.sample` / `docker-compose.yml` が列挙されている
-   （旧 #223 design の見落としを訂正済み）
-4. 本差分で追加する session tx 対応（`tx.go` の `WithinTx` / 各 repo の `CreateExec` /
-   `session_cookie.go` / `passkey_e2e_db_test.go` の 3 行原子性テスト）が列挙されている
+1. PR #229 の全変更ファイルが [E] または [U] に exact-path で列挙されている（漏れなし）
+2. [E]/[N] に列挙されているが PR #229 に含まれないファイルがない（過剰な予告なし。[N] は本差分で新規追加）
+3. `web/src/lib/api.ts` / `api.test.ts` / `.env.sample` / `docker-compose.yml` /
+   `docs/specs/223-feat-web-web/review-notes.md` / `internal/handler/router_unauth_ratelimit_test.go` /
+   `internal/auth/session_exchange_test.go` / `web/src/hooks/use-passkey-authentication.contract.test.tsx` が
+   いずれかの区分に現れる（旧 #223 design の見落としを訂正済み）
+4. 本差分で追加する [N]（session repo `CreateExec` / session factory / `session_cookie.go` /
+   config `WebPasskeyAllowedOrigin`）が列挙されている
 
 ## Delta 3: fail-closed 表の 5 列補正と gate 維持（Requirement 3）
 
@@ -579,19 +576,25 @@ async function mutationFn({ username }: { username: string }) {
 ### 補正後の fail-closed 表（5 列独立）
 
 env 3 軸 — **W**=`WEBAUTHN_RP_ID`+`WEBAUTHN_ORIGINS`、**N**=`NATIVE_AUTH_JWT_SECRET`、
-**C**=`CORS_ALLOWED_ORIGIN`（exact Origin） — の代表組合せごとに、各 endpoint を独立列で示す。
+**C**=`CORS_ALLOWED_ORIGIN`（明示設定 = `WebPasskeyAllowedOrigin != ""`） — の代表組合せごとに、
+各 endpoint を独立列で示す。列 C は **endpoint の実挙動**を示し、公式 UI からの到達可否は注記で分離する。
 
 | # | W | N | C | A. capability (Web probe) | B. login exchange `/api/auth/session` | C. reg. direct session (finish Web mode) | D. iOS `registration/*` | E. iOS `authentication/*` |
 |---|---|---|---|---|---|---|---|---|
-| 1 | ✓ | ✓ | ✓ | 登録 (200) | 登録 (204) | 発行（Origin 一致で 200 + Set-Cookie） | 登録 (200) | 登録 (200) |
-| 2 | ✓ | ✗ | ✓ | **未登録 (404)** | 未登録 (404) | (capability 404 で Web UI 非表示のため未到達) | **登録 (200)** | **登録 (200)** |
+| 1 | ✓ | ✓ | ✓ | 登録 (200) | 登録 (204) | **200 + Set-Cookie**（Origin 一致） | 登録 (200) | 登録 (200) |
+| 2 | ✓ | ✗ | ✓ | **未登録 (404)** | 未登録 (404) | **200 + Set-Cookie**（endpoint 実挙動。※capability 404 で公式 UI からは未到達） | **登録 (200)** | **登録 (200)** |
 | 3 | ✓ | ✓ | ✗ | **未登録 (404)** | 全リクエスト拒否 (403 / Delta 4 補正) | Origin 検証不能 → **fail-closed (403)** | 登録 (200) | 登録 (200) |
 | 4 | ✗ | ✓ | ✓ | 未登録 (404) | 登録 (204) | (finish route 自体が未登録 404) | **未登録 (404)** | **未登録 (404)** |
 | 5 | ✗ | ✗ | * | 未登録 (404) | 未登録 (404) | 未登録 (404) | 未登録 (404) | 未登録 (404) |
 
 - **行 2（W✓ N✗ C✓）が最重要回帰**: `NATIVE_AUTH_JWT_SECRET` 未設定でも iOS 用
-  `registration/*` / `authentication/*` は **200 を維持**（列 D/E）。Web は capability=404 で
-  パスキー UI を非表示にし Google 単体へ縮退する（列 A）。iOS を「停止」と誤読させない
+  `registration/*` / `authentication/*` は **200 を維持**（列 D/E）。列 C の registration Web mode は
+  N に依存しないため endpoint としては **200 + Set-Cookie を返す**（直接 POST 時）。ただし capability=404
+  （SessionReady() が N を要求）で **公式 UI にはパスキー導線が出ない**ため、正規ユーザーはこの
+  endpoint に到達しない。「endpoint の実挙動」と「UI 到達可否」を分けて誤読を防ぐ（review Blocker #3）
+- **行 3（W✓ N✓ C✗）**: `WebPasskeyAllowedOrigin == ""` のため capability=404、`/api/auth/session` と
+  registration Web mode は Origin 検証不能で fail-closed（403）。C=✗ は config 補正（Delta 6）により
+  **実 wiring で到達可能**になった（旧 design では localhost:3000 default で到達不能だった）
 - **行 4（W✗）**: iOS 用 endpoint は `PasskeyHandler` に紐付くため、`WEBAUTHN_*` 未設定なら 404
   （#216 で確定済みの挙動）。Web も縮退
 - **列 B と 列 C の独立性**: login exchange（列 B）は N に依存、registration direct session（列 C）は
@@ -601,27 +604,47 @@ env 3 軸 — **W**=`WEBAUTHN_RP_ID`+`WEBAUTHN_ORIGINS`、**N**=`NATIVE_AUTH_JWT
 
 | 列 | 条件 | 依拠 env |
 |---|---|---|
-| A. `GET /api/passkey/capability` | `PasskeyHandler != nil && NativeAuthHandler != nil && NativeAuthHandler.SessionReady() && deps.CORSAllowedOrigin != ""` | W + N + C |
-| B. `POST /api/auth/session` | `NativeAuthHandler != nil && NativeAuthHandler.SessionReady()` **（`SessionReady()` 維持）** + handler 内 Origin fail-closed（Delta 4） | N（+ C で成立） |
-| C. `registration/finish` Web mode 発行 | route は `PasskeyHandler != nil`（iOS と共有）。Web mode 成立は `webRegistrationReady()`（session repo / Cookie / exact Origin） | W + C |
+| A. `GET /api/passkey/capability` | `PasskeyHandler != nil && NativeAuthHandler != nil && NativeAuthHandler.SessionReady() && deps.WebPasskeyAllowedOrigin != "" && deps.PasskeyHandler.webRegistrationReady()` | W + N + C |
+| B. `POST /api/auth/session` | `NativeAuthHandler != nil && NativeAuthHandler.SessionReady()` **（`SessionReady()` 維持）** + handler 内 Origin fail-closed（Delta 4） | N（+ C で実行成立） |
+| C. `registration/finish` Web mode 発行 | route は `PasskeyHandler != nil`（iOS と共有）。Web mode 成立は `webRegistrationReady()` + exact Origin 一致 | W + C |
 | D. `POST /api/passkey/registration/*` | `PasskeyHandler != nil` **（変更なし）** | W |
 | E. `POST /api/passkey/authentication/*` | `PasskeyHandler != nil` **（変更なし）** | W |
 
-### gate を弱めない（Req 3.1 / 3.2 / review #3・#5 との整合）
+### capability の readiness 強化（Req 3.6 / Blocker #3）
 
-- capability（列 A）と `/api/auth/session`（列 B）の gate は PR #229 の
-  `NativeAuthHandler.SessionReady()` を **維持**する（`NativeAuthHandler != nil` に弱めない）。
-  本差分は capability に `deps.CORSAllowedOrigin != ""` を **追加** するのみ（Origin 検証不能な
-  構成で Web パスキー UI を出さないための fail-closed 強化。行 3 参照）
-- 直接登録 session（列 C）は独自の readiness（session repo / Cookie 設定 / exact Origin）を持ち、
+`GET /api/passkey/capability` は「サーバがパスキー Web フロー全体を提供している」判定に使うため、
+**session 合流（login exchange）だけでなく direct-registration の発行 readiness も揃っている**ことを
+登録条件に加える。これにより「capability だけ 200 で signup が 500 になる部分配線」を排除する:
+
+```go
+// PasskeyHandler.webRegistrationReady（イメージ）:
+//   allowedOrigin != ""             // 明示された exact Origin（WebPasskeyAllowedOrigin）
+//   && cookieMaxAge > 0             // 正の Cookie MaxAge（= SessionMaxAge）
+//   && regService.WebSessionReady() // session writer / session factory / txBeginner がすべて非 nil
+// 注: cookieDomain 空・cookieSecure=false は有効な構成（本番は https で Secure=true、
+//     単一ドメインなら Domain 空が正）。したがって Domain / Secure は readiness 条件に含めない。
+//     session factory は正の TTL を内包する（= SessionMaxAge 由来）。
+```
+
+- capability route 条件（列 A）= `SessionReady()`（既存維持）**AND** `WebPasskeyAllowedOrigin != ""`
+  **AND** `PasskeyHandler.webRegistrationReady()`。3 者いずれか欠落で 404（Req 3.6）
+- readiness を曖昧な「Cookie 設定済み」ではなく、**exact Origin / 正の TTL・MaxAge / session writer /
+  session factory / #230 の txBeginner** の有効条件として定義する（Domain 空・Secure=false は有効）
+
+### gate を弱めない（Req 3.1 / 3.2 / review #2・#3 との整合）
+
+- `/api/auth/session`（列 B）の gate は PR #229 の `NativeAuthHandler.SessionReady()` を **維持**する
+  （`NativeAuthHandler != nil` に弱めない）。本差分は capability（列 A）に `WebPasskeyAllowedOrigin != ""` と
+  `webRegistrationReady()` を **追加**するのみ
+- 直接登録 session（列 C）は独自の readiness（webRegistrationReady + exact Origin）を持ち、
   未充足なら mutation 前に fail-closed する（§Delta 1 §mode 判定）
 
 ### iOS #216 契約が破壊されない論証（Req 3.5）
 
 - iOS が依存する `registration/*` / `authentication/*` はすべて `PasskeyHandler` に紐付き、
   router 登録条件は `PasskeyHandler != nil` のみで **変更しない**
-- 本差分で登録条件を強化するのは Web 用 capability（列 A への `C != ""` 追加）のみ。iOS は
-  capability を使用しない（#216 spec に依存記述なし）
+- 本差分で登録条件を強化するのは Web 用 capability（列 A）のみ。iOS は capability を使用しない
+  （#216 spec に依存記述なし）
 - したがって iOS 用 endpoint の稼働条件は #216 と完全同一（NFR 3.2 / Req 3.5）
 
 ## Delta 4: CSRF / PKCE 説明の正確化と残余リスクの明示（Requirement 4）
@@ -630,6 +653,8 @@ env 3 軸 — **W**=`WEBAUTHN_RP_ID`+`WEBAUTHN_ORIGINS`、**N**=`NATIVE_AUTH_JWT
 
 - `#223 design.md` §Security Considerations §CSRF の「攻撃者が事前に (auth_code, code_verifier) ペアを
   入手する経路が存在しない」記述、および `NativeAuthHandler.Session` §CSRF 対策の同旨の判断根拠
+- 初版 #231 design の「必須ユーザー生体ジェスチャ / 生体承認」を主防御とした記述
+  （WebAuthn の authorization gesture は user presence の場合もあり biometric を保証しない）
 
 ### 旧記述の撤回（Req 4.2）
 
@@ -644,22 +669,32 @@ authorization_code の中間者盗用を防ぐ」プロパティであり、攻�
 ペア** を防ぐものではない。したがって PKCE 単独では「攻撃者アカウントへのログイン誘引（login CSRF）」を
 阻止できない。
 
-### 主防御要素表（endpoint / 経路ごとに分離 / Req 4.1）
+### WebAuthn の防御性質の正確化（Req 4.1 / Blocker #6）
+
+- 登録 `navigator.credentials.create()` は **authenticator の authorization gesture**（user presence、
+  authenticator の構成次第で user verification = PIN / 生体）を要求する。現 adapter は
+  `userVerification=required` を **指定していない**（`ResidentKeyRequirementRequired` のみ指定）ため、
+  gesture は必ずしも生体認証ではない。したがって主防御を「必須生体認証」と記述せず、
+  **「ユーザー在席を要する authorization gesture（被害者の明示操作なしに cross-site から silently に
+  発火できない）」** と記述する（参考: <https://www.w3.org/TR/webauthn-3/#sctn-terminology>）
+
+### 主防御要素表（endpoint / 経路ごとに分離 / Req 4.1 / 4.7）
 
 セッションを発行する 2 経路を分けて防御要素を明記する（**PKCE の役割はログイン交換にのみ限定**）:
 
 | 経路 | 主防御要素 | 各要素の役割 |
 |---|---|---|
-| **登録 直接 session**（`registration/finish` Web mode） | 必須ユーザー生体ジェスチャ + exact Origin + JSON Content-Type + CORS preflight + SameSite=Lax | 登録は `navigator.credentials.create()` の生体承認（user gesture）を **必須**とするため、被害者の明示操作なしに cross-site から silently 発火できない。加えて exact Origin / JSON Content-Type / CORS preflight が cross-origin 発火を封じ、SameSite=Lax が Cookie 送信を制限。**PKCE は本経路の防御に用いない**（code_challenge は #216 契約維持のため形式検証のみ） |
+| **登録 直接 session**（`registration/finish` Web mode） | authenticator authorization gesture（user presence / 場合により UV）+ exact Origin + JSON Content-Type + CORS preflight + SameSite=Lax | 登録は `create()` の authorization gesture（ユーザー在席の明示操作）を要するため、被害者の操作なしに cross-site から silently 発火できない。加えて exact Origin / JSON Content-Type / CORS preflight が cross-origin 発火を封じ、SameSite=Lax が Cookie 送信を制限。**PKCE は本経路の防御に用いない**（code_challenge は #216 契約維持のため形式検証のみ / Req 4.7） |
 | **ログイン auth_code 交換**（`POST /api/auth/session`） | exact Origin + JSON Content-Type + CORS preflight + SameSite=Lax + PKCE 束縛（auth_code 単回 60s TTL） | exact Origin / JSON Content-Type / CORS preflight / SameSite が cross-origin 発火を封じる主防御。PKCE + 単回 60s TTL は「同一クライアント外」による盗聴 auth_code の交換を防ぐ（RFC 7636 の本来目的。login CSRF そのものの防御ではない） |
 | **共通** | HttpOnly Cookie | 発行後の `session_id` を JavaScript から不可視化し、XSS 時の生値読出しを阻止 |
 
 ### login `/api/auth/session` の Origin 検証を fail-closed へ補正（Req 4.1 / review #2）
 
 PR #229 head の `NativeAuthHandler.Session` は「Origin 不在 or allowedOrigin 未設定なら検証を
-スキップ」する（false-reject 回避のため存在時のみ厳格化）。本差分ではこれを **fail-closed** に補正する:
+スキップ」する（`origin != "" && h.allowedOrigin != "" && origin != h.allowedOrigin` のときのみ 403）。
+本差分ではこれを **fail-closed** に補正し、注入する許可 Origin は `WebPasskeyAllowedOrigin` とする:
 
-- `allowedOrigin == ""`（`CORS_ALLOWED_ORIGIN` 未設定）→ 全リクエスト 403（検証不能なら発行しない）
+- `allowedOrigin == ""`（`WebPasskeyAllowedOrigin` 未設定）→ 全リクエスト 403（検証不能なら発行しない）
 - `Origin` 不在 → 403（browser fetch は cross-origin で Origin を必ず送る前提。fail-closed）
 - `Origin != allowedOrigin` → 403（既存）
 - `Origin == allowedOrigin` のみ通過
@@ -677,8 +712,9 @@ PR #229 head の `NativeAuthHandler.Session` は「Origin 不在 or allowedOrigi
    取得し、被害者ブラウザで `POST /api/auth/session` を実行させ攻撃者アカウントとしてログインさせる。
    `/api/auth/session` は同一オリジン fetch のみ（exact Origin + JSON Content-Type + CORS）で、
    純粋な cross-site 経路では成立せず、同一オリジン XSS 経路に収束する
-- **登録直接 session（列 C）の login CSRF 非該当**: 登録は被害者の authenticator による生体承認
-  （user gesture）を必須とするため、cross-site から silently に「被害者を新規登録させる」ことはできない
+- **登録直接 session（列 C）の login CSRF 非該当**: 登録は被害者の authenticator による authorization
+  gesture（ユーザー在席の明示操作）を必須とするため、cross-site から silently に「被害者を新規登録
+  させる」ことはできない
 
 ### 決定記録: 追加の browser-bound state を導入しない（Req 4.4）
 
@@ -704,6 +740,28 @@ fetch ベースの Web app では十分。残余リスクは同一オリジン X
 
 ## Delta 5: 登録完了不明状態と復旧導線（Requirement 5）
 
+### API 層の型付き正規化（`api.ts` / Blocker #4）
+
+現行 `api.ts` の `request<T>` は 2xx（204/205 以外）で末尾 `return response.json();` を呼び、body が
+欠損・途中切断・parse 不能だと **plain `SyntaxError`** を投げる。この plain error は呼出側から
+「fetch 成功後の 2xx body parse 失敗」か「dispatch 前の JSON serialize 失敗」かを区別できない。
+そこで `api.ts` に status 付きの専用型を導入し、**fetch 成功後の 2xx parse 失敗のみ**を分離する:
+
+```typescript
+// web/src/lib/api.ts（Modified）
+export class ResponseParseError extends Error {
+  status: number;         // fetch 成功時の response.status（2xx）
+  constructor(status: number) { super(`Response parse failed: ${status}`); this.name = "ResponseParseError"; this.status = status; }
+}
+// request<T> 末尾:
+//   try { return await response.json(); }
+//   catch { throw new ResponseParseError(response.status); }  // 2xx だが body 不能
+```
+
+- これにより呼出側は「`ResponseParseError`（status 2xx）」= post-dispatch の commit 済み示唆 2xx parse 失敗 と、
+  dispatch 前の `TypeError`（serialize / URL 構築失敗）を **確実に区別**できる
+- `credentials: "include"` / 204/205 分岐など既存挙動は不変（末尾 json parse のみ try/catch で包む差分等価）
+
 ### 状態定義（Req 5.1）
 
 `PasskeyRegistrationErrorKind` に **新規 kind** `registration_uncertain` を追加する。本 kind は
@@ -713,14 +771,14 @@ fetch ベースの Web app では十分。残余リスクは同一オリジン X
 - fetch reject（`TypeError` = ネットワーク断 / 接続断 / DNS 失敗）
 - 送出後の Abort（`DOMException.name === "AbortError"`）/ timeout
 - 5xx 応答（サーバが受理・commit した可能性があるが応答段で失敗）
-- **commit 済みを示唆する 2xx だが応答 body が欠損 / 途中切断 / parse 不能**（Set-Cookie は付いた
-  可能性があり、成否をクライアント側で確定できない）
+- **commit 済みを示唆する 2xx だが body 不能**（`ResponseParseError`。Set-Cookie は付いた可能性があり、
+  成否をクライアント側で確定できない）
 
 以下は **uncertain にしない**:
 
-- **dispatch 前のローカル失敗**（request 構築 / JSON serialize 等）→ `server_error` 等（commit していないことが確定）
-- **確定的な 4xx**（finish の 400 REGISTRATION_FAILED / begin の 400/409 等）→ `server_rejected` /
-  `invalid_username` / `username_taken`（拒否が確定）
+- **dispatch 前のローカル失敗**（request 構築 / JSON serialize 等の `TypeError`）→ `server_error`（commit 不成立が確定）
+- **確定的な 4xx（すべての 4xx）**（finish の 400 REGISTRATION_FAILED / begin の 400/409 / その他 401/403/404/409/422 等）
+  → `server_rejected` / `invalid_username` / `username_taken`（拒否が確定。400 だけに限定しない / Blocker #4）
 - begin / create 段の失敗（`cancelled` / `network_error` 等、finish 送出前）
 
 > 直接 session 化により、registration 経路の `session_exchange_failed`（旧 auth_code→session 段の失敗）は
@@ -736,8 +794,8 @@ stateDiagram-v2
     Pending --> InvalidUsername: begin 400 INVALID_USERNAME
     Pending --> UsernameTaken: begin 409 USERNAME_TAKEN
     Pending --> Cancelled: create DOMException (NotAllowed/Abort)
-    Pending --> ServerRejected: finish 4xx REGISTRATION_FAILED
-    Pending --> Uncertain: finish reject / timeout / AbortError / 5xx / 2xx(body 不能)
+    Pending --> ServerRejected: finish 任意の 4xx（REGISTRATION_FAILED 等）
+    Pending --> Uncertain: finish reject / timeout / AbortError / 5xx / ResponseParseError(2xx)
     Pending --> Success: finish 2xx (Set-Cookie 受理)
     Uncertain --> ConfirmLogin: user が「ログインで確認する」を選ぶ
     ConfirmLogin --> [*]: discoverable ログイン成功 → 2 ペイン UI
@@ -752,24 +810,28 @@ stateDiagram-v2
 // finish request 段の catch（イメージ）:
 try {
   await apiClient.post("/api/passkey/registration/finish", {...});
-  // 2xx だが body parse に失敗した場合も uncertain（apiClient が parse エラーを投げる場合）
 } catch (err) {
+  if (err instanceof ResponseParseError) throw new PasskeyRegistrationError("registration_uncertain", err); // 2xx body 不能
   if (err instanceof DOMException && err.name === "AbortError")
-    throw new PasskeyRegistrationError("registration_uncertain", err);
+    throw new PasskeyRegistrationError("registration_uncertain", err);                                       // 送出後 Abort
   if (err instanceof ApiError) {
-    if (err.status >= 500) throw new PasskeyRegistrationError("registration_uncertain", err);       // 5xx
-    if (err.status === 400 && err.body?.code === "REGISTRATION_FAILED")
-      throw new PasskeyRegistrationError("server_rejected", err);                                    // 確定拒否
-    if (err.kind === "unparseable_2xx") throw new PasskeyRegistrationError("registration_uncertain", err); // 2xx body 不能
+    if (err.status >= 500) throw new PasskeyRegistrationError("registration_uncertain", err);                // 5xx
+    if (err.status >= 400) {                                                                                 // 全 4xx = 拒否確定
+      if (err.status === 400 && err.body?.code === "REGISTRATION_FAILED")
+        throw new PasskeyRegistrationError("server_rejected", err);
+      throw new PasskeyRegistrationError("server_rejected", err);
+    }
     throw new PasskeyRegistrationError("server_error", err);
   }
-  if (err instanceof TypeError) throw new PasskeyRegistrationError("registration_uncertain", err);    // fetch reject
-  throw new PasskeyRegistrationError("server_error", err);
+  if (err instanceof TypeError) throw new PasskeyRegistrationError("registration_uncertain", err);           // fetch reject（送出後）
+  throw new PasskeyRegistrationError("server_error", err);                                                   // dispatch 前ローカル失敗
 }
 ```
 
 **安全側 fail 原則**: finish 送出後に「拒否が確定（4xx）」でない限り、commit 済みの可能性を排除できないため
-uncertain に倒す。送出前の失敗は commit 不成立が確定するため uncertain にしない。
+uncertain に倒す。dispatch 前の失敗（`TypeError` のうち fetch 到達前のもの）は commit 不成立が確定するため
+uncertain にしない。`api.ts` の `ResponseParseError` により「fetch 成功後の 2xx parse 失敗」を確実に
+uncertain 側へ振り分けられる。
 
 ### UI 文言と復旧導線（`passkey-signup-dialog.tsx` / Req 5.2〜5.6）
 
@@ -795,6 +857,8 @@ uncertain に倒す。送出前の失敗は commit 不成立が確定するた�
   3. 一律 `AUTHENTICATION_FAILED`（内部理由を区別しない）で失敗: **その後にはじめて**「再度作成する」導線を
      提示する（Req 5.4）。再作成は `mutation.reset()` で Idle に戻す。登録済みなら再試行時に
      `username_taken` になる旨も併記可
+  - 再作成導線は **discoverable ログインの一律失敗の後のみ**提示する。cancel / network / 5xx / uncertain の
+    初期画面には再作成を出さない（Blocker #4 / Blocker #8 の負ケース）
 
 ### 秘密情報の非漏出（Req 5.5 / NFR 2.1）
 
@@ -822,116 +886,155 @@ uncertain に倒す。送出前の失敗は commit 不成立が確定するた�
 ### 決定記録: 別 prerequisite PR に分離しない（Req 6.4）
 
 人間運用者決定として、`.env.sample` / `docker-compose.yml` の変更を別 prerequisite PR に切り出さない。
-理由: 既存 env の documentation / passthrough 整備のみで独立 Issue にする複雑度がなく、1 PR = 1 Issue を
-維持し、Web 動作と config を同一 PR で reviewer が確認できるのが妥当。
+理由: 既存 env の documentation / passthrough 整備と CORS default 補正のみで独立 Issue にする複雑度がなく、
+1 PR = 1 Issue を維持し、Web 動作と config を同一 PR で reviewer が確認できるのが妥当。
+
+### `CORS_ALLOWED_ORIGIN` の既定変更で fail-closed を到達可能にする（Blocker #3）
+
+現行の到達不能問題:
+
+- `config.go`: `cfg.CORSAllowedOrigin = getEnvString("CORS_ALLOWED_ORIGIN", "http://localhost:3000")`
+  （空/未設定 → localhost:3000 に default）
+- `docker-compose.yml`: `CORS_ALLOWED_ORIGIN=${CORS_ALLOWED_ORIGIN:-http://localhost:3000}`
+
+このため `allowedOrigin == ""` は通常 wiring で到達せず、「未設定なら capability 404」が実装できない。
+
+採用する方式（**明示設定の判別 + CORS 層既定の温存**。理由も併記）:
+
+- `config.go`: **CORS 層用の `CORSAllowedOrigin` は既定 `http://localhost:3000` のまま**（既存 CORS
+  ミドルウェア・Google OAuth の後方互換 / NFR 3.1）。加えて Web パスキー専用の
+  `WebPasskeyAllowedOrigin string` を **新設**し、`os.Getenv("CORS_ALLOWED_ORIGIN")` の生値を用いる
+  （空文字/未設定 → `""`。localhost へ default しない）。パスキー系の Origin fail-closed 判定は
+  すべて `WebPasskeyAllowedOrigin` を参照する
+- `docker-compose.yml`: `api` の `CORS_ALLOWED_ORIGIN=${CORS_ALLOWED_ORIGIN:-http://localhost:3000}` を
+  `${CORS_ALLOWED_ORIGIN:-}` に変更。理由: 未設定の運用者にはコンテナへ **空文字** が渡り、
+  `WebPasskeyAllowedOrigin=""` → capability 404 / registration・login Origin fail-closed（403）に
+  到達可能になる。CORS ミドルウェアは `config.go` の getEnvString 既定で引き続き localhost:3000 に
+  fall back するため、既存 CORS / Google OAuth の default 挙動は不変（NFR 3.1）
+- **新規 env は追加しない**（`WebPasskeyAllowedOrigin` は既存 `CORS_ALLOWED_ORIGIN` env から派生する
+  config field であり env ではない / Req 6.5）
+
+方式選択の根拠: review が挙げた 3 案（empty default / 明示設定フラグ / BASE_URL 検証）のうち、
+「CORS 層既定を壊さず、パスキーだけ明示設定を要求する」= 明示設定フラグ相当を採る。empty default 単独では
+CORS ミドルウェアの既定挙動（localhost:3000）まで空に倒れ Google OAuth の default dev 体験を壊すため
+不採用。BASE_URL 検証は BASE_URL と CORS を暗黙結合させ運用の自由度を下げるため不採用。
 
 ### 既存 env 流用に留める（Req 6.5）
 
 - `WEBAUTHN_RP_ID` / `WEBAUTHN_RP_DISPLAY_NAME` / `WEBAUTHN_ORIGINS` / `WEBAUTHN_IOS_APP_ID` /
   `PASSKEY_CHALLENGE_TTL_SECONDS`（#216 で追加済み）、`NATIVE_AUTH_JWT_SECRET`（#166 系）、
   `CORS_ALLOWED_ORIGIN`（既存 CORS 層）はいずれも `internal/config` が既読み込み済みの **既存 env**
-- **新規 env は追加しない**。本差分は operator 向け documentation（`.env.sample`）と container passthrough
-  （`docker-compose.yml`）の整備のみ（#223 Scope 維持 / Req 6.5）
-
-### `CORS_ALLOWED_ORIGIN` と fail-closed の接続の明示
-
-- `CORS_ALLOWED_ORIGIN` は Delta 3 の列 A（capability）成立条件・Delta 1 の Web mode 判定・Delta 4 の
-  Origin 検証の **共通入力**である。未設定なら Web パスキー UI は非表示（capability 404）、
-  `/api/auth/session` と registration Web mode は fail-closed（403）に倒れる（行 3）。
-  `.env.sample` / `docker-compose.yml` にこの接続をコメントで明記する
+- **新規 env は追加しない**。本差分は既存 `CORS_ALLOWED_ORIGIN` の default 補正と、operator 向け
+  documentation（`.env.sample`）の整備のみ（#223 Scope 維持 / Req 6.5）。WebAuthn env の passthrough /
+  `.env.sample` ブロックは **PR #229 で既に追加済み**であり、本差分は記述整備に留める
 
 ### 反映内容（イメージ）
 
-**`.env.sample`**（Native Auth / CORS 節の後にブロック追加。文言は tasks / 実装 PR で確定）:
+**`.env.sample`**（既存 CORS 節に fail-closed 接続を追記。文言は tasks / 実装 PR で確定）:
 
 ```dotenv
-# Passkey / WebAuthn（Issue #216 iOS API / Issue #229 Web パスキー導線）
-# 空文字（未設定）だと passkey handler が生成されず /api/passkey/* が 404（fail-closed）。
-# WEBAUTHN_RP_ID=              # 例: example.com（scheme/port を含まないドメイン）
-# WEBAUTHN_RP_DISPLAY_NAME=Feedman
-# WEBAUTHN_ORIGINS=            # 例: https://example.com,feedman://（カンマ区切り）
-# WEBAUTHN_IOS_APP_ID=         # 例: TEAMID.com.example.feedman（AASA 用）
-# PASSKEY_CHALLENGE_TTL_SECONDS=300
-# CORS_ALLOWED_ORIGIN は Web パスキーの exact Origin 検証にも使用される。未設定だと
-# GET /api/passkey/capability は 404、POST /api/auth/session と Web registration は 403（fail-closed）。
+# CORS_ALLOWED_ORIGIN は Web パスキーの exact Origin 検証にも使用される。
+# 未設定（空）だと GET /api/passkey/capability は 404、POST /api/auth/session と
+# Web 新規登録（registration/finish の Web mode）は 403（fail-closed）になり、Web は
+# パスキー導線を出さず Google 単体構成に縮退する。Web パスキーを使うには明示設定すること。
+CORS_ALLOWED_ORIGIN=http://localhost:3000
 ```
 
-**`docker-compose.yml`**（`api` サービスの `environment` に追加。`worker` は passkey 非依存のため対象外）:
+**`docker-compose.yml`**（`api` サービスの既定を空へ変更）:
 
 ```yaml
 services:
   api:
     environment:
-      - WEBAUTHN_RP_ID=${WEBAUTHN_RP_ID:-}
-      - WEBAUTHN_RP_DISPLAY_NAME=${WEBAUTHN_RP_DISPLAY_NAME:-Feedman}
-      - WEBAUTHN_ORIGINS=${WEBAUTHN_ORIGINS:-}
-      - WEBAUTHN_IOS_APP_ID=${WEBAUTHN_IOS_APP_ID:-}
-      - PASSKEY_CHALLENGE_TTL_SECONDS=${PASSKEY_CHALLENGE_TTL_SECONDS:-300}
+      # 未設定なら空 → Web パスキーは fail-closed（capability 404 / Origin 検証 403）。
+      # CORS ミドルウェアは config.go の既定（localhost:3000）に fall back する。
+      - CORS_ALLOWED_ORIGIN=${CORS_ALLOWED_ORIGIN:-}
 ```
 
-すべて `${VAR:-<既定 or 空>}` 形式で **未設定なら空文字 fail-closed**（NFR 3.1）。`CORS_ALLOWED_ORIGIN` は
-既存 passthrough 済みのため追加しない（コメントで用途を明記するのみ）。
+WebAuthn passthrough（`WEBAUTHN_*` / `PASSKEY_CHALLENGE_TTL_SECONDS`）は PR #229 で既に
+`${VAR:-<既定 or 空>}` 形式で追加済みのため、本差分では追加しない（記述の整合確認のみ）。
 
 ## Error Handling
 
 既存方針を踏襲し、新規は以下:
 
 - **サーバ**: `FinishRegistrationNew` の tx 内失敗（user race / credential 重複 → `ErrRegistrationFailed`、
-  session ID 生成 / session INSERT / commit の infra 失敗 → `fmt.Errorf(...: %w, err)` wrap）は全 ROLLBACK 後に
-  handler へ返し、`ErrRegistrationFailed` は 400 REGISTRATION_FAILED、それ以外は 500 INTERNAL_ERROR にマップ。
-  応答・ログに内部詳細 / session ID 生値を反射しない（NFR 2.1）
-- **Web**: `PasskeyRegistrationErrorKind` に `registration_uncertain` を追加し、Dialog の段階提示に対応
+  session factory の ID 生成 / session INSERT / commit の infra 失敗 → `fmt.Errorf(...: %w, err)` wrap）は
+  既存 defer Rollback 後に handler へ返し、`ErrRegistrationFailed` は 400 REGISTRATION_FAILED、それ以外は
+  500 INTERNAL_ERROR にマップ。応答・ログに内部詳細 / session ID 生値を反射しない（NFR 2.1）
+- **Web（API 層）**: `api.ts` は 2xx の body parse 失敗を `ResponseParseError`（status 付き）に正規化し、
+  dispatch 前失敗（plain `TypeError`）と区別可能にする（Delta 5）
+- **Web（hook）**: `PasskeyRegistrationErrorKind` に `registration_uncertain` を追加し、Dialog の段階提示に対応
 
 ## Security Considerations
 
-Delta 4 §主防御要素表・§残余リスク・§決定記録 を参照。追加事項として、直接 session 発行は既存 Google OAuth
-Callback / `SessionExchangeService` と **同一の session ID 生成器・同一 Cookie 属性**（canonical builder 共有）を
-用いるため、session の秘匿性・属性は既存経路と一貫する。
+Delta 4 §主防御要素表・§WebAuthn の防御性質の正確化・§残余リスク・§決定記録 を参照。追加事項として、
+直接 session 発行は既存 Google OAuth Callback / `SessionExchangeService` と **同一の session factory
+（ID 生成器・now・TTL）・同一 Cookie 属性**（canonical builder 共有）を用いるため、session の秘匿性・
+属性は既存経路と一貫する。
 
 ## Testing Strategy
 
 ### Server（Go / `go test`）
 
+- **Unit（`session_factory_test.go`）**:
+  1. `NewSession` が ID（非空 / 32 バイト hex）・`CreatedAt`・`ExpiresAt=CreatedAt+TTL` を返し、
+     `CreatedAt` と `ExpiresAt` が **同一 now** に基づく（factory の now を固定して検証）
+  2. ID 生成失敗（rand 失敗を注入）で error を返し部分構築しない
 - **Unit（`registration_service_test.go`）**:
-  1. 正常系（Web mode）: user / credential / session が同一 tx で作成され、`webSession` に生成 ID・
-     `now+sessionTTL` の期限が入る（tx runner を fake し `WithinTx` 内の呼び出し順を検証）
+  1. 正常系（Web mode）: 既存 txBeginner の `BeginTx` 内で user → credential → session の順に呼ばれ、
+     `webSession` に factory 生成の ID / `CreatedAt` / `ExpiresAt` が入る（fake tx で呼び出し順を検証）
   2. 正常系（iOS mode）: `issueWebSession=false` で session を作らず `webSession=nil`・`{user_id}` 相当
   3. 異常系: user UNIQUE 衝突 → `ErrRegistrationFailed`（session 未作成）
   4. 異常系: credential 重複 → `ErrRegistrationFailed`（session 未作成）
-  5. 異常系: session ID 生成失敗 / session INSERT 失敗 → 全 ROLLBACK・`webSession=nil`・エラー伝播
+  5. 異常系: session INSERT 失敗 / session factory の ID 生成失敗 → defer Rollback・`webSession=nil`・エラー伝播
 - **Integration（実 PostgreSQL / `passkey_e2e_db_test.go`）**:
   1. Web mode finish 成功で users / passkey_credentials / sessions に **3 行がすべて存在**
-  2. session INSERT を失敗させた場合（例: 重複 session ID を注入）に users / passkey_credentials にも
-     **行が残らない（3 行 atomic rollback / orphan なし）**
+  2. session INSERT を失敗させた場合（重複 session ID 注入等）に users / passkey_credentials にも
+     **行が残らない（3 行 atomic rollback / orphan なし）かつ handler が Set-Cookie を出さない**
   3. iOS mode finish 成功で users / passkey_credentials の 2 行のみ存在（sessions なし）
+  4. Web session の `CreatedAt` / `ExpiresAt` が Cookie の Max-Age（= SessionMaxAge）と整合する（Blocker #8）
 - **Unit（`passkey_handler_test.go`）**:
   1. Origin 一致 → 200 `{user_id}` + `Set-Cookie session_id`（属性は Google OAuth Callback と一致）
   2. Origin 不在（iOS）→ 200 `{user_id}`・`Set-Cookie` **なし**（#216 回帰）
   3. Origin 非空不一致 / allowedOrigin 未設定 → 403、mutation 呼ばれず（regService stub 未呼出）
   4. Web mode で Content-Type 非 JSON → 415、mutation 呼ばれず
-- **Unit（`native_auth_handler_test.go`）**: `/api/auth/session` の Origin 不在・不一致・allowedOrigin
+  5. `webRegistrationReady()` false（session writer / factory 未配線）→ 500、mutation 呼ばれず（Blocker #8）
+- **Unit（`native_auth_handler_test.go`）**: `/api/auth/session` の Origin 不在・不一致・許可 Origin
   未設定で 403（Delta 4 fail-closed 補正の回帰）
+- **Unit（`config_test.go`）**: `CORS_ALLOWED_ORIGIN` set → `WebPasskeyAllowedOrigin=値` /
+  unset・empty → `WebPasskeyAllowedOrigin=""`、`CORSAllowedOrigin` は既定 localhost:3000 を維持（Blocker #8）
 - **Integration（`router_test.go`）**: fail-closed 表 行 1〜5 の各 endpoint（列 A〜E）登録有無。特に
-  行 2（W✓ N✗ C✓）で iOS registration/*・authentication/* が 200、capability が 404
+  行 2（W✓ N✗ C✓）で iOS registration/*・authentication/* が 200・capability が 404、
+  行 3（W✓ N✓ C✗）で capability 404、partial wiring（webRegistrationReady 未充足）で capability が
+  未登録になること（Blocker #8）
 - **Unit（`session_cookie_test.go`）**: `buildSessionCookie` の属性が Google OAuth Callback と一致
 
 ### Web（Vitest + Testing Library）
 
-- **Unit（`use-passkey-registration.test.ts`）**:
+- **Unit（`api.test.ts`）**:
+  1. 2xx で body 欠損 / 途中切断 / parse 不能 → `ResponseParseError`（status 2xx）を投げる
+  2. dispatch 前の JSON serialize 失敗（循環参照等）→ plain `TypeError`（`ResponseParseError` ではない）
+     で、両者が区別できる（Blocker #4 / #8）
+- **Unit（`use-passkey-registration.test.tsx`）**:
   1. 正常系: begin → create → finish の 3 呼び出しのみ。`authentication/*` / 登録用 `/api/auth/session` が
      呼ばれない（二度目 ceremony 除去の回帰）
-  2. `registration_uncertain` × fetch reject（`TypeError`）
+  2. `registration_uncertain` × fetch reject（送出後 `TypeError`）
   3. `registration_uncertain` × 5xx
   4. `registration_uncertain` × AbortError
-  5. `registration_uncertain` × 2xx body parse 不能
-  6. `server_rejected` × 400 REGISTRATION_FAILED（uncertain に誤分類されない回帰）
-  7. begin 段の `invalid_username` / `username_taken` / `cancelled` は既存挙動維持
+  5. `registration_uncertain` × `ResponseParseError`（2xx body 不能）
+  6. **全 4xx（400 REGISTRATION_FAILED / 401 / 403 / 404 / 409 / 422）が `server_rejected`（拒否確定）に
+     分類され uncertain に誤分類されない**（400 だけに限定しない / Blocker #4 / #8）
+  7. dispatch 前ローカル失敗（`TypeError`）が `server_error`（非-uncertain）に分類される
+  8. begin 段の `invalid_username` / `username_taken` / `cancelled` は既存挙動維持
 - **Component（`passkey-signup-dialog.test.tsx`）**:
   1. `registration_uncertain` で見出し「登録が完了したかどうかを確認できませんでした」が表示され、
      初期に「再度作成する」が **表示されない**（同列並置しない / Req 5.2）
   2. 「ログインで確認する」押下で discoverable ログイン（`usePasskeyAuthentication`）が起動
   3. discoverable ログインが一律失敗した後に「再度作成する」が表示され、押下で `mutation.reset()`
-  4. 文言中にサーバ内部詳細 / 他 kind の代表文言が含まれない（Req 5.5 / 5.6 回帰）
+  4. login の cancel / network / 5xx では初期画面に「再度作成する」が出ない（一律 AUTHENTICATION_FAILED
+     の後のみ / Blocker #8）
+  5. 文言中にサーバ内部詳細 / 他 kind の代表文言が含まれない（Req 5.5 / 5.6 回帰）
 - **Recovery（`login-page-recovery.test.tsx`）**: `registration_uncertain` → 「ログインで確認する」→
   discoverable ログイン成功 → 2 ペイン UI 到達（Req 5.3。unit で組めない場合は E2E 側へ委譲する旨を明記）
 
@@ -942,19 +1045,24 @@ Callback / `SessionExchangeService` と **同一の session ID 生成器・同�
 
 ## Configuration
 
-Delta 6 を参照。**追加 env は無い**。既存 env の documentation（`.env.sample`）と container passthrough
-（`docker-compose.yml`）のみ整備する。
+Delta 6 を参照。**追加 env は無い**。既存 `CORS_ALLOWED_ORIGIN` の default を補正して Web パスキーの
+fail-closed を到達可能にし（`config.go` の `WebPasskeyAllowedOrigin` 派生 + compose 既定を空へ）、
+`.env.sample` に fail-closed 接続を documentation する。
 
 ## Supporting References
 
+- WebAuthn Level 3 §Terminology（authorization gesture / user presence / user verification の定義）:
+  <https://www.w3.org/TR/webauthn-3/#sctn-terminology>
 - WebAuthn Level 2 §7.1 Registration Ceremony: <https://www.w3.org/TR/webauthn-2/#sctn-registering-a-new-credential>
 - RFC 7636 (PKCE for OAuth Public Clients): <https://datatracker.ietf.org/doc/html/rfc7636>
 - RFC 9700 (OAuth 2.0 Security Best Current Practice) §4.7 CSRF: <https://datatracker.ietf.org/doc/html/rfc9700>
 - MDN Fetch: Origin header は cross-origin および unsafe method の same-origin で付与される:
   <https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Origin>
-- 既存 tx 基盤: `internal/repository/tx.go`（`SQLTx` / `BeginTx` / `Querier` / `Commit` / `Rollback`）
-- 既存 DBTX 変種の前例: `PostgresUserRepo.DeleteByIDExec` / `PostgresSessionRepo.DeleteByUserIDExec`
-- 既存 Web session 交換（login）: `internal/handler/native_auth_handler.go`（`Session` / `SessionReady`）,
-  `internal/auth/session_exchange.go`（`SessionExchangeService` / session ID 生成器）
+- 先行実装 #230 の tx 基盤: `internal/passkey/registration_service.go`（`RegistrationTx` /
+  `RegistrationTxBeginner` / `FinishRegistrationNew` の BeginTx→defer Rollback→Commit）,
+  `internal/app/withdraw_wiring.go`（`passkeyRegistrationTxBeginnerAdapter`）
+- 既存 session 発行: `internal/auth/service.go`（`createSession` / `generateSessionID`）,
+  `internal/auth/session_exchange.go`（`SessionExchangeService`）
+- 既存 DBTX 変種の前例: `PostgresSessionRepo.DeleteByUserIDExec` / `PostgresUserRepo.CreateUserOnlyExec`(#230)
 - 既存 #216 サーバ設計 / 既存 #223 Web 設計（本 spec が supersede する対象）:
   `docs/specs/216--app-store-4-8/design.md` / `docs/specs/223-feat-web-web/design.md`
