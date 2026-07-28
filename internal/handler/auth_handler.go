@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/hitoshi/feedman/internal/auth"
 	"github.com/hitoshi/feedman/internal/model"
@@ -233,6 +234,17 @@ func (h *AuthHandler) handleNativeCallback(w http.ResponseWriter, r *http.Reques
 
 // Logout はセッションを破棄する。
 // POST /auth/logout
+//
+// レスポンス方式は Accept ヘッダで content negotiation する（Issue #235）:
+//   - Accept: application/json（fetch / XHR クライアント: Web 版 useLogout など）
+//     → 204 No Content。Location ヘッダは付与しない。
+//     fetch の既定 redirect: "follow" で 303 の Location を辿ると遷移先 HTML を
+//     取得し JSON パーサが SyntaxError となる（クライアントで失敗扱いになる）ため、
+//     JSON クライアントには redirect を返さず 204 で完了を伝える。
+//   - それ以外（HTML form POST 経由の従来クライアント等）
+//     → 303 See Other + Location: BaseURL（既存挙動と同一。Req 6.2 の後方互換）。
+//
+// セッション破棄と Cookie クリア（属性含む）は content negotiation の分岐に依らず同一。
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	// セッションCookieの取得
 	cookie, err := r.Cookie(sessionCookieName)
@@ -256,9 +268,38 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 
+	// JSON クライアントは 204 No Content で完了を伝える（リダイレクトしない）。
+	if acceptsJSON(r.Header.Get("Accept")) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	// POST ログアウト後はリダイレクトを GET 化するため 303 See Other を用いる
 	// （307 だと method を保持し BaseURL へ再 POST してしまう）。
 	http.Redirect(w, r, h.config.BaseURL, http.StatusSeeOther)
+}
+
+// acceptsJSON は Accept ヘッダに application/json 型が明示的に含まれるかを判定する。
+//
+// カンマ区切りの各 media-type から q-value 等のパラメータを取り除き、名前部分を
+// 大小無視で比較する。ワイルドカード（*/*）や複合型（application/*）は「明示的な
+// application/json 要求」ではないとして false を返す。ブラウザの form POST が送る
+// "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" のような
+// Accept 値では false になる（Req 6.2 の form POST 互換）。
+func acceptsJSON(accept string) bool {
+	if accept == "" {
+		return false
+	}
+	for _, part := range strings.Split(accept, ",") {
+		mediaType := strings.TrimSpace(part)
+		if idx := strings.Index(mediaType, ";"); idx >= 0 {
+			mediaType = strings.TrimSpace(mediaType[:idx])
+		}
+		if strings.EqualFold(mediaType, "application/json") {
+			return true
+		}
+	}
+	return false
 }
 
 // Me は現在のログインユーザー情報を返す。
