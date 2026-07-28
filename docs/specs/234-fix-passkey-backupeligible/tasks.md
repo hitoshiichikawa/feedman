@@ -50,7 +50,7 @@
   - _Boundary: PasskeyCredentialRepository, PasskeyCredentialModel_
   - _Depends: 1_
 
-- [ ] 3. WebAuthn adapter に BE/BS の双方向 propagate を実装
+- [x] 3. WebAuthn adapter に BE/BS の双方向 propagate を実装
   - `internal/passkey/webauthn_adapter.go` を修正
     - `ParsedCredential` に `BackupEligible bool` / `BackupState bool` を追加
     - `toParsedCredential` で `cred.Flags.BackupEligible` / `cred.Flags.BackupState` を propagate
