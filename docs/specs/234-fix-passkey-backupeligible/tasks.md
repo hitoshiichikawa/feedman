@@ -21,7 +21,7 @@
     `backup_state` を追加（migration 適用後に列数チェックが green を維持する regression）
   - _Requirements: NFR 1.1, NFR 1.2, NFR 1.3_
 
-- [ ] 2. Repository と domain model に BE/BS を通す
+- [x] 2. Repository と domain model に BE/BS を通す
   - `internal/model/passkey.go` の `PasskeyCredential` に `BackupEligible bool` /
     `BackupState bool` を追加（doc comment に「Req 4.3: BE は認証成功時に上書き更新しない」旨を明記）
   - `internal/repository/interfaces.go` の `PasskeyCredentialRepository` から
