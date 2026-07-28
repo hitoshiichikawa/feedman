@@ -7,7 +7,7 @@
 `_Depends:_` を明示する。behavior-changing task には対応する regression / 単体テスト追加を
 同タスク内に含める（`_Requirements:_` に列挙した AC のテストを task 内で完結させる）。
 
-- [ ] 1. `passkey_credentials` に BE/BS 列を追加する migration と schema regression テスト更新
+- [x] 1. `passkey_credentials` に BE/BS 列を追加する migration と schema regression テスト更新
   - `internal/database/migrations/20260728120000_add_passkey_credential_backup_flags.up.sql` を新規作成
     - `ALTER TABLE passkey_credentials ADD COLUMN backup_eligible BOOLEAN NOT NULL DEFAULT false,
       ADD COLUMN backup_state BOOLEAN NOT NULL DEFAULT false`
