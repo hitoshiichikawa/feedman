@@ -68,7 +68,9 @@ services:
       # callback 後のリダイレクト先・Cookie の Secure 自動判定（https で true）に利用される。
       # 例: 本番 https://<host> / ローカル http://localhost:3000
       - BASE_URL=${BASE_URL:-http://localhost:3000}
-      - CORS_ALLOWED_ORIGIN=${CORS_ALLOWED_ORIGIN:-http://localhost:3000}
+      # 未設定時は空を渡し、Web パスキーを capability 404 / Origin 403 へ fail-closed する。
+      # CORS ミドルウェア自体は config.go の localhost:3000 既定へ fall back する。
+      - CORS_ALLOWED_ORIGIN=${CORS_ALLOWED_ORIGIN:-}
       - COOKIE_DOMAIN=${COOKIE_DOMAIN:-}
       # Native Auth（iOS token 認証 / #163）。未設定なら token / refresh / revoke と
       # Bearer 認証は無効化される（fail-closed。.env.sample の NATIVE_AUTH_JWT_SECRET 参照）。

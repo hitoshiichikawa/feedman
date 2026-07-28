@@ -30,6 +30,7 @@ export interface PasskeyButtonsProps {
  * `passkey-signup-dialog.tsx` の ERROR_MESSAGES と同 idiom）。
  */
 const ERROR_MESSAGES: Partial<Record<PasskeyAuthErrorKind, string>> = {
+  authentication_failed: "認証に失敗しました。時間をおいて再度お試しください",
   session_exchange_failed: "認証に失敗しました。時間をおいて再度お試しください",
   server_rejected: "認証に失敗しました。時間をおいて再度お試しください",
   server_error: "認証に失敗しました。時間をおいて再度お試しください",

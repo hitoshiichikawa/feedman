@@ -175,4 +175,29 @@ describe("PasskeyButtons", () => {
       expect(reset).toHaveBeenCalled();
     });
   });
+
+  it("authentication_failed は通常ログインの generic 文言へ明示 map し raw code を表示しない", () => {
+    mockCapability({ isLoading: false, available: true });
+    mockAuthentication(
+      buildMutation({
+        isError: true,
+        error: new PasskeyAuthError(
+          "authentication_failed",
+          "AUTHENTICATION_FAILED: credential not found",
+        ),
+      }),
+    );
+
+    render(<PasskeyButtons onSignupClick={vi.fn()} />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "認証に失敗しました。時間をおいて再度お試しください",
+    );
+    expect(screen.getByRole("alert")).not.toHaveTextContent(
+      "AUTHENTICATION_FAILED",
+    );
+    expect(screen.getByRole("alert")).not.toHaveTextContent(
+      "credential not found",
+    );
+  });
 });

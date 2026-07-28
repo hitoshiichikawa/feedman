@@ -237,7 +237,7 @@ describe("usePasskeyAuthentication", () => {
     );
   });
 
-  it("server_rejected: authentication/finish が 400 AUTHENTICATION_FAILED を返したとき server_rejected に分類され、session 交換に進まないこと（Req 4.6）", async () => {
+  it("authentication/finish の 400 AUTHENTICATION_FAILED 完全一致だけを authentication_failed に分類する", async () => {
     // Arrange
     const cred = makeAssertionCredential();
     const credentialsGet = vi.fn().mockResolvedValue(cred);
@@ -249,7 +249,10 @@ describe("usePasskeyAuthentication", () => {
           return { challenge_id: "chal-1", options: { publicKey: {} } };
         }
         if (url === "/api/passkey/authentication/finish") {
-          throw new ApiError(400, { code: "AUTHENTICATION_FAILED" });
+          throw new ApiError(400, {
+            code: "AUTHENTICATION_FAILED",
+            internal_reason: "credential not found",
+          });
         }
         throw new Error(`unexpected URL: ${url}`);
       }) as typeof apiClient.post,
@@ -269,15 +272,80 @@ describe("usePasskeyAuthentication", () => {
     await waitFor(() => {
       expect(result.current.isError).toBe(true);
     });
-    expect(result.current.error?.kind).toBe("server_rejected");
-    // NFR 1.2: サーバ拒否理由の内部詳細（"AUTHENTICATION_FAILED"）が message に反射されない
+    expect(result.current.error?.kind).toBe("authentication_failed");
+    // raw code / 内部理由を Error message に反射しない
     expect(result.current.error?.message).not.toContain("AUTHENTICATION_FAILED");
+    expect(result.current.error?.message).not.toContain("credential not found");
     // session 交換に進まない
     expect(apiClient.post).not.toHaveBeenCalledWith(
       "/api/auth/session",
       expect.anything(),
     );
   });
+
+  it.each([
+    [
+      "begin の同一 status/code",
+      "begin",
+      new ApiError(400, { code: "AUTHENTICATION_FAILED" }),
+      "server_rejected",
+    ],
+    [
+      "finish の異なる status",
+      "finish",
+      new ApiError(401, { code: "AUTHENTICATION_FAILED" }),
+      "server_error",
+    ],
+    [
+      "finish の異なる code",
+      "finish",
+      new ApiError(400, { code: "OTHER_CODE" }),
+      "server_rejected",
+    ],
+    [
+      "finish の同一 code を持つ 5xx",
+      "finish",
+      new ApiError(500, { code: "AUTHENTICATION_FAILED" }),
+      "server_error",
+    ],
+    [
+      "begin の fetch reject",
+      "begin",
+      new TypeError("Failed to fetch"),
+      "network_error",
+    ],
+  ] as const)(
+    "%s は authentication_failed に分類しない",
+    async (_label, failureStep, failure, expectedKind) => {
+      vi.stubGlobal("navigator", {
+        credentials: { get: vi.fn().mockResolvedValue(makeAssertionCredential()) },
+      });
+      vi.mocked(apiClient.post).mockImplementation(
+        (async (url: string) => {
+          if (url === "/api/passkey/authentication/begin") {
+            if (failureStep === "begin") {
+              throw failure;
+            }
+            return { challenge_id: "chal-1", options: { publicKey: {} } };
+          }
+          if (url === "/api/passkey/authentication/finish") {
+            throw failure;
+          }
+          throw new Error(`unexpected URL: ${url}`);
+        }) as typeof apiClient.post,
+      );
+      const { Wrapper } = createWrapper();
+      const { result } = renderHook(() => usePasskeyAuthentication(), {
+        wrapper: Wrapper,
+      });
+
+      act(() => result.current.mutate());
+
+      await waitFor(() => expect(result.current.isError).toBe(true));
+      expect(result.current.error?.kind).toBe(expectedKind);
+      expect(result.current.error?.kind).not.toBe("authentication_failed");
+    },
+  );
 
   it("session_exchange_failed: /api/auth/session が 400 INVALID_GRANT を返したとき step 5 の失敗として session_exchange_failed に分類されること（Req 4.7）", async () => {
     // Arrange

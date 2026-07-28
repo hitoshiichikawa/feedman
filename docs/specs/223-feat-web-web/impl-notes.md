@@ -1,8 +1,9 @@
 # 実装ノート（#223）
 
-Web にパスキー導線（新規作成 / ログイン）を追加し、いずれの導線でも auth_code → Cookie
-session の合流経路を通じて既存の 2 ペイン UI 認証状態に到達させる spec の実装ノートを
-task 単位で記録する。前方伝播（先行 task の learning を後続 task で温存）を規律とする。
+Web にパスキー導線（新規作成 / ログイン）を追加する spec の実装ノートを task 単位で
+記録する。ログインは auth_code 交換、新規登録は #231 Delta 1 の直接 Cookie session
+方式で既存の 2 ペイン UI 認証状態に到達する。前方伝播（先行 task の learning を後続
+task で温存）を規律とする。
 
 ## Implementation Notes
 
@@ -839,5 +840,31 @@ Task 8 で担保した AC は以下（`web/src/hooks/use-passkey-registration.te
     challenge 再利用が許容されるという解釈に依拠している（design.md §Flows
     「新規作成フロー」の 8 段 chain と整合）。人間 Reviewer による設計意図の
     整合性確認を推奨する。
+
+## #231 normative delta 適用後の実装状態
+
+以下は `docs/specs/231-design-web-auth/design.md` の Delta 1〜6 を PR #229 に適用した
+最終状態であり、上記の旧 task 記録と競合する箇所を supersede する。
+
+- **Delta 1 — 直接 Cookie session**: #223 design の「新規作成フロー（Sequence）」を
+  supersede し、`registration/finish` 内の #230 user + credential tx を session まで拡張した。
+  Web は 3 行を同一 tx で commit 後に Set-Cookie、iOS は従来どおり 2 行・Cookie なし。
+- **Delta 2 — File Plan 補正**: #231 File Structure Plan の exact path を実差分へ反映し、
+  session factory / Cookie builder / Origin config / API error 型と各回帰テストを追加した。
+  例外として [U] 記録だった `internal/handler/router_unauth_ratelimit_test.go` は、Origin
+  fail-closed と capability readiness 強化後も既存 rate-limit テストを同じ成功経路へ到達
+  させる fixture 追従が不可避だったため編集した（production 挙動・閾値の変更なし）。
+- **Delta 3 — fail-closed/readiness**: capability は login session、明示 exact Origin、
+  direct-registration readiness の全成立時だけ 200。iOS registration/authentication の
+  router gate は `PasskeyHandler != nil` のまま維持した。
+- **Delta 4 — CSRF/PKCE**: Web registration と `/api/auth/session` は Origin を
+  fail-closed にし、Cookie builder を共通化した。PKCE は login auth_code 交換だけに使い、
+  直接登録は authorization gesture + exact Origin + JSON/CORS/SameSite で防御する。
+- **Delta 5 — 完了不明状態**: request preparation、fetch reject、2xx parse failure を型で
+  区別し、finish の送達・commit が不明な場合は `registration_uncertain` とする。
+  UI は discoverable login を先に提示し、finish 400 `AUTHENTICATION_FAILED` 後だけ再作成を出す。
+- **Delta 6 — 運用 config**: `CORS_ALLOWED_ORIGIN` から strict exact Origin を派生し、
+  malformed/未設定は Web パスキーを fail-closed にする。Compose の未設定既定は空へ変更し、
+  CORS ミドルウェア自身の localhost 既定は維持した。
 
 STATUS: complete

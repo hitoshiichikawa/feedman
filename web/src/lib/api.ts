@@ -29,6 +29,40 @@ export class ApiError extends Error {
 }
 
 /**
+ * fetch を呼び出す前の request preparation 失敗。
+ *
+ * JSON.stringify や URL 組み立ての失敗を fetch reject の TypeError と区別するための型。
+ * このエラーではリクエストが送信されていないことが保証される。
+ */
+export class RequestPreparationError extends Error {
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super("API request preparation failed");
+    this.name = "RequestPreparationError";
+    this.cause = cause;
+  }
+}
+
+/**
+ * 成功レスポンスの JSON body を解析できなかった場合の型。
+ *
+ * status を保持し、呼び出し側が「2xx は受信したが処理結果を確認できない」状態を
+ * 非 OK 応答の ApiError と区別できるようにする。
+ */
+export class ResponseParseError extends Error {
+  readonly status: number;
+  readonly cause: unknown;
+
+  constructor(status: number, cause: unknown) {
+    super(`API response parse failed: ${status}`);
+    this.name = "ResponseParseError";
+    this.status = status;
+    this.cause = cause;
+  }
+}
+
+/**
  * APIリクエストを実行する共通関数
  */
 async function request<T>(
@@ -36,21 +70,30 @@ async function request<T>(
   url: string,
   body?: unknown
 ): Promise<T> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
+  let fullUrl: string;
+  let options: RequestInit;
+  try {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
 
-  const options: RequestInit = {
-    method,
-    headers,
-    credentials: "include",
-  };
+    options = {
+      method,
+      headers,
+      credentials: "include",
+    };
 
-  if (body !== undefined) {
-    options.body = JSON.stringify(body);
+    if (body !== undefined) {
+      options.body = JSON.stringify(body);
+    }
+
+    fullUrl = `${API_BASE_URL}${url}`;
+  } catch (error) {
+    throw new RequestPreparationError(error);
   }
 
-  const fullUrl = `${API_BASE_URL}${url}`;
+  // fetch reject は request が wire に送達したか判別できないため、上の preparation
+  // catch には含めず、plain TypeError / DOMException のまま呼び出し側へ透過する。
   const response = await fetch(fullUrl, options);
 
   if (!response.ok) {
@@ -72,7 +115,11 @@ async function request<T>(
     return undefined as T;
   }
 
-  return response.json();
+  try {
+    return await response.json();
+  } catch (error) {
+    throw new ResponseParseError(response.status, error);
+  }
 }
 
 /**

@@ -751,9 +751,12 @@ func (m *mockSessionExchangeService) ExchangeAuthCodeForSession(ctx context.Cont
 }
 
 // newSessionRequest は Session handler 単体テスト用の JSON POST リクエストを生成する。
+const sessionTestAllowedOrigin = "https://feedman.example"
+
 func newSessionRequest(body string) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", sessionTestAllowedOrigin)
 	return req
 }
 
@@ -764,6 +767,7 @@ func newSessionHandlerWith(exchange SessionExchanger, cookieDomain string, cooki
 	return NewNativeAuthHandler(
 		&mockTokenExchangeService{},
 		WithSessionExchange(exchange, cookieDomain, cookieSecure, sessionMaxAge),
+		WithSessionAllowedOrigin(sessionTestAllowedOrigin),
 	)
 }
 
@@ -1084,10 +1088,11 @@ func TestNativeAuthHandler_Session_RejectsNonJSONContentType(t *testing.T) {
 func TestNativeAuthHandler_Session_ContentTypeWithCharsetAccepted(t *testing.T) {
 	// Arrange
 	svc := newSessionSuccessSvc()
-	h := newSessionHandlerWithOrigin(svc, "")
+	h := newSessionHandlerWithOrigin(svc, sessionTestAllowedOrigin)
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/session",
 		strings.NewReader(`{"auth_code":"a","code_verifier":"v"}`))
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Origin", sessionTestAllowedOrigin)
 	w := httptest.NewRecorder()
 
 	// Act
@@ -1141,18 +1146,37 @@ func TestNativeAuthHandler_Session_RejectsDisallowedOrigin(t *testing.T) {
 	}
 }
 
-// TestNativeAuthHandler_Session_AllowsMatchingOrAbsentOrigin は許可オリジン一致・Origin 不在・
-// allowedOrigin 未配線の各ケースで 204 成功することを検証する（false-reject を避ける設計 /
-// Issue #223 review #2）。
-func TestNativeAuthHandler_Session_AllowsMatchingOrAbsentOrigin(t *testing.T) {
+// TestNativeAuthHandler_Session_OriginFailClosed は exact match だけを許可し、Origin 不在・
+// allowedOrigin 未設定を mutation 前に 403 へ倒すことを検証する（Issue #231 Delta 4）。
+func TestNativeAuthHandler_Session_OriginFailClosed(t *testing.T) {
 	cases := []struct {
 		name          string
 		allowedOrigin string
 		reqOrigin     string
+		wantStatus    int
+		wantCalls     int
 	}{
-		{name: "Origin が許可オリジンと一致", allowedOrigin: "https://feedman.example", reqOrigin: "https://feedman.example"},
-		{name: "Origin 不在（same-origin proxy 等でヘッダが落ちる）", allowedOrigin: "https://feedman.example", reqOrigin: ""},
-		{name: "allowedOrigin 未配線なら Origin 検証をスキップ", allowedOrigin: "", reqOrigin: "https://anything.example"},
+		{
+			name:          "Origin が許可オリジンと一致",
+			allowedOrigin: sessionTestAllowedOrigin,
+			reqOrigin:     sessionTestAllowedOrigin,
+			wantStatus:    http.StatusNoContent,
+			wantCalls:     1,
+		},
+		{
+			name:          "Origin 不在は fail-closed",
+			allowedOrigin: sessionTestAllowedOrigin,
+			reqOrigin:     "",
+			wantStatus:    http.StatusForbidden,
+			wantCalls:     0,
+		},
+		{
+			name:          "allowedOrigin 未設定は fail-closed",
+			allowedOrigin: "",
+			reqOrigin:     sessionTestAllowedOrigin,
+			wantStatus:    http.StatusForbidden,
+			wantCalls:     0,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1170,13 +1194,13 @@ func TestNativeAuthHandler_Session_AllowsMatchingOrAbsentOrigin(t *testing.T) {
 			// Act
 			h.Session(w, req)
 
-			// Assert: 204 成功 + Set-Cookie
+			// Assert
 			resp := w.Result()
-			if resp.StatusCode != http.StatusNoContent {
-				t.Fatalf("status = %d, want 204", resp.StatusCode)
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.wantStatus)
 			}
-			if svc.callCount != 1 {
-				t.Errorf("service called %d times, want 1", svc.callCount)
+			if svc.callCount != tc.wantCalls {
+				t.Errorf("service called %d times, want %d", svc.callCount, tc.wantCalls)
 			}
 			var found bool
 			for _, c := range resp.Cookies() {
@@ -1184,8 +1208,9 @@ func TestNativeAuthHandler_Session_AllowsMatchingOrAbsentOrigin(t *testing.T) {
 					found = true
 				}
 			}
-			if !found {
-				t.Error("session_id cookie should be set on 204 success")
+			if (tc.wantStatus == http.StatusNoContent) != found {
+				t.Errorf("session cookie presence = %v, want %v",
+					found, tc.wantStatus == http.StatusNoContent)
 			}
 		})
 	}

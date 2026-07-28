@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -166,6 +167,13 @@ func TestLoad_DefaultValues(t *testing.T) {
 	if cfg.ServerPort != "8080" {
 		t.Errorf("ServerPort = %q, want %q", cfg.ServerPort, "8080")
 	}
+	if cfg.CORSAllowedOrigin != "http://localhost:3000" {
+		t.Errorf("CORSAllowedOrigin = %q, want localhost default", cfg.CORSAllowedOrigin)
+	}
+	if cfg.WebPasskeyAllowedOrigin != "" {
+		t.Errorf("WebPasskeyAllowedOrigin = %q, want empty without explicit CORS env",
+			cfg.WebPasskeyAllowedOrigin)
+	}
 
 	// Security defaults: HSTS は未設定時 false（本機能導入前と等価）。
 	if cfg.HSTSEnabled != false {
@@ -197,6 +205,89 @@ func TestLoad_DefaultValues(t *testing.T) {
 	if cfg.PasskeyChallengeTTL != 300*time.Second {
 		t.Errorf("PasskeyChallengeTTL = %v, want %v (default)", cfg.PasskeyChallengeTTL, 300*time.Second)
 	}
+}
+
+func TestLoad_WebPasskeyAllowedOrigin_StrictExactOrigin(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "https origin", raw: "https://example.com", want: "https://example.com"},
+		{name: "http origin with port", raw: "http://localhost:3000", want: "http://localhost:3000"},
+		{name: "前後空白は trim", raw: " \thttps://example.com:8443\r\n", want: "https://example.com:8443"},
+		{name: "empty", raw: "", want: ""},
+		{name: "whitespace-only", raw: " \t\r\n", want: ""},
+		{name: "内部空白", raw: "https://example .com", want: ""},
+		{name: "複数 origin", raw: "https://a.example,https://b.example", want: ""},
+		{name: "userinfo", raw: "https://user:secret@example.com", want: ""},
+		{name: "path", raw: "https://example.com/path", want: ""},
+		{name: "RawPath", raw: "https://example.com/%2F", want: ""},
+		{name: "query", raw: "https://example.com?q=1", want: ""},
+		{name: "ForceQuery", raw: "https://example.com?", want: ""},
+		{name: "fragment", raw: "https://example.com#fragment", want: ""},
+		{name: "opaque", raw: "https:example.com", want: ""},
+		{name: "末尾スラッシュ", raw: "https://example.com/", want: ""},
+		{name: "非 http scheme", raw: "ftp://example.com", want: ""},
+		{name: "host 欠落", raw: "https://", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			setRequiredEnvVars(t)
+			t.Setenv("CORS_ALLOWED_ORIGIN", tc.raw)
+
+			// Act
+			cfg, err := Load()
+
+			// Assert
+			if err != nil {
+				t.Fatalf("Load returned error: %v", err)
+			}
+			if cfg.WebPasskeyAllowedOrigin != tc.want {
+				t.Errorf("WebPasskeyAllowedOrigin = %q, want %q",
+					cfg.WebPasskeyAllowedOrigin, tc.want)
+			}
+			if tc.raw == "" && cfg.CORSAllowedOrigin != "http://localhost:3000" {
+				t.Errorf("CORSAllowedOrigin = %q, want existing localhost default",
+					cfg.CORSAllowedOrigin)
+			}
+		})
+	}
+}
+
+func TestLoad_WebPasskeyAllowedOrigin_InvalidWarningDoesNotLeakRawValue(t *testing.T) {
+	// Arrange
+	setRequiredEnvVars(t)
+	const raw = "https://user:super-secret@example.com/path"
+	t.Setenv("CORS_ALLOWED_ORIGIN", raw)
+	capture := installCaptureLogger(t)
+
+	// Act
+	cfg, err := Load()
+
+	// Assert
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.WebPasskeyAllowedOrigin != "" {
+		t.Errorf("WebPasskeyAllowedOrigin = %q, want empty", cfg.WebPasskeyAllowedOrigin)
+	}
+	warnings := capture.warnRecords()
+	if len(warnings) != 1 {
+		t.Fatalf("warn records = %d, want 1", len(warnings))
+	}
+	if strings.Contains(warnings[0].Message, raw) ||
+		strings.Contains(warnings[0].Message, "super-secret") {
+		t.Errorf("warning message leaked raw Origin: %q", warnings[0].Message)
+	}
+	warnings[0].Attrs(func(attr slog.Attr) bool {
+		value := attr.Value.String()
+		if strings.Contains(value, raw) || strings.Contains(value, "super-secret") {
+			t.Errorf("warning attr %q leaked raw Origin", attr.Key)
+		}
+		return true
+	})
 }
 
 // TestLoad_MetricsTrustedCIDRs は METRICS_TRUSTED_CIDRS のカンマ区切りパースを検証する。

@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { createApiClient, apiClient } from "./api";
+import {
+  createApiClient,
+  apiClient,
+  RequestPreparationError,
+  ResponseParseError,
+} from "./api";
 
 // グローバルfetchのモック
 const mockFetch = vi.fn();
@@ -325,6 +330,70 @@ describe("apiClient", () => {
         expect(apiError.status).toBe(404);
         expect(apiError.body).toEqual(errorBody);
       }
+    });
+
+    it.each([
+      ["body 欠損", undefined],
+      [
+        "途中切断",
+        vi.fn().mockRejectedValue(new TypeError("connection terminated")),
+      ],
+      [
+        "parse 不能",
+        vi.fn().mockRejectedValue(new SyntaxError("invalid JSON")),
+      ],
+    ])(
+      "2xx response の %s は status を持つ ResponseParseError になること",
+      async (_label, json) => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json,
+        });
+
+        const error = await createApiClient()
+          .get("/api/feeds")
+          .catch((caught: unknown) => caught);
+
+        expect(error).toBeInstanceOf(ResponseParseError);
+        expect((error as ResponseParseError).status).toBe(200);
+      },
+    );
+
+    it("循環参照の JSON.stringify 失敗は dispatch 前の RequestPreparationError になること", async () => {
+      const circular: { self?: unknown } = {};
+      circular.self = circular;
+
+      await expect(
+        createApiClient().post("/api/feeds", circular),
+      ).rejects.toBeInstanceOf(RequestPreparationError);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("URL 組み立て失敗は dispatch 前の RequestPreparationError になること", async () => {
+      const invalidUrl = {
+        [Symbol.toPrimitive]() {
+          throw new TypeError("cannot convert URL");
+        },
+      } as unknown as string;
+
+      await expect(
+        createApiClient().get(invalidUrl),
+      ).rejects.toBeInstanceOf(RequestPreparationError);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("fetch reject の plain TypeError はラップせず透過すること", async () => {
+      const fetchError = new TypeError("Failed to fetch");
+      mockFetch.mockRejectedValueOnce(fetchError);
+
+      const error = await createApiClient()
+        .get("/api/feeds")
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBe(fetchError);
+      expect(error).not.toBeInstanceOf(RequestPreparationError);
+      expect(error).not.toBeInstanceOf(ResponseParseError);
     });
   });
 });

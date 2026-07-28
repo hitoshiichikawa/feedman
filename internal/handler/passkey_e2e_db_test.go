@@ -20,6 +20,7 @@ import (
 	"github.com/hitoshi/feedman/internal/auth"
 	"github.com/hitoshi/feedman/internal/database"
 	"github.com/hitoshi/feedman/internal/middleware"
+	"github.com/hitoshi/feedman/internal/model"
 	"github.com/hitoshi/feedman/internal/passkey"
 	"github.com/hitoshi/feedman/internal/repository"
 )
@@ -119,6 +120,15 @@ func setupPasskeyE2EDB(t *testing.T) *sql.DB {
 // 既存 token 交換 endpoint への合流までを 1 経路で検証できるようにする。
 func newPasskeyE2ERouter(t *testing.T, db *sql.DB) (http.Handler, string) {
 	t.Helper()
+	return newPasskeyE2ERouterWithFactory(t, db, auth.NewSessionFactory(time.Hour))
+}
+
+func newPasskeyE2ERouterWithFactory(
+	t *testing.T,
+	db *sql.DB,
+	sessionFactory auth.SessionFactoryFunc,
+) (http.Handler, string) {
+	t.Helper()
 
 	// 全 repo を real 実装で組む
 	userRepo := repository.NewPostgresUserRepo(db)
@@ -145,19 +155,24 @@ func newPasskeyE2ERouter(t *testing.T, db *sql.DB) (http.Handler, string) {
 	regTxBeginner := &e2ePasskeyRegTxBeginner{beginner: repository.NewSQLTxBeginner(db)}
 	registrationSvc := passkey.NewRegistrationService(
 		webAuthnAdapter, challengeStore, userRepo, passkeyCredRepo,
-		regTxBeginner, nil,
+		regTxBeginner, sessionRepo, sessionFactory, nil,
 	)
 	authenticationSvc := passkey.NewAuthenticationService(
 		webAuthnAdapter, challengeStore, passkeyCredRepo, userRepo, authCodeRepo, nil,
 	)
 
 	deps := &RouterDeps{
-		SessionFinder:     sessionRepo,
-		CORSAllowedOrigin: "http://localhost:3000",
-		RateLimiter:       middleware.NewRateLimiter(middleware.DefaultRateLimiterConfig()),
-		NativeAuthHandler: NewNativeAuthHandler(tokenService),
-		JWTVerifier:       verifier,
-		PasskeyHandler:    NewPasskeyHandler(registrationSvc, authenticationSvc),
+		SessionFinder:           sessionRepo,
+		CORSAllowedOrigin:       "http://localhost:3000",
+		WebPasskeyAllowedOrigin: e2ePasskeyRP.Origin,
+		RateLimiter:             middleware.NewRateLimiter(middleware.DefaultRateLimiterConfig()),
+		NativeAuthHandler:       NewNativeAuthHandler(tokenService),
+		JWTVerifier:             verifier,
+		PasskeyHandler: NewPasskeyHandler(
+			registrationSvc,
+			authenticationSvc,
+			WithWebRegistrationSession(e2ePasskeyRP.Origin, "", true, int(time.Hour.Seconds())),
+		),
 		// 保護 API 到達を確認するための最小 stub。userID 連動 fixture で JWT sub の
 		// 解決を可視化する（native_auth_e2e_db_test.go と同方針）。
 		SubscriptionService: &mockSubscriptionService{
@@ -169,13 +184,209 @@ func newPasskeyE2ERouter(t *testing.T, db *sql.DB) (http.Handler, string) {
 	return NewRouter(deps), "https://example.com"
 }
 
+type fixedE2ESessionFactory struct {
+	id  string
+	now time.Time
+	ttl time.Duration
+}
+
+func (f *fixedE2ESessionFactory) NewSession(userID string) (*model.Session, error) {
+	return &model.Session{
+		ID:        f.id,
+		UserID:    userID,
+		CreatedAt: f.now,
+		ExpiresAt: f.now.Add(f.ttl),
+	}, nil
+}
+
 // e2ePasskeyPostJSON は JSON POST を送り Recorder を返す共通ヘルパ。
 func e2ePasskeyPostJSON(router http.Handler, path, body string) *httptest.ResponseRecorder {
+	return e2ePasskeyPostJSONWithOrigin(router, path, body, "")
+}
+
+func e2ePasskeyPostJSONWithOrigin(
+	router http.Handler,
+	path string,
+	body string,
+	origin string,
+) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 	return w
+}
+
+func executeE2EPasskeyRegistration(
+	t *testing.T,
+	router http.Handler,
+	username string,
+	origin string,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	authenticator := virtualwebauthn.NewAuthenticator()
+	credential := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
+
+	beginBody := fmt.Sprintf(
+		`{"username":%q,"code_challenge":%q}`,
+		username,
+		e2ePasskeyCodeChallenge(),
+	)
+	begin := e2ePasskeyPostJSON(router, "/api/passkey/registration/begin", beginBody)
+	if begin.Code != http.StatusOK {
+		t.Fatalf("registration/begin status = %d, want 200 (body=%s)", begin.Code, begin.Body.String())
+	}
+	var response passkeyBeginResponse
+	if err := json.NewDecoder(begin.Result().Body).Decode(&response); err != nil {
+		t.Fatalf("registration/begin decode: %v", err)
+	}
+	options, err := virtualwebauthn.ParseAttestationOptions(string(response.Options))
+	if err != nil {
+		t.Fatalf("ParseAttestationOptions: %v", err)
+	}
+	attestation := virtualwebauthn.CreateAttestationResponse(
+		e2ePasskeyRP,
+		authenticator,
+		credential,
+		*options,
+	)
+	finishBody := fmt.Sprintf(
+		`{"challenge_id":%q,"credential":%s}`,
+		response.ChallengeID,
+		attestation,
+	)
+	return e2ePasskeyPostJSONWithOrigin(
+		router,
+		"/api/passkey/registration/finish",
+		finishBody,
+		origin,
+	)
+}
+
+func TestE2E_PasskeyWebRegistrationCreatesAtomicSession(t *testing.T) {
+	db := setupPasskeyE2EDB(t)
+	defer db.Close()
+	router, origin := newPasskeyE2ERouter(t, db)
+
+	// Act
+	w := executeE2EPasskeyRegistration(t, router, "web-alice", origin)
+
+	// Assert
+	if w.Code != http.StatusOK {
+		t.Fatalf("registration/finish status = %d, want 200 (body=%s)", w.Code, w.Body.String())
+	}
+	var response registrationFinishNewResponse
+	if err := json.NewDecoder(w.Result().Body).Decode(&response); err != nil {
+		t.Fatalf("registration/finish decode: %v", err)
+	}
+	cookies := w.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("cookies = %v, want one session cookie", cookies)
+	}
+	cookie := cookies[0]
+	if cookie.Name != sessionCookieName || cookie.Value == "" || cookie.MaxAge != int(time.Hour.Seconds()) {
+		t.Errorf("session cookie = %+v, want non-empty %s with MaxAge=%d",
+			cookie, sessionCookieName, int(time.Hour.Seconds()))
+	}
+
+	var userCount, credentialCount, sessionCount int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM users WHERE id = $1`,
+		response.UserID,
+	).Scan(&userCount); err != nil {
+		t.Fatalf("users count: %v", err)
+	}
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM passkey_credentials WHERE user_id = $1`,
+		response.UserID,
+	).Scan(&credentialCount); err != nil {
+		t.Fatalf("credentials count: %v", err)
+	}
+	var createdAt, expiresAt time.Time
+	if err := db.QueryRow(
+		`SELECT COUNT(*), MIN(created_at), MIN(expires_at)
+		 FROM sessions WHERE user_id = $1`,
+		response.UserID,
+	).Scan(&sessionCount, &createdAt, &expiresAt); err != nil {
+		t.Fatalf("sessions count/timestamps: %v", err)
+	}
+	if userCount != 1 || credentialCount != 1 || sessionCount != 1 {
+		t.Errorf("user/credential/session counts = %d/%d/%d, want 1/1/1",
+			userCount, credentialCount, sessionCount)
+	}
+	if expiresAt.Sub(createdAt) != time.Hour {
+		t.Errorf("session lifetime = %v, want %v", expiresAt.Sub(createdAt), time.Hour)
+	}
+}
+
+func TestE2E_PasskeyWebRegistrationSessionFailureRollsBackAllRows(t *testing.T) {
+	db := setupPasskeyE2EDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	// Arrange: 別 user の既存 session と同じ ID を factory に固定し、registration tx の
+	// session INSERT だけを UNIQUE 違反にする。
+	existingUser := &model.User{
+		ID:                 "11111111-1111-4111-8111-111111111111",
+		Email:              "",
+		Name:               "",
+		Username:           "existing-user",
+		UsernameNormalized: "existing-user",
+	}
+	userRepo := repository.NewPostgresUserRepo(db)
+	if err := userRepo.CreateUserOnly(ctx, existingUser); err != nil {
+		t.Fatalf("create existing user: %v", err)
+	}
+	const duplicateSessionID = "duplicate-session-id"
+	sessionRepo := repository.NewPostgresSessionRepo(db)
+	fixedNow := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	if err := sessionRepo.Create(ctx, &model.Session{
+		ID:        duplicateSessionID,
+		UserID:    existingUser.ID,
+		CreatedAt: fixedNow,
+		ExpiresAt: fixedNow.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("create existing session: %v", err)
+	}
+	factory := &fixedE2ESessionFactory{
+		id:  duplicateSessionID,
+		now: fixedNow,
+		ttl: time.Hour,
+	}
+	router, origin := newPasskeyE2ERouterWithFactory(t, db, factory)
+
+	// Act
+	w := executeE2EPasskeyRegistration(t, router, "rollback-alice", origin)
+
+	// Assert
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("registration/finish status = %d, want 500 (body=%s)", w.Code, w.Body.String())
+	}
+	if len(w.Result().Cookies()) != 0 {
+		t.Errorf("cookies = %v, want none on session INSERT failure", w.Result().Cookies())
+	}
+	var rolledBackUsers, rolledBackCredentials, existingSessions int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM users WHERE username_normalized = 'rollback-alice'`,
+	).Scan(&rolledBackUsers); err != nil {
+		t.Fatalf("rolled-back users count: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM passkey_credentials`).Scan(&rolledBackCredentials); err != nil {
+		t.Fatalf("rolled-back credentials count: %v", err)
+	}
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM sessions WHERE id = $1`,
+		duplicateSessionID,
+	).Scan(&existingSessions); err != nil {
+		t.Fatalf("existing sessions count: %v", err)
+	}
+	if rolledBackUsers != 0 || rolledBackCredentials != 0 || existingSessions != 1 {
+		t.Errorf("rolledBack users/credentials and existing session = %d/%d/%d, want 0/0/1",
+			rolledBackUsers, rolledBackCredentials, existingSessions)
+	}
 }
 
 // TestE2E_PasskeyFullFlow_DBBacked は passkey 全動線（登録 → 認証 → 既存 token 交換 →
@@ -235,8 +446,9 @@ func TestE2E_PasskeyFullFlow_DBBacked(t *testing.T) {
 		t.Fatal("registration/finish returned empty user_id")
 	}
 
-	// DB sanity: users 行と passkey_credentials 行が作成されている
-	var userCount, credCount int
+	// DB sanity: Origin 不在の iOS/native mode は users / passkey_credentials の 2 行だけを
+	// 作成し、session / Cookie を発行しない（Issue #231 Delta 1 / #216 回帰）。
+	var userCount, credCount, sessionCount int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE id = $1`, regFinishResp.UserID).Scan(&userCount); err != nil {
 		t.Fatalf("users COUNT: %v", err)
 	}
@@ -248,6 +460,19 @@ func TestE2E_PasskeyFullFlow_DBBacked(t *testing.T) {
 	}
 	if credCount != 1 {
 		t.Errorf("passkey_credentials after registration: got %d, want 1", credCount)
+	}
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM sessions WHERE user_id = $1`,
+		regFinishResp.UserID,
+	).Scan(&sessionCount); err != nil {
+		t.Fatalf("sessions COUNT: %v", err)
+	}
+	if sessionCount != 0 {
+		t.Errorf("sessions after Origin-less registration: got %d, want 0", sessionCount)
+	}
+	if len(w.Result().Cookies()) != 0 {
+		t.Errorf("Origin-less registration cookies = %v, want none", w.Result().Cookies())
 	}
 
 	// --- step 4: passkey 認証 begin ---

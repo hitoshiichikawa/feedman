@@ -16,11 +16,26 @@ vi.mock("@/hooks/use-passkey-registration", async () => {
   };
 });
 
+vi.mock("@/hooks/use-passkey-authentication", async () => {
+  const actual = await vi.importActual<
+    typeof import("@/hooks/use-passkey-authentication")
+  >("@/hooks/use-passkey-authentication");
+  return {
+    ...actual,
+    usePasskeyAuthentication: vi.fn(),
+  };
+});
+
 import {
   PasskeyRegistrationError,
   usePasskeyRegistration,
   type PasskeyRegistrationErrorKind,
 } from "@/hooks/use-passkey-registration";
+import {
+  PasskeyAuthError,
+  usePasskeyAuthentication,
+  type PasskeyAuthErrorKind,
+} from "@/hooks/use-passkey-authentication";
 import { PasskeySignupDialog } from "./passkey-signup-dialog";
 
 /**
@@ -35,6 +50,14 @@ interface MockMutation {
   isError: boolean;
   isSuccess: boolean;
   error: PasskeyRegistrationError | null;
+}
+
+interface MockAuthMutation {
+  mutate: ReturnType<typeof vi.fn>;
+  reset: ReturnType<typeof vi.fn>;
+  isPending: boolean;
+  isError: boolean;
+  error: PasskeyAuthError | null;
 }
 
 /** ダミーの mutation state を組み立てる。デフォルトは idle（成功も失敗もしていない）状態。 */
@@ -57,6 +80,25 @@ function mockRegistration(mutation: MockMutation) {
   );
 }
 
+function buildAuthMutation(
+  overrides: Partial<MockAuthMutation> = {},
+): MockAuthMutation {
+  return {
+    mutate: vi.fn(),
+    reset: vi.fn(),
+    isPending: false,
+    isError: false,
+    error: null,
+    ...overrides,
+  };
+}
+
+function mockAuthentication(mutation: MockAuthMutation) {
+  vi.mocked(usePasskeyAuthentication).mockReturnValue(
+    mutation as unknown as ReturnType<typeof usePasskeyAuthentication>,
+  );
+}
+
 /**
  * kind から実物クラスの `PasskeyRegistrationError` を組み立てる。
  * `registered` はアカウント作成後の失敗か（review #6）。既定は作成前失敗（false）。
@@ -71,6 +113,7 @@ function buildError(
 describe("PasskeySignupDialog", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockAuthentication(buildAuthMutation());
   });
 
   it("open=true のとき username 入力欄と「作成」ボタンが表示され、recovery email 入力欄が存在しないこと（Req 2.1, 2.4）", () => {
@@ -242,4 +285,131 @@ describe("PasskeySignupDialog", () => {
     // review #3: 閉じた後に reset して残留 state を消す（再操作破綻の防止）
     expect(reset).toHaveBeenCalled();
   });
+
+  it("registration_uncertain は専用 UI を開いたままにし、初期導線をログイン確認だけに限定する", async () => {
+    const onOpenChange = vi.fn();
+    const onAccountCreatedNeedsLogin = vi.fn();
+    const resetRegistration = vi.fn();
+    const resetAuthentication = vi.fn();
+    mockRegistration(
+      buildMutation({
+        isError: true,
+        error: new PasskeyRegistrationError("registration_uncertain", {
+          registered: true,
+          message: "postgres session_id=secret",
+        }),
+        reset: resetRegistration,
+      }),
+    );
+    mockAuthentication(buildAuthMutation({ reset: resetAuthentication }));
+
+    render(
+      <PasskeySignupDialog
+        open={true}
+        onOpenChange={onOpenChange}
+        onAccountCreatedNeedsLogin={onAccountCreatedNeedsLogin}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", {
+        name: "登録が完了したかどうかを確認できませんでした",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "ログインで確認する" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "再度作成する" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("ユーザー名")).not.toBeInTheDocument();
+    expect(screen.queryByText(/postgres|session_id|secret/i)).not.toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(onOpenChange).not.toHaveBeenCalledWith(false);
+      expect(onAccountCreatedNeedsLogin).not.toHaveBeenCalled();
+      expect(resetRegistration).not.toHaveBeenCalled();
+      expect(resetAuthentication).not.toHaveBeenCalled();
+    });
+  });
+
+  it("registration_uncertain の「ログインで確認する」で discoverable authentication を起動する", async () => {
+    const mutateAuthentication = vi.fn();
+    mockRegistration(
+      buildMutation({
+        isError: true,
+        error: buildError("registration_uncertain", true),
+      }),
+    );
+    mockAuthentication(
+      buildAuthMutation({ mutate: mutateAuthentication }),
+    );
+    const user = userEvent.setup();
+    render(<PasskeySignupDialog open={true} onOpenChange={vi.fn()} />);
+
+    await user.click(
+      screen.getByRole("button", { name: "ログインで確認する" }),
+    );
+
+    expect(mutateAuthentication).toHaveBeenCalledTimes(1);
+    expect(mutateAuthentication).toHaveBeenCalledWith();
+  });
+
+  it("復旧ログインが authentication_failed の後だけ再作成を提示し、押下で両 mutation を reset する", async () => {
+    const resetRegistration = vi.fn();
+    const resetAuthentication = vi.fn();
+    mockRegistration(
+      buildMutation({
+        isError: true,
+        error: buildError("registration_uncertain", true),
+        reset: resetRegistration,
+      }),
+    );
+    mockAuthentication(
+      buildAuthMutation({
+        isError: true,
+        error: new PasskeyAuthError("authentication_failed"),
+        reset: resetAuthentication,
+      }),
+    );
+    const user = userEvent.setup();
+    render(<PasskeySignupDialog open={true} onOpenChange={vi.fn()} />);
+
+    await user.click(
+      screen.getByRole("button", { name: "再度作成する" }),
+    );
+
+    expect(resetRegistration).toHaveBeenCalledTimes(1);
+    expect(resetAuthentication).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    "server_rejected",
+    "cancelled",
+    "network_error",
+    "server_error",
+    "session_exchange_failed",
+  ] satisfies PasskeyAuthErrorKind[])(
+    "復旧ログインの %s では再作成を提示しない",
+    (kind) => {
+      mockRegistration(
+        buildMutation({
+          isError: true,
+          error: buildError("registration_uncertain", true),
+        }),
+      );
+      mockAuthentication(
+        buildAuthMutation({
+          isError: true,
+          error: new PasskeyAuthError(kind),
+        }),
+      );
+
+      render(<PasskeySignupDialog open={true} onOpenChange={vi.fn()} />);
+
+      expect(
+        screen.queryByRole("button", { name: "再度作成する" }),
+      ).not.toBeInTheDocument();
+    },
+  );
 });

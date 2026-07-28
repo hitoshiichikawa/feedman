@@ -142,7 +142,7 @@ type RegistrationService struct {
 
 	// Web 直接登録 session（Issue #231 §Delta 1）用の依存。WEBAUTHN_* 設定時に wiring から
 	// 非 nil で注入される。auth_code 関連依存は追加しない（direct session は auth_code を介さない）。
-	sessions       SessionWriter          // session 行 INSERT（tx 変種 CreateExec）
+	sessions       SessionWriter           // session 行 INSERT（tx 変種 CreateExec）
 	sessionFactory auth.SessionFactoryFunc // ID + now + CreatedAt + ExpiresAt を一貫生成（共有 factory）
 }
 

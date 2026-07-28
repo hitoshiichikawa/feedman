@@ -211,8 +211,36 @@ func (h *PasskeyHandler) RegistrationBegin(w http.ResponseWriter, r *http.Reques
 //   - 200: {user_id}
 //   - 400 INVALID_REQUEST:      JSON 不正・必須フィールド欠落・ボディ上限超過
 //   - 400 REGISTRATION_FAILED:  ErrRegistrationFailed に正規化された拒否（Req 1.7）
+//   - 403 FORBIDDEN_ORIGIN:     Web Origin が未設定または許可 Origin と不一致
+//   - 415 UNSUPPORTED_MEDIA_TYPE: Web mode の Content-Type が application/json でない
 //   - 500 INTERNAL_ERROR:       上記以外
 func (h *PasskeyHandler) RegistrationFinish(w http.ResponseWriter, r *http.Request) {
+	// Origin 不在は既存 iOS/native mode、非空かつ exact match のみ Web mode とする。
+	// 不一致または allowedOrigin 未設定時の非空 Origin は、challenge consume / DB mutation
+	// より前に拒否する（Issue #231 Delta 1/4）。
+	origin := r.Header.Get("Origin")
+	webMode := false
+	if origin != "" {
+		if h.allowedOrigin == "" || origin != h.allowedOrigin {
+			slog.Info("passkey registration finish rejected: disallowed origin")
+			middleware.WriteErrorResponse(w, http.StatusForbidden, forbiddenOriginError())
+			return
+		}
+		webMode = true
+		// Web mode のみ JSON Content-Type と direct-session readiness を mutation 前に検証する。
+		// iOS/native mode へこの追加制約を課さず #216 の既存契約を維持する。
+		if !hasJSONContentType(r) {
+			slog.Info("passkey registration finish rejected: unsupported content-type")
+			middleware.WriteErrorResponse(w, http.StatusUnsupportedMediaType, unsupportedMediaTypeError())
+			return
+		}
+		if !h.webRegistrationReady() {
+			slog.Error("passkey registration finish rejected: web session dependencies are not ready")
+			middleware.WriteInternalServerError(w)
+			return
+		}
+	}
+
 	var req registrationFinishRequest
 	if !decodeRequest(w, r, &req, "passkey registration finish") {
 		return
@@ -223,10 +251,29 @@ func (h *PasskeyHandler) RegistrationFinish(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	userID, err := h.registration.FinishRegistrationNew(r.Context(), req.ChallengeID, req.Credential)
+	userID, webSession, err := h.registration.FinishRegistrationNew(
+		r.Context(), req.ChallengeID, req.Credential, webMode,
+	)
 	if err != nil {
 		h.writeRegistrationError(w, err, "passkey registration finish failed")
 		return
+	}
+
+	if webMode {
+		// Web mode の service 契約では commit 後に必ず Session が返る。nil は配線・実装の
+		// 契約違反なので Cookie を発行せず 500 に倒す。
+		if webSession == nil {
+			slog.Error("passkey registration finish failed: committed web session is missing")
+			middleware.WriteInternalServerError(w)
+			return
+		}
+		http.SetCookie(w, buildSessionCookie(
+			sessionCookieName,
+			webSession.ID,
+			h.cookieDomain,
+			h.cookieSecure,
+			h.cookieMaxAge,
+		))
 	}
 
 	writeJSON(w, http.StatusOK, registrationFinishNewResponse{UserID: userID})

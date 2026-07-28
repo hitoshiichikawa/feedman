@@ -5,16 +5,18 @@ import {
   useQueryClient,
   type UseMutationResult,
 } from "@tanstack/react-query";
-import { apiClient, ApiError } from "@/lib/api";
+import {
+  apiClient,
+  ApiError,
+  RequestPreparationError,
+  ResponseParseError,
+} from "@/lib/api";
 import { generatePkcePair } from "@/lib/pkce";
 import {
   decodeCreationOptions,
-  decodeRequestOptions,
-  encodeAssertionResponse,
   encodeAttestationResponse,
 } from "@/lib/webauthn";
 import type {
-  AuthenticationFinishResponse,
   PasskeyBeginResponse,
   RegistrationFinishResponse,
 } from "@/types/passkey";
@@ -34,6 +36,7 @@ export type PasskeyRegistrationErrorKind =
   | "username_taken"
   | "cancelled"
   | "server_rejected"
+  | "registration_uncertain"
   | "session_exchange_failed"
   | "server_error"
   | "network_error";
@@ -48,10 +51,9 @@ export type PasskeyRegistrationErrorKind =
 export class PasskeyRegistrationError extends Error {
   readonly kind: PasskeyRegistrationErrorKind;
   /**
-   * アカウント作成（`POST /api/passkey/registration/finish`）が **成功した後** に発生した
-   * 失敗なら `true`（review #6）。true のとき UI は「アカウントは既に作成済みなので、
-   * 同じユーザー名で再作成させると `username_taken` になる」ことを踏まえ、再作成に戻さず
-   * ログイン導線へ誘導する復旧フローに切り替える。false は作成前の失敗（再入力・再試行が妥当）。
+   * registration/finish が commit 済みの可能性を排除できない場合は `true`。
+   * `registration_uncertain` では成否を断定せず、UI がログイン確認を先に提示する。
+   * 旧 post-finish エラーとの互換用にも保持する。
    */
   readonly registered: boolean;
   constructor(
@@ -65,19 +67,11 @@ export class PasskeyRegistrationError extends Error {
   }
 }
 
-// step 追跡用のシンボリック定数。session 交換（step 8）の失敗のみを
-// `session_exchange_failed` に分類し、それ以外の step で発生する ApiError は
-// `server_rejected` / `server_error` / `invalid_username` / `username_taken` に
-// 振り分けるためのラベル（Req 3.4 と Req 4.6 / 2.5 / 2.6 の分類差を step index で
-// 実現する）。
+// begin / browser create / finish の発生位置ごとに、確定拒否と完了不明を区別する。
 const STEP_PKCE = 1;
 const STEP_REG_BEGIN = 2;
 const STEP_NAV_CREATE = 3;
 const STEP_REG_FINISH = 4;
-const STEP_AUTH_BEGIN = 5;
-const STEP_NAV_GET = 6;
-const STEP_AUTH_FINISH = 7;
-const STEP_SESSION_EXCHANGE = 8;
 
 // WebAuthn の DOMException のうち、ユーザーキャンセル / abort / 起動失敗として
 // UI 側で「画面を壊さず戻す」（Requirement 2.7）に集約する name の集合。
@@ -89,7 +83,7 @@ const CANCEL_ERROR_NAMES = new Set([
 ]);
 
 /**
- * `navigator.credentials.create()` / `.get()` が throw するキャンセル系エラーを判別する。
+ * `navigator.credentials.create()` が throw するキャンセル系エラーを判別する。
  *
  * jsdom / 本番ブラウザ双方で DOMException が定義されない状況（SSR 相当 / 古いランタイム）
  * を考慮し、`instanceof DOMException` に加えて `err.name` によるフォールバック判定を持つ。
@@ -121,30 +115,13 @@ function extractApiErrorCode(err: ApiError): string | null {
 }
 
 /**
- * 「サーバがアカウント作成（registration/finish）を commit した可能性があるか」を判定する。
- * UI はこの値で作成前失敗（再入力・再試行）と作成後失敗（ログイン復旧導線）を分ける。
- *
- * - step が STEP_REG_FINISH（4）より後 = 認証・session 合流フェーズ → 常に作成済み（review #6）
- * - step が STEP_REG_FINISH ちょうど（registration/finish の応答待ち中）で、応答が失われた
- *   可能性のある失敗 = fetch reject（`TypeError`）または 5xx（サーバが commit 後にエラー
- *   応答を返し得る）→ **「完了不明」を作成済み側へ倒す**（review #3）。
- *   理由: サーバが実際に commit 済みなら、再作成へ戻すと `username_taken` で詰むため、
- *   安全側としてログイン復旧導線へ誘導する。一方 finish の 400/409（サーバが明示的に拒否
- *   = 未 commit）は作成前失敗として扱い、再作成・再試行を許容する。
+ * finish の fetch 中断を、create 操作のユーザーキャンセルと区別する。
  */
-function isPossiblyRegistered(err: unknown, step: number): boolean {
-  if (step > STEP_REG_FINISH) {
-    return true;
+function isAbortError(err: unknown): boolean {
+  if (typeof DOMException !== "undefined" && err instanceof DOMException) {
+    return err.name === "AbortError";
   }
-  if (step === STEP_REG_FINISH) {
-    if (err instanceof TypeError) {
-      return true;
-    }
-    if (err instanceof ApiError && err.status >= 500) {
-      return true;
-    }
-  }
-  return false;
+  return err instanceof Error && err.name === "AbortError";
 }
 
 /**
@@ -152,83 +129,89 @@ function isPossiblyRegistered(err: unknown, step: number): boolean {
  *
  * - step 2（registration/begin）の 400 with `code: "INVALID_USERNAME"` → `invalid_username`
  * - step 2 の 409 → `username_taken`
- * - step 8（session）の失敗 → `session_exchange_failed`
- * - それ以外の step の 400/409 → `server_rejected`（内部区別を反射しない / NFR 1.2）
- * - 500 系 → `server_error`
- * - DOMException（NotAllowedError / AbortError / InvalidStateError）→ `cancelled`
- * - `TypeError`（fetch reject）→ `network_error`
+ * - finish の全 4xx → `server_rejected`
+ * - finish の fetch reject / Abort / 5xx / 2xx parse 失敗 → `registration_uncertain`
+ * - finish dispatch 前の preparation 失敗 → `server_error`
+ * - create の DOMException → `cancelled`
+ * - begin の fetch reject → `network_error`
  *
  * に振り分ける（tasks.md L182-193 / Req 2.5, 2.6, 2.7, 2.8, 3.4）。
  */
 function classifyError(err: unknown, step: number): PasskeyRegistrationError {
-  // registration/finish（step 4）完了後に発生した失敗、および finish の応答喪失（完了不明）は
-  // 「アカウント作成済みの可能性」を意味する。この区別で UI は作成前失敗（再入力・再試行）と
-  // 作成後失敗（ログインへ誘導する復旧導線）を分ける（review #3 / #6）。
-  const registered = isPossiblyRegistered(err, step);
   if (err instanceof PasskeyRegistrationError) {
-    // 手動 throw（create/get の null 解決 = cancelled）にも step 由来の registered を付与し直す。
-    // create の null は step 3（作成前）、get の null は step 6（作成後）で意味が異なる。
-    return new PasskeyRegistrationError(err.kind, {
-      message: err.message,
-      registered,
-    });
+    return err;
   }
+
+  if (step === STEP_REG_FINISH) {
+    // dispatch 前の preparation 失敗は commit 不成立が確定するため uncertain にしない。
+    if (err instanceof RequestPreparationError) {
+      return new PasskeyRegistrationError("server_error");
+    }
+    // fetch 後の 2xx parse 失敗、送達可否不明の fetch reject / abort、5xx は、
+    // server 側で registration が commit 済みの可能性を排除できない。
+    if (
+      err instanceof ResponseParseError ||
+      isAbortError(err) ||
+      err instanceof TypeError ||
+      (err instanceof ApiError && err.status >= 500)
+    ) {
+      return new PasskeyRegistrationError("registration_uncertain", {
+        registered: true,
+      });
+    }
+    // finish が返した任意の 4xx は拒否確定。status/code の内部差は UI に反射しない。
+    if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
+      return new PasskeyRegistrationError("server_rejected");
+    }
+    return new PasskeyRegistrationError("server_error");
+  }
+
   if (isCancelledError(err)) {
-    return new PasskeyRegistrationError("cancelled", { registered });
+    return new PasskeyRegistrationError("cancelled");
+  }
+  if (err instanceof RequestPreparationError || err instanceof ResponseParseError) {
+    return new PasskeyRegistrationError("server_error");
   }
   if (err instanceof TypeError) {
     // fetch reject（ネットワーク断・DNS 失敗等）
-    return new PasskeyRegistrationError("network_error", { registered });
+    return new PasskeyRegistrationError("network_error");
   }
   if (err instanceof ApiError) {
-    if (step === STEP_SESSION_EXCHANGE) {
-      // step 8 の失敗は理由に関わらず session 合流失敗に集約（Req 3.4）。常に作成後（registered）。
-      return new PasskeyRegistrationError("session_exchange_failed", {
-        registered,
-      });
-    }
     if (step === STEP_REG_BEGIN) {
       // registration/begin の 400 は `code: "INVALID_USERNAME"` のときのみ形式不正
       // として扱い、それ以外の 400 は server_rejected として汎用エラーへ集約する
       // （Req 2.5 / 2.8）
       if (err.status === 400 && extractApiErrorCode(err) === "INVALID_USERNAME") {
-        return new PasskeyRegistrationError("invalid_username", { registered });
+        return new PasskeyRegistrationError("invalid_username");
       }
       // Req 2.6: 409 は username 重複を UI に区別表示させる（begin でのみ意味を持つ）
       if (err.status === 409) {
-        return new PasskeyRegistrationError("username_taken", { registered });
+        return new PasskeyRegistrationError("username_taken");
       }
     }
     if (err.status === 400 || err.status === 409) {
       // 400 REGISTRATION_FAILED / 400 AUTHENTICATION_FAILED / 409 系は
       // server_rejected（内部区別を反射しない / NFR 1.2）
-      return new PasskeyRegistrationError("server_rejected", { registered });
+      return new PasskeyRegistrationError("server_rejected");
     }
     // 500 系および想定外 status は server_error
-    return new PasskeyRegistrationError("server_error", { registered });
+    return new PasskeyRegistrationError("server_error");
   }
   // その他の予期しない例外は安全側に server_error とし、詳細を UI に露出させない
-  return new PasskeyRegistrationError("server_error", { registered });
+  return new PasskeyRegistrationError("server_error");
 }
 
 /**
  * パスキー新規作成の mutation chain を 1 フックで提供する。
  *
- * chain 8 段（design.md §Flows「新規作成フロー」）:
- *   1. `generatePkcePair()` — code_verifier / code_challenge を closure 変数で生成
+ * #231 Delta 1 の直接 session chain:
+ *   1. `generatePkcePair()` — #216 request 契約用 code_challenge を生成
  *   2. `POST /api/passkey/registration/begin { username, email:"", code_challenge }`
  *      → `{challenge_id, options}`
  *   3. `decodeCreationOptions(options)` → `navigator.credentials.create({publicKey})`
  *      → attestation
  *   4. `encodeAttestationResponse(cred)` → `POST /api/passkey/registration/finish`
- *      → `{user_id}`
- *   5. `POST /api/passkey/authentication/begin { code_challenge }`（step 2 の
- *      code_challenge を **同一値** で再送する。サーバ側 finish で PKCE 検証されるため）
- *   6. `decodeRequestOptions(options)` → `navigator.credentials.get({publicKey})`
- *      → assertion
- *   7. `encodeAssertionResponse(cred)` → `POST /api/passkey/authentication/finish`
- *      → `{auth_code}`
- *   8. `POST /api/auth/session { auth_code, code_verifier }` → 204 + Set-Cookie
+ *      → `{user_id}` + Set-Cookie（server が user/credential/session を atomic commit）
  *
  * 成功時: `queryClient.invalidateQueries({queryKey: ["auth", "me"]})` で `AuthGuard` を
  * 再判定させ、2 ペイン UI へ自動遷移させる（Requirement 3.1 / 3.2）。
@@ -237,8 +220,7 @@ function classifyError(err: unknown, step: number): PasskeyRegistrationError {
  * 扱わない」を実装契約で担保）。
  *
  * NFR 1.1 遵守:
- * - `codeVerifier` / `authCode` / attestation 生値 / assertion 生値は `mutationFn` の
- *   closure 変数のみに保持
+ * - code_challenge / attestation 生値は `mutationFn` の closure 変数のみに保持
  * - `console.*` / `localStorage` / `sessionStorage` / URL クエリ / エラー message に
  *   一切残さない
  * - mutation 終了（成功・失敗・cancel）で closure が GC 対象になることを前提とする
@@ -256,7 +238,7 @@ export function usePasskeyRegistration(): UseMutationResult<
     mutationFn: async ({ username }) => {
       let step = STEP_PKCE;
       try {
-        const { codeVerifier, codeChallenge } = await generatePkcePair();
+        const { codeChallenge } = await generatePkcePair();
 
         // --- 登録 chain (steps 2-4) ---
         step = STEP_REG_BEGIN;
@@ -287,52 +269,6 @@ export function usePasskeyRegistration(): UseMutationResult<
             credential: encodeAttestationResponse(attestation),
           },
         );
-
-        // --- 認証 chain (steps 5-7) ---
-        // Requirement 2.3: 追加操作なしで合流させるため、登録直後に discoverable login
-        // を実行する。code_challenge は step 2 と同じ値を再送する（サーバは
-        // authentication/finish で verifier を検証するため、challenge の再利用は許容）。
-        step = STEP_AUTH_BEGIN;
-        const authBegin = await apiClient.post<PasskeyBeginResponse>(
-          "/api/passkey/authentication/begin",
-          { code_challenge: codeChallenge },
-        );
-
-        step = STEP_NAV_GET;
-        const requestOptions = decodeRequestOptions(authBegin.options);
-        // review #5: 登録直後の discoverable login が、同一端末上の **別の** Feedman
-        // パスキーを選んでしまい別アカウントとしてログインする事故を防ぐ。直前に
-        // `navigator.credentials.create()` で登録した credential（`attestation.rawId`）へ
-        // `allowCredentials` を限定し、後続認証を登録した credential / user に拘束する。
-        // サーバ側の challenge / 検証はそのまま（クライアントで選択候補を絞るだけ）。
-        if (requestOptions.publicKey) {
-          requestOptions.publicKey.allowCredentials = [
-            { type: "public-key", id: attestation.rawId },
-          ];
-        }
-        const assertion = (await navigator.credentials.get(
-          requestOptions,
-        )) as PublicKeyCredential | null;
-        if (!assertion) {
-          // ここでの null もキャンセル相当として集約（Req 2.7 の網羅性向上）
-          throw new PasskeyRegistrationError("cancelled");
-        }
-
-        step = STEP_AUTH_FINISH;
-        const authFinish = await apiClient.post<AuthenticationFinishResponse>(
-          "/api/passkey/authentication/finish",
-          {
-            challenge_id: authBegin.challenge_id,
-            credential: encodeAssertionResponse(assertion),
-          },
-        );
-
-        // --- session 合流 (step 8) ---
-        step = STEP_SESSION_EXCHANGE;
-        await apiClient.post<void>("/api/auth/session", {
-          auth_code: authFinish.auth_code,
-          code_verifier: codeVerifier,
-        });
       } catch (err) {
         throw classifyError(err, step);
       }

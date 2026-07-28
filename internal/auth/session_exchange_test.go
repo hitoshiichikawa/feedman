@@ -25,6 +25,31 @@ type mockSessionCreator struct {
 	created     *model.Session
 }
 
+type mockSessionFactory struct {
+	newFn func(userID string) (*model.Session, error)
+
+	newCalls  int
+	lastUser  string
+	generated *model.Session
+}
+
+func (m *mockSessionFactory) NewSession(userID string) (*model.Session, error) {
+	m.newCalls++
+	m.lastUser = userID
+	if m.newFn != nil {
+		session, err := m.newFn(userID)
+		m.generated = session
+		return session, err
+	}
+	m.generated = &model.Session{
+		ID:        strings.Repeat("a", 64),
+		UserID:    userID,
+		CreatedAt: fixedSessionExchangeIssuedAt,
+		ExpiresAt: fixedSessionExchangeIssuedAt.Add(sessionExchangeTestTTL),
+	}
+	return m.generated, nil
+}
+
 func (m *mockSessionCreator) Create(ctx context.Context, s *model.Session) error {
 	m.createCalls++
 	m.created = s
@@ -67,13 +92,18 @@ func newSessionExchangeAuthCode(userID string) *model.AuthCode {
 
 // newSessionExchangeSvcWithMocks は固定 now + 固定 sessionTTL の
 // SessionExchangeService と 2 つの mock 参照を返す。
-func newSessionExchangeSvcWithMocks(t *testing.T) (*SessionExchangeService, *mockAuthCodes, *mockSessionCreator) {
+func newSessionExchangeSvcWithMocks(t *testing.T) (
+	*SessionExchangeService,
+	*mockAuthCodes,
+	*mockSessionCreator,
+	*mockSessionFactory,
+) {
 	t.Helper()
 	authCodes := &mockAuthCodes{}
 	sessions := &mockSessionCreator{}
-	svc := NewSessionExchangeService(authCodes, sessions, sessionExchangeTestTTL)
-	svc.now = func() time.Time { return fixedSessionExchangeIssuedAt }
-	return svc, authCodes, sessions
+	factory := &mockSessionFactory{}
+	svc := NewSessionExchangeService(authCodes, sessions, factory)
+	return svc, authCodes, sessions, factory
 }
 
 // --- 正常系 ---
@@ -87,7 +117,7 @@ func newSessionExchangeSvcWithMocks(t *testing.T) (*SessionExchangeService, *moc
 func TestExchangeAuthCodeForSession_Success(t *testing.T) {
 	// Arrange
 	const userID = "session-user-1"
-	svc, authCodes, sessions := newSessionExchangeSvcWithMocks(t)
+	svc, authCodes, sessions, factory := newSessionExchangeSvcWithMocks(t)
 	stored := newSessionExchangeAuthCode(userID)
 	authCodes.findFn = func(ctx context.Context, hash string) (*model.AuthCode, error) {
 		return stored, nil
@@ -106,6 +136,13 @@ func TestExchangeAuthCodeForSession_Success(t *testing.T) {
 	}
 	if session.UserID != userID {
 		t.Errorf("session.UserID = %q, want %q", session.UserID, userID)
+	}
+	if factory.newCalls != 1 || factory.lastUser != userID {
+		t.Errorf("factory.NewSession calls/user = %d/%q, want 1/%q",
+			factory.newCalls, factory.lastUser, userID)
+	}
+	if factory.generated != session {
+		t.Error("returned Session is not the factory-generated pointer")
 	}
 
 	// Assert: session ID は 32 バイト crypto random の hex（64 文字 lowercase）
@@ -169,7 +206,7 @@ func TestExchangeAuthCodeForSession_Success(t *testing.T) {
 // NFR 1.2: 拒否 uniform 化）。
 func TestExchangeAuthCodeForSession_AuthCodeNotFound(t *testing.T) {
 	// Arrange
-	svc, authCodes, sessions := newSessionExchangeSvcWithMocks(t)
+	svc, authCodes, sessions, _ := newSessionExchangeSvcWithMocks(t)
 	authCodes.findFn = func(ctx context.Context, hash string) (*model.AuthCode, error) {
 		return nil, nil // 不明
 	}
@@ -199,7 +236,7 @@ func TestExchangeAuthCodeForSession_AuthCodeNotFound(t *testing.T) {
 // （Req 3.1 / 4.2 / NFR 1.2）。
 func TestExchangeAuthCodeForSession_VerifierMismatch(t *testing.T) {
 	// Arrange
-	svc, authCodes, sessions := newSessionExchangeSvcWithMocks(t)
+	svc, authCodes, sessions, _ := newSessionExchangeSvcWithMocks(t)
 	stored := newSessionExchangeAuthCode("session-user-1")
 	authCodes.findFn = func(ctx context.Context, hash string) (*model.AuthCode, error) {
 		return stored, nil
@@ -235,7 +272,7 @@ func TestExchangeAuthCodeForSession_VerifierMismatch(t *testing.T) {
 // ことを検証する（Req 3.1 / 4.2 / NFR 1.2）。
 func TestExchangeAuthCodeForSession_MarkUsedNotUsable(t *testing.T) {
 	// Arrange
-	svc, authCodes, sessions := newSessionExchangeSvcWithMocks(t)
+	svc, authCodes, sessions, _ := newSessionExchangeSvcWithMocks(t)
 	stored := newSessionExchangeAuthCode("session-user-1")
 	authCodes.findFn = func(ctx context.Context, hash string) (*model.AuthCode, error) {
 		return stored, nil
@@ -321,7 +358,7 @@ func TestExchangeAuthCodeForSession_InfraErrorsWrap(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Arrange
-			svc, authCodes, sessions := newSessionExchangeSvcWithMocks(t)
+			svc, authCodes, sessions, _ := newSessionExchangeSvcWithMocks(t)
 			tc.setup(authCodes, sessions)
 
 			// Act
@@ -386,7 +423,7 @@ func TestExchangeAuthCodeForSession_DoesNotLeakPlainSecretsInError(t *testing.T)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Arrange
-			svc, authCodes, sessions := newSessionExchangeSvcWithMocks(t)
+			svc, authCodes, sessions, _ := newSessionExchangeSvcWithMocks(t)
 			tc.setup(authCodes, sessions)
 
 			// Act
@@ -405,5 +442,39 @@ func TestExchangeAuthCodeForSession_DoesNotLeakPlainSecretsInError(t *testing.T)
 				t.Errorf("error message %q contains plain codeVerifier (NFR 1.1)", msg)
 			}
 		})
+	}
+}
+
+func TestExchangeAuthCodeForSession_FactoryFailureDoesNotPersistSession(t *testing.T) {
+	// Arrange
+	svc, authCodes, sessions, factory := newSessionExchangeSvcWithMocks(t)
+	authCodes.findFn = func(context.Context, string) (*model.AuthCode, error) {
+		return newSessionExchangeAuthCode("session-user-1"), nil
+	}
+	wantErr := errors.New("session id unavailable")
+	factory.newFn = func(string) (*model.Session, error) {
+		return nil, wantErr
+	}
+
+	// Act
+	session, err := svc.ExchangeAuthCodeForSession(
+		context.Background(),
+		"plain-session-auth-code",
+		rfc7636AppendixBVerifier,
+	)
+
+	// Assert
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want wrapped factory error %v", err, wantErr)
+	}
+	if session != nil {
+		t.Errorf("session = %+v, want nil", session)
+	}
+	if factory.newCalls != 1 || factory.lastUser != "session-user-1" {
+		t.Errorf("factory calls/user = %d/%q, want 1/session-user-1",
+			factory.newCalls, factory.lastUser)
+	}
+	if sessions.createCalls != 0 {
+		t.Errorf("Create calls = %d, want 0 after factory failure", sessions.createCalls)
 	}
 }

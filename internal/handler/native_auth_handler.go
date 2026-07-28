@@ -49,9 +49,9 @@ type NativeAuthHandler struct {
 	cookieSecure    bool
 	sessionMaxAge   int
 
-	// allowedOrigin は POST /api/auth/session の CSRF 対策（Issue #223 review #2）で許可する
-	// ブラウザ Origin。空文字のときは Origin 検証をスキップする（後方互換 / 未配線環境）。
-	// 既存 CORS 層と同じ許可オリジン（cfg.CORSAllowedOrigin）を wiring 時に注入する。
+	// allowedOrigin は POST /api/auth/session の CSRF 対策で許可する strict exact Origin。
+	// 空文字・Origin 不在・不一致はいずれも fail-closed で拒否する。wiring は
+	// cfg.WebPasskeyAllowedOrigin を注入する（Issue #231 Delta 4/6）。
 	allowedOrigin string
 }
 
@@ -74,10 +74,10 @@ func WithSessionExchange(exchange SessionExchanger, cookieDomain string, cookieS
 	}
 }
 
-// WithSessionAllowedOrigin は POST /api/auth/session の CSRF 対策で許可する Origin を注入する
-// （Issue #223 review #2）。既存 CORS 層と同じ許可オリジン（cfg.CORSAllowedOrigin）を渡す。
-// 空文字を渡した場合、Session() は Origin 検証をスキップする（後方互換。Content-Type 検証は
-// allowedOrigin の値に関係なく常に有効）。既存 WithSessionExchange と直交する additive Option。
+// WithSessionAllowedOrigin は POST /api/auth/session の CSRF 対策で許可する strict exact
+// Origin を注入する。cfg.WebPasskeyAllowedOrigin を渡し、空文字の場合は Session が
+// 全リクエストを 403 に倒す（Issue #231 Delta 4/6）。既存 WithSessionExchange と
+// 直交する additive Option。
 func WithSessionAllowedOrigin(allowedOrigin string) NativeAuthHandlerOption {
 	return func(h *NativeAuthHandler) {
 		h.allowedOrigin = allowedOrigin
@@ -203,9 +203,8 @@ type sessionRequest struct {
 //   - Content-Type: application/json 必須化 — cross-site の HTML form POST（simple request）を
 //     弾き、cross-origin fetch には CORS preflight を強制する。Go の json.Decoder は text/plain
 //     でも JSON をパースするため、明示検証しないと form ベース CSRF が成立し得る。
-//   - Origin allowlist — Origin ヘッダが存在する場合は許可オリジンと一致を要求する。Origin
-//     不在（same-origin proxy 経由でヘッダが落ちる等）や allowedOrigin 未配線時は検証をスキップ
-//     する（false-reject を避けるため、存在時のみ厳格化する pattern）。
+//   - Origin allowlist — allowedOrigin が非空かつ Origin が完全一致する場合だけ通す。
+//     許可 Origin 未設定・Origin 不在・不一致はすべて 403 に倒す（fail-closed）。
 func (h *NativeAuthHandler) Session(w http.ResponseWriter, r *http.Request) {
 	// CSRF 対策（Content-Type / Origin）を JSON decode より前に適用する。
 	if !hasJSONContentType(r) {
@@ -213,8 +212,8 @@ func (h *NativeAuthHandler) Session(w http.ResponseWriter, r *http.Request) {
 		middleware.WriteErrorResponse(w, http.StatusUnsupportedMediaType, unsupportedMediaTypeError())
 		return
 	}
-	if origin := r.Header.Get("Origin"); origin != "" && h.allowedOrigin != "" && origin != h.allowedOrigin {
-		// 許可オリジン以外からの cross-site POST を遮断（login CSRF 対策）。
+	if origin := r.Header.Get("Origin"); h.allowedOrigin == "" || origin == "" || origin != h.allowedOrigin {
+		// Origin を検証できない構成・不在・不一致をすべて遮断（login CSRF 対策）。
 		// origin 生値はクライアントへ反射しない（固定メッセージのみ / NFR 1.1）。
 		slog.Info("session exchange rejected: disallowed origin")
 		middleware.WriteErrorResponse(w, http.StatusForbidden, forbiddenOriginError())

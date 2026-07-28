@@ -16,6 +16,7 @@ import {
   usePasskeyRegistration,
   type PasskeyRegistrationErrorKind,
 } from "@/hooks/use-passkey-registration";
+import { usePasskeyAuthentication } from "@/hooks/use-passkey-authentication";
 
 /**
  * `PasskeySignupDialog` のプロパティ。open state は親（`LoginPage`）が管理する
@@ -26,16 +27,12 @@ export interface PasskeySignupDialogProps {
   open: boolean;
   /**
    * open 状態が変化したときのコールバック。ユーザーが Esc / 外側クリック / Close 操作で
-   * 閉じたときも `false` で呼ばれる。成功時 / session 合流失敗時は本コンポーネント内部
-   * からも `false` で呼び出す。
+   * 閉じたときも `false` で呼ばれる。成功時も本コンポーネント内部から `false` で呼び出す。
    */
   onOpenChange: (open: boolean) => void;
   /**
-   * アカウント作成（registration/finish）が成功した **後** に失敗が発生したときに呼ばれる
-   * （review #6）。session 合流失敗・作成後の WebAuthn キャンセル等が該当する。親（`LoginPage`）は
-   * これを受けて「アカウントは作成済みなのでログインへ」という復旧バナーを表示する。
-   * このケースでは Dialog を閉じ、同じユーザー名での再作成（`username_taken` を誘発）に
-   * 戻さないことで復旧導線を成立させる。
+   * 旧 post-finish エラーとの互換用 callback。`registration_uncertain` は専用 UI を
+   * Dialog 内に維持するため、この callback を呼ばない。
    */
   onAccountCreatedNeedsLogin?: () => void;
 }
@@ -45,7 +42,7 @@ export interface PasskeySignupDialogProps {
  *
  * - `cancelled` はキー不在（= 表示しない）: Requirement 2.7「画面を壊さず戻す」を UI 上で
  *   実現するため、汎用エラーとしても表示しない
- * - `session_exchange_failed`: Requirement 3.4 の汎用エラー文言
+ * - `session_exchange_failed`: 旧登録 chain との互換用汎用エラー文言
  * - `server_rejected` / `server_error` / `network_error`: Requirement 2.8 の汎用エラー文言
  *   （拒否理由の内部区別を反射しない）
  *
@@ -75,8 +72,9 @@ const ERROR_MESSAGES: Partial<Record<PasskeyRegistrationErrorKind, string>> = {
  *     - `username_taken`: 対応する重複エラー文言を alert 表示（Requirement 2.6）
  *     - `cancelled`: エラー表示なし + `mutation.reset()` で state を初期化
  *       （Requirement 2.7「画面を壊さずに戻す」）
- *     - `session_exchange_failed`: 汎用エラー文言を alert 表示し `onOpenChange(false)`
- *       で Dialog を閉じてログイン画面に復帰させる（Requirement 3.4）
+ *     - `registration_uncertain`: Dialog を維持して discoverable login を先に提示し、
+ *       finish 400 AUTHENTICATION_FAILED 後だけ再作成を提示
+ *     - `session_exchange_failed`: 旧登録 chain 互換として親のログイン復旧へ委譲
  *     - `server_rejected` / `server_error` / `network_error`: 汎用エラー文言
  *       （Requirement 2.8）
  *   - `isSuccess`: `onOpenChange(false)` で Dialog を閉じる。`AuthGuard` が
@@ -95,9 +93,27 @@ export function PasskeySignupDialog({
 }: PasskeySignupDialogProps) {
   const [username, setUsername] = useState("");
   const mutation = usePasskeyRegistration();
-  const { isPending, isError, isSuccess, error, reset } = mutation;
+  const recoveryAuthentication = usePasskeyAuthentication();
+  const {
+    isPending,
+    isError,
+    isSuccess,
+    error,
+    reset: resetRegistration,
+  } = mutation;
+  const {
+    isPending: isRecoveryPending,
+    isError: isRecoveryError,
+    error: recoveryError,
+    reset: resetRecoveryAuthentication,
+    mutate: confirmByLogin,
+  } = recoveryAuthentication;
   const errorKind: PasskeyRegistrationErrorKind | undefined = isError
     ? error?.kind
+    : undefined;
+  const registrationUncertain = errorKind === "registration_uncertain";
+  const recoveryErrorKind = isRecoveryError
+    ? recoveryError?.kind
     : undefined;
   // review #6: アカウント作成（registration/finish）成功後に発生した失敗か。
   // true のときは再作成に戻さずログイン導線へ誘導する（作成前失敗と分岐する）。
@@ -120,25 +136,34 @@ export function PasskeySignupDialog({
   // ため、再発火・二重通知は起きない。reset は「作成後失敗の後始末」であり、作成前失敗の
   // 再入力フォームへ戻すもの（旧 review #6 で回避していた挙動）とは意味が異なる。
   useEffect(() => {
-    if (isError && registered) {
+    if (isError && registered && !registrationUncertain) {
       onAccountCreatedNeedsLogin?.();
       onOpenChange(false);
-      reset();
+      resetRegistration();
     }
-  }, [isError, registered, onAccountCreatedNeedsLogin, onOpenChange, reset]);
+  }, [
+    isError,
+    registered,
+    registrationUncertain,
+    onAccountCreatedNeedsLogin,
+    onOpenChange,
+    resetRegistration,
+  ]);
 
   // Requirement 2.7: 作成前の cancelled は「画面を壊さず戻す」— エラー表示を出さず
   // mutation state を初期化する。作成後（registered）の cancelled は上の効果で扱う。
   useEffect(() => {
     if (errorKind === "cancelled" && !registered) {
-      reset();
+      resetRegistration();
     }
-  }, [errorKind, registered, reset]);
+  }, [errorKind, registered, resetRegistration]);
 
   // 作成前失敗のみインラインのエラー文言を表示する。作成後失敗（registered）は Dialog を
   // 閉じてログイン画面のバナーで案内するため、ここでは表示しない。
   const errorMessage =
-    errorKind && !registered ? ERROR_MESSAGES[errorKind] : undefined;
+    errorKind && !registered && !registrationUncertain
+      ? ERROR_MESSAGES[errorKind]
+      : undefined;
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -149,47 +174,99 @@ export function PasskeySignupDialog({
     mutation.mutate({ username: trimmed });
   };
 
+  const handleRetryRegistration = () => {
+    // 復旧ログインの古い authentication_failed を次の uncertain 表示へ持ち越さない。
+    // registration / authentication の双方を Idle へ戻してから入力フォームへ復帰する。
+    resetRegistration();
+    resetRecoveryAuthentication();
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>パスキーでアカウント作成</DialogTitle>
+          <DialogTitle>
+            {registrationUncertain
+              ? "登録が完了したかどうかを確認できませんでした"
+              : "パスキーでアカウント作成"}
+          </DialogTitle>
           <DialogDescription>
-            ユーザー名を入力し、ブラウザのパスキー作成 UI からアカウントを作成します。
+            {registrationUncertain
+              ? "通信の問題で、サーバ側の登録の成否をブラウザ側で判別できませんでした。まずはログインで確認してください。"
+              : "ユーザー名を入力し、ブラウザのパスキー作成 UI からアカウントを作成します。"}
           </DialogDescription>
         </DialogHeader>
 
-        {errorMessage && (
-          <div
-            className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm"
-            role="alert"
-          >
-            <p className="font-medium text-destructive">{errorMessage}</p>
+        {registrationUncertain ? (
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              パスキーでログインをお試しください。ユーザー名の入力は不要です。ログインが成功すれば登録は完了しています。
+            </p>
+            {recoveryErrorKind && recoveryErrorKind !== "cancelled" && (
+              <div
+                className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm"
+                role="alert"
+              >
+                <p className="font-medium text-destructive">
+                  ログインを確認できませんでした。時間をおいて再度お試しください。
+                </p>
+              </div>
+            )}
+            <DialogFooter>
+              <Button
+                type="button"
+                disabled={isRecoveryPending}
+                onClick={() => confirmByLogin()}
+              >
+                {isRecoveryPending ? "確認中..." : "ログインで確認する"}
+              </Button>
+              {recoveryErrorKind === "authentication_failed" && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={isRecoveryPending}
+                  onClick={handleRetryRegistration}
+                >
+                  再度作成する
+                </Button>
+              )}
+            </DialogFooter>
           </div>
-        )}
+        ) : (
+          <>
+            {errorMessage && (
+              <div
+                className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm"
+                role="alert"
+              >
+                <p className="font-medium text-destructive">{errorMessage}</p>
+              </div>
+            )}
 
-        <form onSubmit={handleSubmit}>
-          <div className="space-y-2">
-            <Label htmlFor="passkey-signup-username">ユーザー名</Label>
-            <Input
-              id="passkey-signup-username"
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              disabled={isPending}
-              autoFocus
-              autoComplete="username"
-            />
-          </div>
-          <DialogFooter className="mt-4">
-            <Button
-              type="submit"
-              disabled={!username.trim() || isPending}
-            >
-              {isPending ? "作成中..." : "作成"}
-            </Button>
-          </DialogFooter>
-        </form>
+            <form onSubmit={handleSubmit}>
+              <div className="space-y-2">
+                <Label htmlFor="passkey-signup-username">ユーザー名</Label>
+                <Input
+                  id="passkey-signup-username"
+                  type="text"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  disabled={isPending}
+                  autoFocus
+                  autoComplete="username"
+                />
+              </div>
+              <DialogFooter className="mt-4">
+                <Button
+                  type="submit"
+                  disabled={!username.trim() || isPending}
+                >
+                  {isPending ? "作成中..." : "作成"}
+                </Button>
+              </DialogFooter>
+            </form>
+          </>
+        )}
       </DialogContent>
     </Dialog>
   );

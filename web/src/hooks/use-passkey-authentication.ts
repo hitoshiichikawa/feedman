@@ -26,6 +26,7 @@ import type {
  */
 export type PasskeyAuthErrorKind =
   | "cancelled"
+  | "authentication_failed"
   | "server_error"
   | "server_rejected"
   | "network_error"
@@ -77,6 +78,16 @@ function isCancelledError(err: unknown): boolean {
   return err instanceof Error && CANCEL_ERROR_NAMES.has(err.name);
 }
 
+/** ApiError body から machine-readable code 文字列だけを安全に取り出す。 */
+function extractApiErrorCode(err: ApiError): string | null {
+  const body = err.body;
+  if (typeof body !== "object" || body === null || !("code" in body)) {
+    return null;
+  }
+  const code = (body as { code: unknown }).code;
+  return typeof code === "string" ? code : null;
+}
+
 /**
  * 内部例外を `PasskeyAuthError` に分類する。step index に基づき、session 交換
  * （step 5）の `ApiError` のみを `session_exchange_failed` に振り分ける
@@ -94,6 +105,15 @@ function classifyError(err: unknown, step: number): PasskeyAuthError {
     return new PasskeyAuthError("network_error");
   }
   if (err instanceof ApiError) {
+    if (
+      step === STEP_AUTH_FINISH &&
+      err.status === 400 &&
+      extractApiErrorCode(err) === "AUTHENTICATION_FAILED"
+    ) {
+      // 復旧 UI が再作成を提示してよい唯一の観察可能な失敗。
+      // raw body や credential 未解決等の内部理由は Error に含めない。
+      return new PasskeyAuthError("authentication_failed");
+    }
     if (step === STEP_SESSION_EXCHANGE) {
       // step 5 の失敗は理由に関わらず session 合流失敗に集約
       return new PasskeyAuthError("session_exchange_failed");

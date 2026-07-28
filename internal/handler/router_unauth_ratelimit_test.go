@@ -156,7 +156,14 @@ func newPasskeyRateLimitRouter(burst int) (http.Handler, *stubPasskeyRouterRegis
 	*stubPasskeyRouterAuthentication, *middleware.IPRateLimiter) {
 	reg := &stubPasskeyRouterRegistration{}
 	authn := &stubPasskeyRouterAuthentication{}
-	deps := newPasskeyRouterDeps(NewPasskeyHandler(reg, authn), nil)
+	deps := newPasskeyRouterDeps(
+		NewPasskeyHandler(
+			reg,
+			authn,
+			WithWebRegistrationSession(sessionTestAllowedOrigin, "", true, 86400),
+		),
+		nil,
+	)
 	// GET /api/passkey/capability は PasskeyHandler と NativeAuthHandler の双方が有効なときのみ
 	// 登録される（Issue #223 review #3: capability と session の有効化条件を統一）。capability の
 	// rate-limit を検証するテストが 200 を得られるよう、fully-enabled 構成として NativeAuthHandler も
@@ -164,7 +171,9 @@ func newPasskeyRateLimitRouter(burst int) (http.Handler, *stubPasskeyRouterRegis
 	deps.NativeAuthHandler = NewNativeAuthHandler(
 		&alwaysSucceedExchangeService{},
 		WithSessionExchange(&alwaysSucceedSessionExchange{}, "example.com", true, 86400),
+		WithSessionAllowedOrigin(sessionTestAllowedOrigin),
 	)
+	deps.WebPasskeyAllowedOrigin = sessionTestAllowedOrigin
 	ipRL := middleware.NewIPRateLimiter(middleware.IPRateLimiterConfig{
 		Rate:            rate.Limit(1),
 		Burst:           burst,
@@ -212,6 +221,9 @@ func passkeyUnauthRouteCases() []passkeyUnauthRouteCase {
 func doPostRateLimit(router http.Handler, path, body, remoteAddr string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	if path == "/api/auth/session" {
+		req.Header.Set("Origin", sessionTestAllowedOrigin)
+	}
 	req.RemoteAddr = remoteAddr
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -324,6 +336,7 @@ func newSessionRouteRateLimitRouter(burst int) (http.Handler, *alwaysSucceedSess
 	nh := NewNativeAuthHandler(
 		&alwaysSucceedExchangeService{},
 		WithSessionExchange(sessionSvc, "example.com", true, 86400),
+		WithSessionAllowedOrigin(sessionTestAllowedOrigin),
 	)
 	deps := newMinimalDepsForNativeAuth(nh)
 	deps.UnauthIPRateLimiter = middleware.NewIPRateLimiter(middleware.IPRateLimiterConfig{
