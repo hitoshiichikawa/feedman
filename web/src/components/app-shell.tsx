@@ -12,6 +12,7 @@ import { CrossFeedItemList } from "@/components/cross-feed-item-list";
 import { StarredItemList } from "@/components/starred-item-list";
 import { StarredNavItem } from "@/components/starred-nav-item";
 import { LogoutButton } from "@/components/logout-button";
+import { AccountSettingsDialog } from "@/components/account-settings-dialog";
 import { SearchResults } from "@/components/search-results";
 import { SubscriptionSettingsDialog } from "@/components/subscription-settings-dialog";
 import { useTheme } from "@/components/theme-provider";
@@ -96,6 +97,9 @@ export function AppShell() {
         <HeaderSearchBar />
         <div className="flex items-center gap-2">
           <ThemeToggle />
+          {/* Req 1.1: アカウント設定入口。認証済みの AppShell 配下でのみ描画されるため、
+              未認証時は AuthGuard が LoginPage に切替えて本入口も表示されない（Req 1.3）。 */}
+          <AccountSettingsDialog />
           <LogoutButton />
         </div>
       </header>

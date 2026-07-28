@@ -83,6 +83,20 @@ const CROSS_FEED_SINCE_TIME = "2026-05-26T10:00:00Z";
 /** mockFetchの設定ヘルパー */
 function setupMockFetch() {
   mockFetch.mockImplementation((url: string, options?: RequestInit) => {
+    // AccountSettingsDialog が開かれた際に useCurrentUser が発行する GET /auth/me。
+    // AppShell 自体は認証済み前提で render されるため、ここでは常に成功応答を返し、
+    // ダイアログ内容が安定して描画される状態を担保する。
+    if (url === "/auth/me") {
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          id: "user-1",
+          email: "test@example.com",
+          name: "Test User",
+          created_at: "2026-01-01T00:00:00Z",
+        }),
+      });
+    }
     if (url === "/api/subscriptions") {
       return Promise.resolve({
         ok: true,
@@ -205,6 +219,46 @@ describe("AppShell コンポーネント", () => {
     await waitFor(() => {
       expect(screen.getByText("Feedman")).toBeInTheDocument();
     });
+  });
+
+  it("ヘッダーにアカウント設定入口が表示されること (Req 1.1 / NFR 1.3)", async () => {
+    render(<AppShell />, { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("account-settings-trigger")
+      ).toBeInTheDocument();
+    });
+
+    // 既存ヘッダー機能（ログアウト・テーマ切替）を破壊していないこと（NFR 1.3）
+    expect(screen.getByRole("button", { name: "ログアウト" })).toBeInTheDocument();
+    expect(screen.getByTestId("theme-toggle")).toBeInTheDocument();
+  });
+
+  it("アカウント設定入口クリックで情報表示領域と退会導線を含むダイアログが開くこと (Req 1.2)", async () => {
+    const user = userEvent.setup();
+    render(<AppShell />, { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("account-settings-trigger")
+      ).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByTestId("account-settings-trigger"));
+
+    await waitFor(() => {
+      expect(screen.getByText("アカウント設定")).toBeInTheDocument();
+    });
+    // アカウント情報表示領域と退会導線が同時に描画される
+    expect(screen.getByTestId("account-info-section")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("account-withdraw-section")
+    ).toBeInTheDocument();
+    // 現在ログイン中の表示名 (Req 2.1)
+    expect(screen.getByTestId("account-info-name")).toHaveTextContent(
+      "Test User"
+    );
   });
 
   it("左ペイン先頭に StarredNavItem「お気に入り」項目が表示されること（Req 1.1 / 1.3）", async () => {
