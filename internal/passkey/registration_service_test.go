@@ -70,8 +70,11 @@ func (a *stubWebAuthnAdapter) BeginLogin() ([]byte, []byte, []byte, error) {
 
 func (a *stubWebAuthnAdapter) FinishLogin(sessionData []byte, requestBody []byte,
 	credentialLookup func(credentialID []byte) (WebAuthnUser, *ParsedCredential, error),
-) ([]byte, []byte, uint32, error) {
-	return nil, nil, 0, errors.New("FinishLogin not used in registration tests")
+) ([]byte, []byte, uint32, bool, error) {
+	// Issue #234 task 3 compile glue: WebAuthnAdapter interface に updatedBackupState を
+	// 追加したため、本 stub もシグネチャを合わせる必要がある（no-op 実装のまま）。
+	// 挙動は不変。
+	return nil, nil, 0, false, errors.New("FinishLogin not used in registration tests")
 }
 
 // stubChallengeStoreForRegistration は RegistrationService の challengeStore 依存を

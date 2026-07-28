@@ -31,11 +31,13 @@ import (
 // error を返す no-op として実装する。
 type stubAuthnAdapter struct {
 	beginLoginFn func() ([]byte, []byte, []byte, error)
-	// finishLoginFn は library の挙動（lookup 呼び出し + 成否 + updatedSignCount）を
-	// 模擬する。test 側で lookup を呼びたい場合はここで credentialLookup(...) を実行する。
+	// finishLoginFn は library の挙動（lookup 呼び出し + 成否 + updatedSignCount +
+	// updatedBackupState）を模擬する。test 側で lookup を呼びたい場合はここで
+	// credentialLookup(...) を実行する。updatedBackupState は Issue #234 task 3 で追加した
+	// 4 番目の戻り値（Req 4.2 / Flags.BackupState 最新化）。
 	finishLoginFn func(sessionData, requestBody []byte,
 		lookup func(credentialID []byte) (WebAuthnUser, *ParsedCredential, error),
-	) ([]byte, []byte, uint32, error)
+	) ([]byte, []byte, uint32, bool, error)
 
 	beginLoginCalled  int
 	finishLoginCalled int
@@ -64,13 +66,13 @@ func (a *stubAuthnAdapter) BeginLogin() ([]byte, []byte, []byte, error) {
 
 func (a *stubAuthnAdapter) FinishLogin(sessionData []byte, requestBody []byte,
 	lookup func(credentialID []byte) (WebAuthnUser, *ParsedCredential, error),
-) ([]byte, []byte, uint32, error) {
+) ([]byte, []byte, uint32, bool, error) {
 	a.finishLoginCalled++
 	a.lastSessionData = sessionData
 	if a.finishLoginFn != nil {
 		return a.finishLoginFn(sessionData, requestBody, lookup)
 	}
-	return nil, nil, 0, errors.New("finishLoginFn not configured")
+	return nil, nil, 0, false, errors.New("finishLoginFn not configured")
 }
 
 // stubChallengeStoreForAuthn は challengeStore interface（本 package 内 unexported）を
@@ -370,19 +372,22 @@ func TestAuthenticationService_BeginAuthentication(t *testing.T) {
 func buildSuccessfulFinishLogin(presentedCredentialID []byte, updatedSignCount uint32) func(
 	sessionData, requestBody []byte,
 	lookup func(credentialID []byte) (WebAuthnUser, *ParsedCredential, error),
-) ([]byte, []byte, uint32, error) {
+) ([]byte, []byte, uint32, bool, error) {
 	return func(sessionData, requestBody []byte,
 		lookup func(credentialID []byte) (WebAuthnUser, *ParsedCredential, error),
-	) ([]byte, []byte, uint32, error) {
+	) ([]byte, []byte, uint32, bool, error) {
 		user, parsed, err := lookup(presentedCredentialID)
 		if err != nil {
 			// adapter は lookup エラーを ErrAuthenticationFailed に正規化する仕様
-			return nil, nil, 0, ErrAuthenticationFailed
+			return nil, nil, 0, false, ErrAuthenticationFailed
 		}
 		if user == nil || parsed == nil {
-			return nil, nil, 0, ErrAuthenticationFailed
+			return nil, nil, 0, false, ErrAuthenticationFailed
 		}
-		return user.WebAuthnID(), parsed.ID, updatedSignCount, nil
+		// updatedBackupState は Issue #234 task 3 で追加された 4 番目の戻り値。
+		// 本 helper は成功経路のみを扱い、updatedBackupState=false の固定値で返す
+		// （BS 最新化の検証は task 5 で stub adapter を経由して追加する）。
+		return user.WebAuthnID(), parsed.ID, updatedSignCount, false, nil
 	}
 }
 
@@ -579,10 +584,10 @@ func TestAuthenticationService_FinishAuthentication(t *testing.T) {
 		// adapter が CloneWarning などで ErrAuthenticationFailed を返すケース
 		adapter.finishLoginFn = func(sessionData, requestBody []byte,
 			lookup func(credentialID []byte) (WebAuthnUser, *ParsedCredential, error),
-		) ([]byte, []byte, uint32, error) {
+		) ([]byte, []byte, uint32, bool, error) {
 			// lookup は呼ぶが最終的に counter 後退で reject
 			_, _, _ = lookup(credentialID)
-			return nil, nil, 0, ErrAuthenticationFailed
+			return nil, nil, 0, false, ErrAuthenticationFailed
 		}
 
 		// Act

@@ -54,6 +54,44 @@
     と同時に、残置した `*PostgresPasskeyCredentialRepo.UpdateSignCount` メソッドを除去する。
   - task 6: E2E で BE=1 / BE=0 双方の regression と DB sanity。
 
+### Task 3
+
+- **採用方針**: `ParsedCredential` に `BackupEligible` / `BackupState` を追加し
+  `toParsedCredential` で `cred.Flags.BackupEligible` / `cred.Flags.BackupState` を propagate。
+  `WebAuthnAdapter.FinishLogin` の戻り値に `updatedBackupState bool` を
+  `updatedSignCount` の直後・`err` の直前へ挿入し、`GoWebAuthnAdapter.FinishLogin` 実装は
+  すべての early return を 5 値化・成功 return で `cred.Flags.BackupState` を返す。
+  `authentication_service.go` は task 5 の boundary を尊重し `_, _, updatedSignCount, _, err := ...`
+  の暫定接続にとどめる（task 5 で `UpdateAuthenticationState` へ実配線予定）。
+- **重要な判断**:
+  - **stored BE/BS 反映が login 一致判定の核心**: go-webauthn v0.17.4 の login.go:371 が
+    `credential.Flags.BackupEligible != assertion の BE` で reject するため、service 層の lookup が
+    返す `webauthn.Credential.Flags` に stored BE/BS を反映する経路が必須。本 task では adapter test の
+    `loginUser` credential 側で `Flags: webauthn.CredentialFlags{BackupEligible, BackupState}` を明示的に
+    設定して canonical 経路を通した（既存 BE=0 テストでも propagate 経路を通しておく方針で、
+    task 5 の service 側配線に自然につながる）。
+  - **`updatedBackupState` の意味**: library は `ValidateDiscoverableLogin` 末尾で
+    `cred.Flags = NewCredentialFlags(assertion.AuthenticatorData.Flags)` を実行するため、
+    `cred.Flags.BackupState` は assertion 由来の最新 BS になる（Req 4.2 の観測点）。BE は不変契約
+    （Req 4.3）のため adapter は `updatedBackupEligible` を返さない設計を interface レベルで固定。
+  - **virtualwebauthn v1.0.5 の BE=1 synthetic 経路確認**: `AuthenticatorOptions.BackupEligible=true` /
+    `BackupState=true` で BE=1/BS=1 の authenticator が生成でき、
+    `TestWebAuthnAdapter_RegisterAndLoginRoundTrip_BackupEligible` で登録 → 認証 → `updatedBackupState=true`
+    まで一貫して通ることを実測確認（本 test は Req 1.1 / 1.3 / 2.1〜2.3 / 3.1 / 4.2 の regression 保険）。
+- **残存課題 / 次 task 申し送り**:
+  - task 4: `registration_service.go` の `FinishRegistrationNew` / `FinishAddCredential` で
+    `parsed.BackupEligible` / `parsed.BackupState` を `PasskeyCredential` に反映して永続化する
+    （interface / adapter は本 task で準備済み）。
+  - task 5: `authentication_service.go` の以下を同時に切替 —
+    (a) lookup closure の `webauthn.Credential` に `Flags: webauthn.CredentialFlags{BackupEligible: cred.BackupEligible, BackupState: cred.BackupState}` を追加、
+    (b) `_, _, updatedSignCount, _, err := s.adapter.FinishLogin(...)` を `_, _, updatedSignCount, updatedBackupState, err := ...` へ変更、
+    (c) `s.credentials.UpdateSignCount(...)` を `s.credentials.UpdateAuthenticationState(..., updatedBackupState, ...)` へ差し替え、
+    (d) `PasskeyCredentialReader` narrow interface から `UpdateSignCount` を除去し `UpdateAuthenticationState` を追加、
+    (e) task 2 で残置した `*PostgresPasskeyCredentialRepo.UpdateSignCount` メソッド本体を除去、
+    (f) `stubCredentialReader` を `UpdateAuthenticationState` に置換して backupState 検証を追加、
+    (g) `buildSuccessfulFinishLogin` の 4 番目戻り値を `updatedBackupState` 制御可能に拡張。
+  - task 6: E2E で `authenticator.Options.BackupEligible = true` を先に設定した BE=1 経路を実測。
+
 ## 確認事項
 
 - **task 2 と task 5 の boundary スコープ不整合（Issue #234 task 2 実装時に検出）**:
@@ -84,6 +122,36 @@
     実装の `UpdateSignCount` メソッドを併せて除去すること（そうしないと orphan メソッドが残る）。
     合わせて `PasskeyCredentialReader` narrow interface からも `UpdateSignCount` を除去し
     `UpdateAuthenticationState` を追加する必要がある。
+
+- **task 3 の compile glue が `registration_service_test.go` に及んだ範囲（Issue #234 task 3 実装時に検出）**:
+  - **事象**: task 3 の触れてよいファイルリストは
+    `webauthn_adapter.go` / `webauthn_adapter_test.go` / `authentication_service.go` / `authentication_service_test.go`
+    の 4 つと明記されているが、`WebAuthnAdapter.FinishLogin` interface のシグネチャ変更
+    （4 値 → 5 値）に伴い、`registration_service_test.go` の `stubWebAuthnAdapter.FinishLogin`
+    メソッドが interface を満たさなくなり `go vet ./...` が fail する状態になった
+    （stub 実装は WebAuthnAdapter interface を構造的に実装しているため、interface 変更に追従が必須）。
+  - **対応**: tasks.md 冒頭の「各タスクはコンパイル・既存テストを壊さない」不変条件を優先し、
+    `registration_service_test.go:71-75` の stub `FinishLogin` シグネチャのみを 5 値化する
+    最小限の compile glue を適用した（挙動は不変：`nil, nil, 0, false, errors.New("...")` を返す）。
+    task 3 スコープ内の他の変更（`ParsedCredential` フィールド追加や
+    `toParsedCredential` の反映）は `registration_service_test.go` に持ち込んでいない。
+  - **task 4 への申し送り**: registration service 側の behavior 追加
+    （`FinishRegistrationNew` / `FinishAddCredential` の `parsed.BackupEligible` /
+    `parsed.BackupState` 反映 + stub credential writer の受け取り値検証）は task 4 で行うこと。
+    task 3 では stub の compile 整合のみを触っており、テストの assertion 追加は行っていない。
+
+- **既存 `internal/**` 配下の gofmt 差分について**:
+  - **事象**: task 3 着手時点で `gofmt -l internal/` が
+    `internal/crossfeed/service_test.go` / `internal/handler/*` / `internal/hatebu/batch.go` /
+    `internal/itemsearch/*` / `internal/middleware/ratelimit_test.go` / `internal/model/item.go` /
+    `internal/security/content_sanitizer_test.go` の 11 ファイルを不整形として報告する状態になっている
+    （task 2 marker commit 時点で既に発生していた既存差分）。
+  - **対応**: task 3 の boundary は `internal/passkey/` に閉じているため、他パッケージの gofmt 適用は
+    行っていない。`gofmt -l internal/passkey/` は clean。tasks.md の Verify block
+    （`test -z "$(gofmt -l internal/)"` を最終条件に含む）は本差分の影響で fail する可能性が
+    あるが、これは task 3 の boundary 外の pre-existing debt であり、PM / Architect の判断が
+    必要（別 refactor Issue で一括修正するか、既存 spec の Verify block を per-package
+    範囲に絞るかを検討）。task 3 の全 verification は passkey パッケージ内で green を確認した。
 
 ## 検証結果
 

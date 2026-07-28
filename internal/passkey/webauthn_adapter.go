@@ -43,6 +43,12 @@ type ParsedCredential struct {
 	AAGUID []byte
 	// Transports は "internal" / "usb" / "nfc" / "ble" 等の transport 名リスト。
 	Transports []string
+	// BackupEligible は WebAuthn CredentialFlags.BackupEligible。登録時に authenticator が
+	// 報告した値を永続化し、認証時の flag 一致判定に用いる（Issue #234 / Req 1.1〜1.4 / 2.1〜2.3）。
+	BackupEligible bool
+	// BackupState は WebAuthn CredentialFlags.BackupState。登録時に authenticator が
+	// 報告した値を永続化し、認証成功時には検証層が返す最新値へ更新される（Req 4.2）。
+	BackupState bool
 }
 
 // WebAuthnAdapter は service 層へ公開する adapter interface である。
@@ -72,14 +78,22 @@ type WebAuthnAdapter interface {
 	// allowCredentials 空 = Req 2.6 の存在有無非開示に整合）。
 	BeginLogin() (options []byte, sessionData []byte, rawChallenge []byte, err error)
 
-	// FinishLogin は認証応答を検証し、userHandle / credentialID / 更新後 SignCount を返す。
+	// FinishLogin は認証応答を検証し、userHandle / credentialID / 更新後 SignCount /
+	// 更新後 BackupState を返す。
 	// credentialLookup は raw credentialID から (User, ParsedCredential, error) を返す
 	// callback で、service 層が repository を用いて解決する。counter 後退（library の
 	// Authenticator.CloneWarning）は ErrAuthenticationFailed に正規化して返す
 	// （NFR 1.4）。
+	//
+	// go-webauthn v0.17.4 の login validation（webauthn/login.go:371）は stored credential
+	// と assertion の BackupEligible の一致を要求する。そのため service 層は lookup で
+	// stored BE/BS を反映した webauthn.Credential.Flags を返す責務を持つ（Issue #234 /
+	// Req 2.1〜2.3）。updatedBackupState は ValidateDiscoverableLogin 成功後に library が
+	// NewCredentialFlags(assertion.AuthenticatorData.Flags) で更新した cred.Flags.BackupState
+	// を返し、service 層が永続化 UPDATE に用いる（Req 4.2）。
 	FinishLogin(sessionData []byte, requestBody []byte,
 		credentialLookup func(credentialID []byte) (WebAuthnUser, *ParsedCredential, error),
-	) (userHandle []byte, credentialID []byte, updatedSignCount uint32, err error)
+	) (userHandle []byte, credentialID []byte, updatedSignCount uint32, updatedBackupState bool, err error)
 }
 
 // GoWebAuthnAdapter は WebAuthnAdapter の go-webauthn/webauthn 実装である。
@@ -172,23 +186,29 @@ func (a *GoWebAuthnAdapter) BeginLogin() ([]byte, []byte, []byte, error) {
 }
 
 // FinishLogin は assertion 応答を検証し、認証成功時の (userHandle, credentialID,
-// updatedSignCount) を返す。
+// updatedSignCount, updatedBackupState) を返す。
 //
 // credentialLookup callback は library から (rawID, userHandle) で呼ばれ、当該
 // credential を持つ User を返す責務を持つ。lookup が error を返した場合や、
 // library が rejection（不正 assertion / user 未解決）を返した場合、counter 後退
 // （Authenticator.CloneWarning）を検出した場合はいずれも ErrAuthenticationFailed に
 // 正規化する（Req 2.5 / 2.6 / NFR 1.4）。
+//
+// updatedBackupState は ValidateDiscoverableLogin 成功後の cred.Flags.BackupState を
+// 返す。library は login.go 末尾で NewCredentialFlags(assertion.AuthenticatorData.Flags)
+// によって Flags を assertion 由来の最新値へ更新するため、これが再認証時点の観測 BS と
+// なる（Issue #234 / Req 4.2）。BE は保存時の値を不変で保持する契約であり、adapter は
+// updatedBackupEligible を返さない（Req 4.3）。
 func (a *GoWebAuthnAdapter) FinishLogin(sessionData []byte, requestBody []byte,
 	credentialLookup func(credentialID []byte) (WebAuthnUser, *ParsedCredential, error),
-) ([]byte, []byte, uint32, error) {
+) ([]byte, []byte, uint32, bool, error) {
 	session, err := unmarshalSession(sessionData)
 	if err != nil {
-		return nil, nil, 0, ErrAuthenticationFailed
+		return nil, nil, 0, false, ErrAuthenticationFailed
 	}
 	parsed, err := protocol.ParseCredentialRequestResponseBytes(requestBody)
 	if err != nil {
-		return nil, nil, 0, ErrAuthenticationFailed
+		return nil, nil, 0, false, ErrAuthenticationFailed
 	}
 
 	// discoverable login では library が credential ID / user handle を渡してくる
@@ -208,18 +228,18 @@ func (a *GoWebAuthnAdapter) FinishLogin(sessionData []byte, requestBody []byte,
 
 	cred, err := a.wa.ValidateDiscoverableLogin(handler, *session, parsed)
 	if err != nil {
-		return nil, nil, 0, ErrAuthenticationFailed
+		return nil, nil, 0, false, ErrAuthenticationFailed
 	}
 	// NFR 1.4: SignCount 後退（clone 疑い）は成功扱いにしない。
 	if cred.Authenticator.CloneWarning {
-		return nil, nil, 0, ErrAuthenticationFailed
+		return nil, nil, 0, false, ErrAuthenticationFailed
 	}
 	if resolvedUser == nil {
 		// Validate が成功したが lookup callback が呼ばれなかった場合の防衛的分岐。
 		// 実行時到達は想定していないが、silent 成功を避けるため拒否側に倒す。
-		return nil, nil, 0, ErrAuthenticationFailed
+		return nil, nil, 0, false, ErrAuthenticationFailed
 	}
-	return resolvedUser.WebAuthnID(), cred.ID, cred.Authenticator.SignCount, nil
+	return resolvedUser.WebAuthnID(), cred.ID, cred.Authenticator.SignCount, cred.Flags.BackupState, nil
 }
 
 // marshalBeginResults は Begin* 系の返り値（options 構造体と SessionData）を
@@ -267,6 +287,8 @@ func toParsedCredential(cred *webauthn.Credential) *ParsedCredential {
 		AttestationType: cred.AttestationType,
 		AAGUID:          cred.Authenticator.AAGUID,
 		Transports:      transports,
+		BackupEligible:  cred.Flags.BackupEligible,
+		BackupState:     cred.Flags.BackupState,
 	}
 }
 

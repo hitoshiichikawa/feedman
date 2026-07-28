@@ -109,6 +109,15 @@ func TestWebAuthnAdapter_RegisterAndLoginRoundTrip(t *testing.T) {
 	if len(parsed.PublicKey) == 0 {
 		t.Error("FinishRegistration: parsed.PublicKey is empty")
 	}
+	// Issue #234 task 3: default synthetic authenticator は BackupEligible=false /
+	// BackupState=false を報告するため、parsed 側にも false が propagate されることを確認する
+	// （Req 1.4 / 2.3 の BE=0 baseline）。
+	if parsed.BackupEligible {
+		t.Errorf("parsed.BackupEligible = true, want false (default synthetic authenticator reports BE=0)")
+	}
+	if parsed.BackupState {
+		t.Errorf("parsed.BackupState = true, want false (default synthetic authenticator reports BS=0)")
+	}
 
 	// === Login ceremony (discoverable) ===
 	// Set the user handle on the mock authenticator so it echos it in the assertion.
@@ -131,7 +140,9 @@ func TestWebAuthnAdapter_RegisterAndLoginRoundTrip(t *testing.T) {
 	assertionResp := virtualwebauthn.CreateAssertionResponse(testRP, authenticator, credEC2, *assOpts)
 
 	// Reconstruct a webauthn.Credential for the login user so ValidateDiscoverableLogin
-	// can look it up and verify the signature.
+	// can look it up and verify the signature. Issue #234: Flags には stored BE/BS を
+	// 反映する（本ケースでは BE=0/BS=0 なので既存挙動と等価だが、library の BE 一致判定
+	// [login.go:371] を通す canonical 経路として明示的に設定する）。
 	loginUser := &testUser{
 		id:          user.WebAuthnID(),
 		name:        user.name,
@@ -140,6 +151,10 @@ func TestWebAuthnAdapter_RegisterAndLoginRoundTrip(t *testing.T) {
 			{
 				ID:        parsed.ID,
 				PublicKey: parsed.PublicKey,
+				Flags: webauthn.CredentialFlags{
+					BackupEligible: parsed.BackupEligible,
+					BackupState:    parsed.BackupState,
+				},
 				Authenticator: webauthn.Authenticator{
 					AAGUID:    parsed.AAGUID,
 					SignCount: parsed.SignCount,
@@ -156,7 +171,7 @@ func TestWebAuthnAdapter_RegisterAndLoginRoundTrip(t *testing.T) {
 	}
 
 	// Act — FinishLogin
-	userHandle, credentialID, updatedSignCount, err := adapter.FinishLogin(loginSession, []byte(assertionResp), lookup)
+	userHandle, credentialID, updatedSignCount, updatedBackupState, err := adapter.FinishLogin(loginSession, []byte(assertionResp), lookup)
 	if err != nil {
 		t.Fatalf("FinishLogin: %v", err)
 	}
@@ -170,6 +185,129 @@ func TestWebAuthnAdapter_RegisterAndLoginRoundTrip(t *testing.T) {
 	}
 	if updatedSignCount != credEC2.Counter {
 		t.Errorf("updatedSignCount: got %d, want %d", updatedSignCount, credEC2.Counter)
+	}
+	// Issue #234 task 3 / Req 4.2: BE=0/BS=0 default synthetic authenticator に対しては
+	// updatedBackupState=false が返る（library が assertion から更新した Flags.BackupState を反映）。
+	if updatedBackupState {
+		t.Errorf("updatedBackupState = true, want false (BE=0/BS=0 default authenticator)")
+	}
+}
+
+// TestWebAuthnAdapter_RegisterAndLoginRoundTrip_BackupEligible は Issue #234 の中核 regression。
+//
+// BackupEligible=1 / BackupState=1 を報告する synthetic authenticator（virtualwebauthn
+// v1.0.5 の AuthenticatorOptions.BackupEligible/BackupState）で登録 → 認証を通し、
+// 以下を検証する:
+//   - 登録時に parsed.BackupEligible=true / parsed.BackupState=true が propagate される (Req 1.1, 1.3)
+//   - login の lookup で返す webauthn.Credential.Flags に stored BE/BS を反映すれば
+//     library の BE 一致判定 (login.go:371) を通過し、認証が成功する (Req 2.1, 2.2, 3.1)
+//   - FinishLogin の戻り値 updatedBackupState=true が assertion 由来の最新 BS を反映する (Req 4.2)
+//
+// このテストが green にならないと、実ブラウザで登録された同期パスキー（BE=1）は library
+// の "Backup Eligible flag inconsistency detected" で必ず reject されるため、本 spec の
+// 修正が意味を持つ CI 保険となる。
+func TestWebAuthnAdapter_RegisterAndLoginRoundTrip_BackupEligible(t *testing.T) {
+	// Arrange — BE=1/BS=1 authenticator を用いる
+	adapter := newTestAdapter(t)
+	user := &testUser{
+		id:          []byte("user-handle-bob"),
+		name:        "bob",
+		displayName: "Bob",
+	}
+	authenticator := virtualwebauthn.NewAuthenticator()
+	authenticator.Options.BackupEligible = true
+	authenticator.Options.BackupState = true
+	credEC2 := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
+
+	// === Registration ceremony ===
+	optionsJSON, sessionData, _, err := adapter.BeginRegistration(user, nil)
+	if err != nil {
+		t.Fatalf("BeginRegistration: %v", err)
+	}
+	attOpts, err := virtualwebauthn.ParseAttestationOptions(string(optionsJSON))
+	if err != nil {
+		t.Fatalf("ParseAttestationOptions: %v", err)
+	}
+	attestationResp := virtualwebauthn.CreateAttestationResponse(testRP, authenticator, credEC2, *attOpts)
+
+	// Act — FinishRegistration
+	parsed, err := adapter.FinishRegistration(user, sessionData, []byte(attestationResp))
+	if err != nil {
+		t.Fatalf("FinishRegistration: %v", err)
+	}
+
+	// Assert (registration) — BE=1/BS=1 が parsed に propagate される (Req 1.1, 1.3)
+	if !parsed.BackupEligible {
+		t.Errorf("parsed.BackupEligible = false, want true (authenticator reports BE=1)")
+	}
+	if !parsed.BackupState {
+		t.Errorf("parsed.BackupState = false, want true (authenticator reports BS=1)")
+	}
+
+	// === Login ceremony (discoverable) ===
+	authenticator.Options.UserHandle = user.WebAuthnID()
+	credEC2.Counter = parsed.SignCount + 1
+	authenticator.AddCredential(credEC2)
+
+	loginOptions, loginSession, _, err := adapter.BeginLogin()
+	if err != nil {
+		t.Fatalf("BeginLogin: %v", err)
+	}
+	assOpts, err := virtualwebauthn.ParseAssertionOptions(string(loginOptions))
+	if err != nil {
+		t.Fatalf("ParseAssertionOptions: %v", err)
+	}
+	assertionResp := virtualwebauthn.CreateAssertionResponse(testRP, authenticator, credEC2, *assOpts)
+
+	// 核心: lookup で返す webauthn.Credential.Flags に stored BE/BS を **必ず** 反映する。
+	// これを設定しないと library の BE 一致判定 (login.go:371 "Backup Eligible flag
+	// inconsistency detected") で必ず reject され、認証は成立しない（本 fix の直接原因）。
+	loginUser := &testUser{
+		id:          user.WebAuthnID(),
+		name:        user.name,
+		displayName: user.displayName,
+		creds: []webauthn.Credential{
+			{
+				ID:        parsed.ID,
+				PublicKey: parsed.PublicKey,
+				Flags: webauthn.CredentialFlags{
+					BackupEligible: parsed.BackupEligible,
+					BackupState:    parsed.BackupState,
+				},
+				Authenticator: webauthn.Authenticator{
+					AAGUID:    parsed.AAGUID,
+					SignCount: parsed.SignCount,
+				},
+			},
+		},
+	}
+	lookup := func(credentialID []byte) (WebAuthnUser, *ParsedCredential, error) {
+		if !bytesEqual(credentialID, parsed.ID) {
+			return nil, nil, errors.New("credential id mismatch")
+		}
+		return loginUser, parsed, nil
+	}
+
+	// Act — FinishLogin
+	userHandle, credentialID, updatedSignCount, updatedBackupState, err := adapter.FinishLogin(loginSession, []byte(assertionResp), lookup)
+	if err != nil {
+		t.Fatalf("FinishLogin: %v (BE=1 authenticator should authenticate successfully when stored BE/BS is reflected)", err)
+	}
+
+	// Assert (login)
+	if !bytesEqual(userHandle, user.WebAuthnID()) {
+		t.Errorf("userHandle mismatch: got %q, want %q", userHandle, user.WebAuthnID())
+	}
+	if !bytesEqual(credentialID, parsed.ID) {
+		t.Errorf("credentialID mismatch: got %x, want %x", credentialID, parsed.ID)
+	}
+	if updatedSignCount != credEC2.Counter {
+		t.Errorf("updatedSignCount: got %d, want %d", updatedSignCount, credEC2.Counter)
+	}
+	// Req 4.2: 認証成功時の updatedBackupState は library が assertion から反映した
+	// 最新の Flags.BackupState を返す。BE=1/BS=1 authenticator では BS=1 のまま。
+	if !updatedBackupState {
+		t.Errorf("updatedBackupState = false, want true (BE=1/BS=1 authenticator reports BS=1)")
 	}
 }
 
@@ -232,7 +370,7 @@ func TestWebAuthnAdapter_FinishLogin_DetectsCounterRegression(t *testing.T) {
 	}
 
 	// Act
-	_, _, _, err = adapter.FinishLogin(loginSession, []byte(assertionResp), lookup)
+	_, _, _, _, err = adapter.FinishLogin(loginSession, []byte(assertionResp), lookup)
 
 	// Assert
 	if !errors.Is(err, ErrAuthenticationFailed) {
@@ -270,7 +408,7 @@ func TestWebAuthnAdapter_FinishLogin_RejectsMalformedBody(t *testing.T) {
 	}
 
 	// Act
-	_, _, _, err = adapter.FinishLogin(sessionData, []byte("not-a-json"), lookup)
+	_, _, _, _, err = adapter.FinishLogin(sessionData, []byte("not-a-json"), lookup)
 
 	// Assert
 	if !errors.Is(err, ErrAuthenticationFailed) {
@@ -300,7 +438,7 @@ func TestWebAuthnAdapter_FinishLogin_RejectsEmptySessionData(t *testing.T) {
 	}
 
 	// Act
-	_, _, _, err := adapter.FinishLogin(nil, []byte(`{"id":"x"}`), lookup)
+	_, _, _, _, err := adapter.FinishLogin(nil, []byte(`{"id":"x"}`), lookup)
 
 	// Assert
 	if !errors.Is(err, ErrAuthenticationFailed) {

@@ -293,7 +293,11 @@ func (s *AuthenticationService) FinishAuthentication(
 		return wu, parsed, nil
 	}
 
-	_, _, updatedSignCount, err := s.adapter.FinishLogin(envelope.WebAuthnSession, requestBody, lookup)
+	// Issue #234 task 3: FinishLogin の戻り値に updatedBackupState を追加。task 3 では
+	// interface / adapter 実装を新シグネチャに揃える compile glue のみを行い、値は "_" で
+	// 捨てる暫定接続とする。task 5 で lookup closure の Flags 反映と併せて
+	// UpdateAuthenticationState への実配線に切り替える。
+	_, _, updatedSignCount, _, err := s.adapter.FinishLogin(envelope.WebAuthnSession, requestBody, lookup)
 	if err != nil {
 		s.logRejection("passkey authentication finish rejected: webauthn assertion",
 			shortID(challengeID))
