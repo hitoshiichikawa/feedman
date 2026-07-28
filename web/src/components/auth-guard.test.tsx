@@ -2,6 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthGuard } from "./auth-guard";
+import { AccountSettingsDialog } from "./account-settings-dialog";
 import type { ReactNode } from "react";
 
 // グローバルfetchのモック
@@ -90,6 +91,67 @@ describe("AuthGuard コンポーネント", () => {
     // ログインページへのリダイレクトが発生すること
     await waitFor(() => {
       expect(screen.getByTestId("auth-redirect")).toBeInTheDocument();
+    });
+  });
+
+  it("未認証時はアカウント設定入口 (children 内の AccountSettingsDialog) が render されないこと (Req 1.3)", async () => {
+    mockFetch.mockImplementation((url: string) => {
+      if (url === "/auth/me") {
+        return Promise.resolve({
+          ok: false,
+          status: 401,
+          json: async () => ({ message: "Unauthorized" }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    render(
+      <AuthGuard>
+        <AccountSettingsDialog />
+      </AuthGuard>,
+      { wrapper: createWrapper() }
+    );
+
+    // ログイン画面が表示されるまで待つ
+    await waitFor(() => {
+      expect(screen.getByTestId("auth-redirect")).toBeInTheDocument();
+    });
+
+    // AccountSettingsDialog のトリガーは描画されない（AuthGuard により children が
+    // render されないため、Req 1.3「未認証状態で入口を表示しない」が満たされる）
+    expect(
+      screen.queryByTestId("account-settings-trigger")
+    ).not.toBeInTheDocument();
+  });
+
+  it("認証済み時はアカウント設定入口 (children 内の AccountSettingsDialog) が render されること (Req 1.1)", async () => {
+    mockFetch.mockImplementation((url: string) => {
+      if (url === "/auth/me") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            id: "user-1",
+            email: "test@example.com",
+            name: "Test User",
+            created_at: "2026-01-01T00:00:00Z",
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    render(
+      <AuthGuard>
+        <AccountSettingsDialog />
+      </AuthGuard>,
+      { wrapper: createWrapper() }
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("account-settings-trigger")
+      ).toBeInTheDocument();
     });
   });
 
