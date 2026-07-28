@@ -77,7 +77,7 @@ describe("useFeeds", () => {
     // /api/subscriptions への呼び出しがあること
     expect(mockFetch).toHaveBeenCalledWith("/api/subscriptions", {
       method: "GET",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
       credentials: "include",
     });
   });
