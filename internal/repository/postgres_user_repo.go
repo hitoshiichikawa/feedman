@@ -106,12 +106,24 @@ func (r *PostgresUserRepo) FindByNormalizedUsername(ctx context.Context, normali
 // （Req 1.4）。email 空文字を許容し、リカバリ用メールなしのユーザー作成に対応する
 // （Req 1.6）。NFR 1.2: エラーメッセージには username / email の値を含めない。
 //
+// 実体は CreateUserOnlyExec に委譲し、非トランザクション時は *sql.DB を渡す。
+// 共有トランザクション上で INSERT したい場合は CreateUserOnlyExec を直接呼ぶ
+// （Issue #230 / Req 1.1〜1.6: 新規パスキー登録 finish の 1 tx 化に用いる）。
+func (r *PostgresUserRepo) CreateUserOnly(ctx context.Context, u *model.User) error {
+	return r.CreateUserOnlyExec(ctx, r.db, u)
+}
+
+// CreateUserOnlyExec は指定の DBTX（*sql.DB または共有トランザクション）上で
+// identity を持たないユーザー行を INSERT する（Issue #216 / Req 1.2 / 1.6、
+// Issue #230 / Req 1.1〜1.6 / NFR 1.1 の 1 tx 化サポート）。
+//
+// パラメータ変換と ErrUsernameTaken マッピングは CreateUserOnly と同一。
 // pq.Error による 23505 判定は、当該 INSERT で発生し得る UNIQUE 制約が
 // `idx_users_username_normalized`（部分 UNIQUE）のみである前提で、23505 を
 // ErrUsernameTaken に対応させる。将来 users テーブルに他 UNIQUE 制約が追加された
 // 場合は pq.Error.Constraint 名で分岐する必要があるため、その場合は本 doc comment を
 // 更新すること。
-func (r *PostgresUserRepo) CreateUserOnly(ctx context.Context, u *model.User) error {
+func (r *PostgresUserRepo) CreateUserOnlyExec(ctx context.Context, q DBTX, u *model.User) error {
 	if u == nil {
 		return fmt.Errorf("failed to create user: user is nil")
 	}
@@ -136,7 +148,7 @@ func (r *PostgresUserRepo) CreateUserOnly(ctx context.Context, u *model.User) er
 	if !u.UpdatedAt.IsZero() {
 		updatedAtArg = u.UpdatedAt
 	}
-	err := r.db.QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		`INSERT INTO users (id, email, name, username, username_normalized, created_at, updated_at)
 		 VALUES (
 		     COALESCE($1::uuid, gen_random_uuid()),

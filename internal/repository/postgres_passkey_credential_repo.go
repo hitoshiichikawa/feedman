@@ -55,11 +55,24 @@ func deserializeTransports(s string) []string {
 // Create は credential を新規保存する（Req 1.2 / 3.2）。
 //
 // credential_id の UNIQUE 制約違反時は ErrCredentialAlreadyRegistered に変換する
-// （Req 3.6 の防衛線 / 1.7）。当該 INSERT で発生し得る UNIQUE 制約は
-// `passkey_credentials_credential_id_key`（credential_id UNIQUE）のみのため、
-// 23505 を素直に ErrCredentialAlreadyRegistered に対応させる。
-// c.ID が空文字 / c.CreatedAt が zero-value の場合は DB 側デフォルトを採用する。
+// （Req 3.6 の防衛線 / 1.7）。実体は CreateExec に委譲し、非トランザクション時は
+// *sql.DB を渡す。共有トランザクション上で INSERT したい場合は CreateExec を直接
+// 呼ぶ（Issue #230 / Req 1.1〜1.6: 新規パスキー登録 finish の 1 tx 化に用いる）。
 func (r *PostgresPasskeyCredentialRepo) Create(ctx context.Context, c *model.PasskeyCredential) error {
+	return r.CreateExec(ctx, r.db, c)
+}
+
+// CreateExec は指定の DBTX（*sql.DB または共有トランザクション）上で credential
+// を新規保存する（Req 1.2 / 3.2、Issue #230 / Req 1.1〜1.6 / NFR 1.1 の 1 tx 化サポート）。
+//
+// credential_id の UNIQUE 制約違反時は ErrCredentialAlreadyRegistered に変換する。
+// 当該 INSERT で発生し得る UNIQUE 制約は `passkey_credentials_credential_id_key`
+// （credential_id UNIQUE）のみのため、23505 を素直に ErrCredentialAlreadyRegistered
+// に対応させる。c.ID が空文字 / c.CreatedAt が zero-value の場合は DB 側デフォルトを
+// 採用する。
+func (r *PostgresPasskeyCredentialRepo) CreateExec(
+	ctx context.Context, q DBTX, c *model.PasskeyCredential,
+) error {
 	if c == nil {
 		return fmt.Errorf("failed to create passkey credential: credential is nil")
 	}
@@ -81,7 +94,7 @@ func (r *PostgresPasskeyCredentialRepo) Create(ctx context.Context, c *model.Pas
 	if len(c.AAGUID) > 0 {
 		aaguidArg = c.AAGUID
 	}
-	err := r.db.QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		`INSERT INTO passkey_credentials (
 		     id, user_id, credential_id, public_key, sign_count,
 		     attestation_type, aaguid, transports, created_at, last_used_at
