@@ -63,7 +63,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 3.1_
   - _Boundary: types/auth.ts, useCurrentUser hook_
 
-- [ ] 4. アカウント設定ダイアログに username 表示行を追加する
+- [x] 4. アカウント設定ダイアログに username 表示行を追加する
   - `web/src/components/account-settings-dialog.tsx` の `AccountInfoSection` に username
     表示ブロックを追加。判定式 `user.username != null && user.username !== ""` を満たす
     ときのみ「ユーザー名」ラベル + `<span data-testid="account-info-username">` を描画。
