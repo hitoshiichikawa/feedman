@@ -32,9 +32,17 @@ type PasskeyCredentialReader interface {
 	// 未存在は (nil, nil)。
 	FindByCredentialID(ctx context.Context, credentialID []byte) (*model.PasskeyCredential, error)
 
-	// UpdateSignCount は当該 credential の sign_count と last_used_at を更新する
-	// （NFR 1.4 の counter 記録用途）。
-	UpdateSignCount(ctx context.Context, id string, signCount uint32, lastUsedAt time.Time) error
+	// UpdateAuthenticationState は認証 ceremony 成功時に当該 credential の
+	// sign_count / backup_state / last_used_at の 3 列を更新する（Issue #234 /
+	// Req 4.1, 4.2, 4.3, NFR 1.4）。backup_eligible は更新対象に含めない
+	// （Req 4.3「BE は再認証時に上書きしない」を interface レベルで担保する）。
+	UpdateAuthenticationState(
+		ctx context.Context,
+		id string,
+		signCount uint32,
+		backupState bool,
+		lastUsedAt time.Time,
+	) error
 }
 
 // UserReader は AuthenticationService が users 表アクセスに必要とする最小 interface
@@ -204,8 +212,9 @@ func (s *AuthenticationService) BeginAuthentication(
 //     lookup が error を返した場合は adapter 側で ErrAuthenticationFailed に正規化される。
 //  4. adapter.FinishLogin が error（不正 assertion / lookup 失敗 / counter 後退＝
 //     CloneWarning）を返した場合は全て ErrAuthenticationFailed に正規化（NFR 1.4）
-//  5. 成功時: PasskeyCredentialReader.UpdateSignCount で sign_count と last_used_at を更新
-//     （NFR 1.4）
+//  5. 成功時: PasskeyCredentialReader.UpdateAuthenticationState で sign_count と
+//     backup_state と last_used_at を更新（NFR 1.4 / Req 4.1, 4.2, 4.3）。
+//     backup_eligible は不変で保持する（Req 4.3）。
 //  6. auth_code 生成（auth.GenerateAuthCode で base64url 32byte 乱数）→
 //     auth.HashNativeSecret で hash 化 → AuthCodeCreator.Create（既存契約: 60 秒 TTL /
 //     単回 / user_id 紐付、PKCEChallenge は envelope から復元 / Req 2.3, 2.4）
@@ -272,6 +281,15 @@ func (s *AuthenticationService) FinishAuthentication(
 				{
 					ID:        cred.CredentialID,
 					PublicKey: cred.PublicKey,
+					// Issue #234 / Req 2.1〜2.3: stored BE/BS を Flags に反映することで、
+					// go-webauthn の login validation（v0.17.4 login.go:371 で
+					// credential.Flags.BackupEligible と assertion の BE 一致を要求）
+					// が実際の登録時 BE と一致判定できる。UserPresent / UserVerified は
+					// library が BE のみ比較するためゼロ値のままで良い（login.go 該当箇所を参照）。
+					Flags: webauthn.CredentialFlags{
+						BackupEligible: cred.BackupEligible,
+						BackupState:    cred.BackupState,
+					},
 					// NFR 1.4: stored SignCount を Authenticator に反映することで
 					// library の CloneWarning 判定が有効になる。
 					Authenticator: webauthn.Authenticator{
@@ -293,11 +311,11 @@ func (s *AuthenticationService) FinishAuthentication(
 		return wu, parsed, nil
 	}
 
-	// Issue #234 task 3: FinishLogin の戻り値に updatedBackupState を追加。task 3 では
-	// interface / adapter 実装を新シグネチャに揃える compile glue のみを行い、値は "_" で
-	// 捨てる暫定接続とする。task 5 で lookup closure の Flags 反映と併せて
-	// UpdateAuthenticationState への実配線に切り替える。
-	_, _, updatedSignCount, _, err := s.adapter.FinishLogin(envelope.WebAuthnSession, requestBody, lookup)
+	// Issue #234 / Req 4.2: adapter が返す updatedBackupState は library が
+	// ValidateDiscoverableLogin 成功後に assertion authenticatorData から抽出した最新値
+	// （login.go の NewCredentialFlags 経由）。これを UpdateAuthenticationState に渡して
+	// backup_state を DB に最新化する（backup_eligible は Req 4.3 により不変）。
+	_, _, updatedSignCount, updatedBackupState, err := s.adapter.FinishLogin(envelope.WebAuthnSession, requestBody, lookup)
 	if err != nil {
 		s.logRejection("passkey authentication finish rejected: webauthn assertion",
 			shortID(challengeID))
@@ -313,9 +331,12 @@ func (s *AuthenticationService) FinishAuthentication(
 		return "", ErrAuthenticationFailed
 	}
 
-	// NFR 1.4: sign_count と last_used_at を更新（PK id で更新）。
-	if err := s.credentials.UpdateSignCount(ctx, resolvedCred.ID, updatedSignCount, s.now()); err != nil {
-		return "", fmt.Errorf("failed to update credential sign count: %w", err)
+	// Issue #234 / Req 4.1, 4.2, 4.3, NFR 1.4: sign_count / backup_state /
+	// last_used_at を PK id で更新する（backup_eligible は SQL SET 句に含めない = Req 4.3）。
+	if err := s.credentials.UpdateAuthenticationState(
+		ctx, resolvedCred.ID, updatedSignCount, updatedBackupState, s.now(),
+	); err != nil {
+		return "", fmt.Errorf("failed to update credential authentication state: %w", err)
 	}
 
 	// 既存 native auth と同一契約で auth_code を発行（Req 2.2 / 2.3 / 2.4 / NFR 2.1）。

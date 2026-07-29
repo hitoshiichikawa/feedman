@@ -210,35 +210,6 @@ func (r *PostgresPasskeyCredentialRepo) ListByUserID(
 	return results, nil
 }
 
-// UpdateSignCount は当該 credential の sign_count と last_used_at を更新する
-// （Req 2.2 / NFR 1.4 の counter 記録用途）。
-//
-// Issue #234 経過措置: 本メソッドは PasskeyCredentialRepository interface からは既に
-// 除去済みだが、passkey.PasskeyCredentialReader narrow interface（authentication_service.go）
-// および app.go の wiring が具体型 *PostgresPasskeyCredentialRepo を経由して本メソッドに
-// 依存しているため、当面残置している。task 5 で authentication_service の呼び出しが
-// UpdateAuthenticationState へ切替された後に本メソッドを併せて除去すること
-// （そうしないと orphan メソッドが残る）。
-//
-// sign_count は uint32 だが DB カラムは BIGINT（将来拡張余地）のため int64 に
-// 昇格して UPDATE する。対象レコードが存在しない場合はエラーにせず 0 rows で成功する
-// （呼び出し側が事前に FindByCredentialID で存在確認する前提）。
-func (r *PostgresPasskeyCredentialRepo) UpdateSignCount(
-	ctx context.Context, id string, signCount uint32, lastUsedAt time.Time,
-) error {
-	_, err := r.db.ExecContext(ctx,
-		`UPDATE passkey_credentials
-		 SET sign_count = $2, last_used_at = $3
-		 WHERE id = $1`,
-		id, int64(signCount), lastUsedAt,
-	)
-	if err != nil {
-		// NFR 1.2: id の値もメッセージに含めない。
-		return fmt.Errorf("failed to update passkey credential sign_count: %w", err)
-	}
-	return nil
-}
-
 // UpdateAuthenticationState は認証 ceremony 成功時に当該 credential の
 // sign_count / backup_state / last_used_at の 3 列を更新する
 // （Issue #234 / Req 4.1, 4.2, 4.3）。
@@ -250,7 +221,7 @@ func (r *PostgresPasskeyCredentialRepo) UpdateSignCount(
 //
 // sign_count は uint32 だが DB カラムは BIGINT（将来拡張余地）のため int64 に
 // 昇格して UPDATE する。対象レコードが存在しない場合はエラーにせず 0 rows で成功する
-// （UpdateSignCount と同流儀。呼び出し側が事前に FindByCredentialID で存在確認する前提）。
+// （呼び出し側が事前に FindByCredentialID で存在確認する前提）。
 // メッセージには credential_id / user_id 等の機密値を含めない（NFR 1.2）。
 func (r *PostgresPasskeyCredentialRepo) UpdateAuthenticationState(
 	ctx context.Context, id string, signCount uint32, backupState bool, lastUsedAt time.Time,
