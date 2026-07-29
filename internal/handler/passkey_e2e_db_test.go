@@ -592,6 +592,239 @@ func TestE2E_PasskeyFullFlow_DBBacked(t *testing.T) {
 	}
 }
 
+// TestE2E_PasskeyFullFlow_DBBacked_BackupEligible は Issue #234 の中核 E2E regression。
+//
+// virtualwebauthn v1.0.5 の `AuthenticatorOptions.BackupEligible` / `BackupState` を true に
+// 設定した BE=1/BS=1 の synthetic authenticator を用いて、実ブラウザで登録された同期パスキー
+// と同等の attestation / assertion を生成し、passkey 全動線（登録 begin → finish → 認証 begin →
+// finish → auth_code 発行 → token 交換 → Bearer で保護 API 到達）が green で通ることを検証する。
+//
+// 検証の柱:
+//  1. 登録直後に `passkey_credentials.backup_eligible` / `backup_state` に true が保存されている
+//     （Req 1.1 / 1.3。task 4 の registration service 実装が BE/BS を素通しで永続化する経路の
+//     DB sanity）
+//  2. 認証 ceremony が成功し auth_code が発行される（Req 3.1）— library の
+//     `Backup Eligible flag inconsistency detected`（go-webauthn login.go:371）を、task 5 の
+//     lookup 反映（stored BE/BS を `webauthn.Credential.Flags` に載せる修正）が回避できて
+//     いることの regression 保険
+//  3. 認証 finish 後の DB 状態: `backup_eligible` は true のまま **不変**（Req 4.3。task 5 の
+//     `UpdateAuthenticationState` が SET 句に含めない SQL 設計で担保）、`backup_state` は
+//     assertion 由来の最新観測値（BE=1/BS=1 authenticator では true のまま維持）に更新される
+//     （Req 4.2）
+//  4. 既存 `TestE2E_PasskeyFullFlow_DBBacked`（BE=0 baseline）を無変更で維持することで、
+//     BE=1 経路と BE=0 経路が **同一 authentication_service.go の lookup 経路** を共有した
+//     状態で同時に green を保つ（Req 5.1 / 5.2 / 5.4）
+//
+// Req 3.1 / 3.2 について: 実ブラウザ経路（Web）と iOS/native 経路は同じ
+// `PasskeyAuthenticationService.FinishLogin` → adapter → `lookup` closure を共有するため、
+// 本 E2E で Web 経路の BE=1 動線が通れば、native 経路も同じ lookup 反映で成立する。本 E2E は
+// 経路の内部差を作らず、共有経路の 1 サンプルとして Web 経路を通す。
+func TestE2E_PasskeyFullFlow_DBBacked_BackupEligible(t *testing.T) {
+	db := setupPasskeyE2EDB(t)
+	defer db.Close()
+	router, _ := newPasskeyE2ERouter(t, db)
+
+	ctx := context.Background()
+
+	// --- synthetic authenticator を用意 ---
+	// BE=1/BS=1 の同期パスキー相当（Apple/Google Password Manager 等）を再現するため、
+	// `virtualwebauthn.NewAuthenticator()` 直後に BackupEligible / BackupState を true に設定する。
+	// これにより attestation / assertion の両方の authenticatorData.flags に BE=1/BS=1 が
+	// 反映される（virtualwebauthn v1.0.5 `AuthenticatorOptions` の contract）。
+	authenticator := virtualwebauthn.NewAuthenticator()
+	authenticator.Options.BackupEligible = true
+	authenticator.Options.BackupState = true
+	cred := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
+
+	// --- step 1: passkey 新規登録 begin ---
+	regBeginBody := fmt.Sprintf(`{"username":"e2e-be1-alice","code_challenge":%q}`, e2ePasskeyCodeChallenge())
+	w := e2ePasskeyPostJSON(router, "/api/passkey/registration/begin", regBeginBody)
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("registration/begin status = %d, want 200 (body=%s)", w.Result().StatusCode, w.Body.String())
+	}
+	var regBeginResp passkeyBeginResponse
+	if err := json.NewDecoder(w.Result().Body).Decode(&regBeginResp); err != nil {
+		t.Fatalf("registration/begin decode: %v", err)
+	}
+	if regBeginResp.ChallengeID == "" || len(regBeginResp.Options) == 0 {
+		t.Fatalf("registration/begin missing challenge_id or options: %+v", regBeginResp)
+	}
+
+	// --- step 2: synthetic authenticator で attestation response を生成 ---
+	attOpts, err := virtualwebauthn.ParseAttestationOptions(string(regBeginResp.Options))
+	if err != nil {
+		t.Fatalf("ParseAttestationOptions: %v", err)
+	}
+	attestationResp := virtualwebauthn.CreateAttestationResponse(e2ePasskeyRP, authenticator, cred, *attOpts)
+
+	// --- step 3: passkey 新規登録 finish ---
+	regFinishBody := fmt.Sprintf(`{"challenge_id":%q,"credential":%s}`, regBeginResp.ChallengeID, attestationResp)
+	w = e2ePasskeyPostJSON(router, "/api/passkey/registration/finish", regFinishBody)
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("registration/finish status = %d, want 200 (body=%s)", w.Result().StatusCode, w.Body.String())
+	}
+	var regFinishResp registrationFinishNewResponse
+	if err := json.NewDecoder(w.Result().Body).Decode(&regFinishResp); err != nil {
+		t.Fatalf("registration/finish decode: %v", err)
+	}
+	if regFinishResp.UserID == "" {
+		t.Fatal("registration/finish returned empty user_id")
+	}
+
+	// DB sanity: 登録直後の users / passkey_credentials 件数（既存 BE=0 テストの回帰基盤）
+	var userCount, credCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE id = $1`, regFinishResp.UserID).Scan(&userCount); err != nil {
+		t.Fatalf("users COUNT: %v", err)
+	}
+	if userCount != 1 {
+		t.Errorf("users after registration: got %d, want 1 (user_id=%q)", userCount, regFinishResp.UserID)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM passkey_credentials WHERE user_id = $1`, regFinishResp.UserID).Scan(&credCount); err != nil {
+		t.Fatalf("passkey_credentials COUNT: %v", err)
+	}
+	if credCount != 1 {
+		t.Errorf("passkey_credentials after registration: got %d, want 1", credCount)
+	}
+
+	// DB sanity（本 test の中核 / Req 1.1, 1.3）:
+	// task 4 の registration service が `parsed.BackupEligible` / `parsed.BackupState` を
+	// `PasskeyCredential.BackupEligible` / `.BackupState` にセットして CreateExec 経由で
+	// 保存した BE=1/BS=1 が実 DB へ到達していることを SELECT で直接確認する。ここで false が
+	// 返る状態は「BE/BS が保存されていない」regression であり、そのまま authentication ceremony
+	// でも lookup 反映が false になり library の BE 一致判定を通過できない。
+	var beAfterReg, bsAfterReg bool
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT backup_eligible, backup_state FROM passkey_credentials WHERE user_id = $1`,
+		regFinishResp.UserID,
+	).Scan(&beAfterReg, &bsAfterReg); err != nil {
+		t.Fatalf("SELECT backup_eligible/backup_state after registration: %v", err)
+	}
+	if !beAfterReg {
+		t.Errorf("backup_eligible after registration = false, want true (Req 1.1: BE=1 authenticator 由来の値が永続化されていない)")
+	}
+	if !bsAfterReg {
+		t.Errorf("backup_state after registration = false, want true (Req 1.3: BS=1 authenticator 由来の値が永続化されていない)")
+	}
+
+	// --- step 4: passkey 認証 begin ---
+	// authenticator を認証用にセットアップ（user handle を設定し credential を登録）
+	// BE=1/BS=1 の `Options` は `NewAuthenticator()` 後に設定済みなので、以降の
+	// CreateAssertionResponse でも BE=1/BS=1 の authenticatorData.flags が伝搬される。
+	authenticator.Options.UserHandle = []byte(regFinishResp.UserID)
+	cred.Counter++ // library の CloneWarning 判定を避けるため counter を進める
+	authenticator.AddCredential(cred)
+
+	authBeginBody := fmt.Sprintf(`{"code_challenge":%q}`, e2ePasskeyCodeChallenge())
+	w = e2ePasskeyPostJSON(router, "/api/passkey/authentication/begin", authBeginBody)
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("authentication/begin status = %d, want 200 (body=%s)", w.Result().StatusCode, w.Body.String())
+	}
+	var authBeginResp passkeyBeginResponse
+	if err := json.NewDecoder(w.Result().Body).Decode(&authBeginResp); err != nil {
+		t.Fatalf("authentication/begin decode: %v", err)
+	}
+	if authBeginResp.ChallengeID == "" || len(authBeginResp.Options) == 0 {
+		t.Fatalf("authentication/begin missing challenge_id or options: %+v", authBeginResp)
+	}
+
+	// --- step 5: synthetic authenticator で assertion response を生成（BE=1/BS=1） ---
+	assOpts, err := virtualwebauthn.ParseAssertionOptions(string(authBeginResp.Options))
+	if err != nil {
+		t.Fatalf("ParseAssertionOptions: %v", err)
+	}
+	assertionResp := virtualwebauthn.CreateAssertionResponse(e2ePasskeyRP, authenticator, cred, *assOpts)
+
+	// --- step 6: passkey 認証 finish で auth_code を得る（Req 3.1） ---
+	// task 5 の authentication service が `lookup` closure で stored BE/BS を
+	// `webauthn.Credential.Flags` に反映しているため、library の login.go:371 の BE 一致判定
+	// （`credential.Flags.BackupEligible != assertion の BE`）を通過して assertion が受理される。
+	// この修正が入っていない環境ではここで 400 が返り、test が fail する（本 test の直接の regression 観測点）。
+	authFinishBody := fmt.Sprintf(`{"challenge_id":%q,"credential":%s}`, authBeginResp.ChallengeID, assertionResp)
+	w = e2ePasskeyPostJSON(router, "/api/passkey/authentication/finish", authFinishBody)
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("authentication/finish status = %d, want 200 (body=%s / Req 3.1: BE=1 assertion が受理されていない)",
+			w.Result().StatusCode, w.Body.String())
+	}
+	var authFinishResp authenticationFinishResponse
+	if err := json.NewDecoder(w.Result().Body).Decode(&authFinishResp); err != nil {
+		t.Fatalf("authentication/finish decode: %v", err)
+	}
+	if authFinishResp.AuthCode == "" {
+		t.Fatal("authentication/finish returned empty auth_code")
+	}
+
+	// DB sanity（本 test の中核 / Req 4.2, 4.3）:
+	// 認証 finish 直後の `backup_eligible` は不変（true のまま）、`backup_state` は assertion 由来の
+	// 最新観測値。BE=1/BS=1 authenticator では BS=1 のまま観測されるため true が期待値。
+	// もし task 5 の SQL SET 句に `backup_eligible` を含めた regression が発生していれば、この assert が
+	// 検出する（`backup_eligible` を「認証時の観測値」で上書きしない Req 4.3 を SQL レベル + テストで
+	// 二重に担保）。
+	var beAfterAuth, bsAfterAuth bool
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT backup_eligible, backup_state FROM passkey_credentials WHERE user_id = $1`,
+		regFinishResp.UserID,
+	).Scan(&beAfterAuth, &bsAfterAuth); err != nil {
+		t.Fatalf("SELECT backup_eligible/backup_state after authentication: %v", err)
+	}
+	if !beAfterAuth {
+		t.Errorf("backup_eligible after authentication = false, want true (Req 4.3: 認証成功時に BE を上書き更新してはいけない)")
+	}
+	if !bsAfterAuth {
+		t.Errorf("backup_state after authentication = false, want true (Req 4.2: BE=1/BS=1 authenticator の assertion 由来 BS が反映されていない)")
+	}
+
+	// DB sanity: auth_codes 行が単回消費前の状態で作成されている
+	var unusedAuthCodes int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM auth_codes WHERE user_id = $1 AND used = false`, regFinishResp.UserID,
+	).Scan(&unusedAuthCodes); err != nil {
+		t.Fatalf("auth_codes unused COUNT: %v", err)
+	}
+	if unusedAuthCodes != 1 {
+		t.Errorf("unused auth_codes after passkey auth: got %d, want 1", unusedAuthCodes)
+	}
+
+	// --- step 7: 既存 POST /api/auth/token で auth_code を交換 ---
+	// passkey 由来 auth_code が既存 native auth 契約と同一形式で受理されることを確認する
+	// （BE=1 経路でも token 交換の合流点が壊れないことの回帰保険）。
+	tokenBody := fmt.Sprintf(`{"auth_code":%q,"code_verifier":%q}`, authFinishResp.AuthCode, e2ePasskeyCodeVerifier)
+	w = e2ePasskeyPostJSON(router, "/api/auth/token", tokenBody)
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("token 交換 status = %d, want 200 (body=%s)", w.Result().StatusCode, w.Body.String())
+	}
+	var tokenResp map[string]any
+	if err := json.NewDecoder(w.Result().Body).Decode(&tokenResp); err != nil {
+		t.Fatalf("token 交換 decode: %v", err)
+	}
+	if tokenResp["token_type"] != "Bearer" {
+		t.Errorf("token_type = %v, want Bearer", tokenResp["token_type"])
+	}
+	if v, _ := tokenResp["expires_in"].(float64); v != 900 {
+		t.Errorf("expires_in = %v, want 900", tokenResp["expires_in"])
+	}
+	accessToken, _ := tokenResp["access_token"].(string)
+	refreshToken, _ := tokenResp["refresh_token"].(string)
+	if accessToken == "" || refreshToken == "" {
+		t.Fatalf("access_token / refresh_token must be non-empty (access=%q, refresh 非空)", accessToken)
+	}
+
+	// --- step 8: Bearer access token で保護 API に到達 ---
+	req := httptest.NewRequest(http.MethodGet, "/api/subscriptions", nil)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	wRec := httptest.NewRecorder()
+	router.ServeHTTP(wRec, req)
+	if wRec.Result().StatusCode != http.StatusOK {
+		t.Fatalf("Bearer API status = %d, want 200 (body=%s)", wRec.Result().StatusCode, wRec.Body.String())
+	}
+	// userID 連動 fixture が JWT sub（= users.id）から解決されている
+	if !strings.Contains(wRec.Body.String(), "sub-of-"+regFinishResp.UserID) {
+		t.Errorf("Bearer API body %q does not contain %q (BE=1 経路の JWT sub 解決失敗)",
+			wRec.Body.String(), "sub-of-"+regFinishResp.UserID)
+	}
+}
+
 // e2ePasskeyRegTxBeginner は E2E DB テスト向けに *repository.SQLTxBeginner を
 // passkey.RegistrationTxBeginner に適合させる薄いアダプタ（Issue #230 / Req 1.1〜1.6）。
 // 本番 wiring は internal/app/withdraw_wiring.go の passkeyRegistrationTxBeginnerAdapter
