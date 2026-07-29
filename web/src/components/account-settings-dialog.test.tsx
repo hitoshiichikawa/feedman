@@ -37,8 +37,15 @@ function createWrapper() {
 }
 
 interface AuthMockOptions {
-  /** GET /auth/me の応答種別 */
-  auth: "ok" | "ok-empty-email" | "error";
+  /**
+   * GET /auth/me の応答種別
+   *
+   * - "ok": パスキーユーザー相当（username: "alice-id"）
+   * - "ok-empty-email": Google 由来ユーザー相当（email 空 / username: null）
+   * - "ok-empty-username": username が空文字（Req 3.3 の境界値検証用）
+   * - "error": 500 応答
+   */
+  auth: "ok" | "ok-empty-email" | "ok-empty-username" | "error";
   /** DELETE /api/users/me の応答種別（省略時は成功） */
   withdraw?: "success" | "fail" | "pending";
 }
@@ -59,6 +66,7 @@ function setupMockFetch(options: AuthMockOptions) {
             id: "user-1",
             email: "alice@example.com",
             name: "Alice",
+            username: "alice-id",
             created_at: "2026-01-01T00:00:00Z",
           }),
         });
@@ -71,7 +79,21 @@ function setupMockFetch(options: AuthMockOptions) {
             id: "user-2",
             email: "",
             name: "Passkey User",
+            username: null,
             created_at: "2026-01-02T00:00:00Z",
+          }),
+        });
+      }
+      if (options.auth === "ok-empty-username") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: "user-3",
+            email: "bob@example.com",
+            name: "Bob",
+            username: "",
+            created_at: "2026-01-03T00:00:00Z",
           }),
         });
       }
@@ -207,6 +229,75 @@ describe("AccountSettingsDialog コンポーネント", () => {
       screen.getByTestId("account-info-email-unset")
     ).toHaveTextContent("未設定");
     expect(screen.queryByTestId("account-info-email")).not.toBeInTheDocument();
+  });
+
+  it("username が非 null / 非空のとき username が「ユーザー名」ラベル付きで表示されること (Req 3.2)", async () => {
+    setupMockFetch({ auth: "ok" });
+    const user = userEvent.setup();
+    render(<AccountSettingsDialog />, { wrapper: createWrapper() });
+
+    await openDialog(user);
+
+    // username 表示要素が生値そのままで表示される（`@` プレフィックス付加はしない設計）
+    await waitFor(() => {
+      expect(screen.getByTestId("account-info-username")).toHaveTextContent(
+        "alice-id"
+      );
+    });
+    // 対応する「ユーザー名」ラベルも表示される
+    expect(screen.getByText("ユーザー名")).toBeInTheDocument();
+    // 既存の表示名 / email 表示は非破壊で維持される（Req 3.4）
+    expect(screen.getByTestId("account-info-name")).toHaveTextContent("Alice");
+    expect(screen.getByTestId("account-info-email")).toHaveTextContent(
+      "alice@example.com"
+    );
+  });
+
+  it("username が null のとき username 表示要素が描画されず、既存の表示名 / email 表示に影響しないこと (Req 3.3 / Req 4.2)", async () => {
+    // Google 由来ユーザー相当（email 空 / username: null）
+    setupMockFetch({ auth: "ok-empty-email" });
+    const user = userEvent.setup();
+    render(<AccountSettingsDialog />, { wrapper: createWrapper() });
+
+    await openDialog(user);
+
+    // 表示名（既存）は先に描画されるのを待つ
+    await waitFor(() => {
+      expect(screen.getByTestId("account-info-name")).toHaveTextContent(
+        "Passkey User"
+      );
+    });
+    // username 表示要素そのものが DOM に出ない（代替ラベルも出さない / Req 3.3）
+    expect(
+      screen.queryByTestId("account-info-username")
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("ユーザー名")).not.toBeInTheDocument();
+    // 既存の email 未設定プレースホルダは維持される（Req 4.2 の非破壊性）
+    expect(
+      screen.getByTestId("account-info-email-unset")
+    ).toHaveTextContent("未設定");
+  });
+
+  it("username が空文字のとき username 表示要素が描画されないこと (Req 3.3)", async () => {
+    setupMockFetch({ auth: "ok-empty-username" });
+    const user = userEvent.setup();
+    render(<AccountSettingsDialog />, { wrapper: createWrapper() });
+
+    await openDialog(user);
+
+    // 表示名（既存）が描画されるのを待つ
+    await waitFor(() => {
+      expect(screen.getByTestId("account-info-name")).toHaveTextContent("Bob");
+    });
+    // username 表示要素が DOM に存在しない（null と同様の扱い / Req 3.3）
+    expect(
+      screen.queryByTestId("account-info-username")
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("ユーザー名")).not.toBeInTheDocument();
+    // 既存の email 表示は非破壊で維持される
+    expect(screen.getByTestId("account-info-email")).toHaveTextContent(
+      "bob@example.com"
+    );
   });
 
   it("アカウント情報の取得に失敗したときエラー通知が表示され、空 UI にならないこと (Req 2.4)", async () => {

@@ -146,9 +146,11 @@ interface AccountInfoSectionProps {
 }
 
 /**
- * アカウント情報表示セクション（Req 2.1〜2.3）。
+ * アカウント情報表示セクション（Req 2.1〜2.3 / Issue #241 Req 3.1〜3.4）。
  *
- * 表示名を必ず表示し、email は空文字なら「未設定」ラベルに差替える。
+ * 表示名を必ず表示し、username は非 null / 非空のときのみ描画する（null / 空文字は
+ * 要素そのものを DOM に出さない / Req 3.3）。email は空文字なら「未設定」ラベルに
+ * 差替える（既存挙動 / Req 3.4 の非破壊性）。
  */
 function AccountInfoSection({ user }: AccountInfoSectionProps) {
   const emailIsSet = user.email !== "";
@@ -169,6 +171,27 @@ function AccountInfoSection({ user }: AccountInfoSectionProps) {
           {user.name}
         </span>
       </div>
+      {/*
+       * username 表示行（Issue #241 / Req 3.2 / Req 3.3）。
+       * `user.username != null && user.username !== ""` を満たすときのみ描画し、
+       * null / 空文字なら要素そのものを DOM に出さない（email 未設定時の代替ラベル
+       * のようなプレースホルダは出さない）。表示位置は表示名行の直後 / email 行の
+       * 直前（Req 3 の Objective「ログイン主体識別」に沿い、表示名 = 人間可読ラベル、
+       * username = システム上の識別子を隣接表示する意図）。
+       */}
+      {user.username != null && user.username !== "" && (
+        <div className="flex items-baseline justify-between gap-3">
+          <span className="text-xs font-medium text-muted-foreground">
+            ユーザー名
+          </span>
+          <span
+            data-testid="account-info-username"
+            className="text-sm font-medium break-all"
+          >
+            {user.username}
+          </span>
+        </div>
+      )}
       <div className="flex items-baseline justify-between gap-3">
         <span className="text-xs font-medium text-muted-foreground">
           メールアドレス
