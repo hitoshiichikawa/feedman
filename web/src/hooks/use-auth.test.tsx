@@ -38,6 +38,11 @@ describe("useCurrentUser", () => {
             id: "user-1",
             email: "test@example.com",
             name: "Test User",
+            // Issue #241 / Req 2.1・2.2:
+            //   /auth/me は常に username キーを返し、パスキー登録済みユーザーでは
+            //   文字列を保持する。フックの decode 経路が新フィールドを含めて
+            //   User 型として受け渡せることを検証する。
+            username: "test-user",
             created_at: "2026-01-01T00:00:00Z",
           }),
         });
@@ -57,6 +62,7 @@ describe("useCurrentUser", () => {
       id: "user-1",
       email: "test@example.com",
       name: "Test User",
+      username: "test-user",
       created_at: "2026-01-01T00:00:00Z",
     });
   });
