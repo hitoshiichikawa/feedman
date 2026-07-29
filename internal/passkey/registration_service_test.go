@@ -641,6 +641,15 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 			t.Errorf("created user.UsernameNormalized = %q, want %q",
 				users.lastCreated.UsernameNormalized, pendingUsername)
 		}
+		// Issue #241 / Req 1.1: 新規登録 finish 成功時に users.name を保存する
+		// username（normalized）と同値で初期化することを検証する。
+		// 新規登録直後にアカウント設定ダイアログで指定 ID を表示名として確認できる
+		// ようにするための不具合修正の中核 assert（design.md「Requirements
+		// Traceability」1.1 参照）。
+		if users.lastCreated.Name != pendingUsername {
+			t.Errorf("created user.Name = %q, want %q (Issue #241 Req 1.1: username と同値で初期化)",
+				users.lastCreated.Name, pendingUsername)
+		}
 		if creds.lastCreatedCred == nil || creds.lastCreatedCred.UserID != pendingUserID {
 			t.Errorf("credential.UserID mismatch: %+v", creds.lastCreatedCred)
 		}
@@ -745,6 +754,9 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		if sessions.createExecCalled != 0 {
 			t.Errorf("session CreateExec calls = %d, want 0", sessions.createExecCalled)
 		}
+		// Issue #241 / Req 1.3: session factory 失敗経路も defer tx.Rollback() により
+		// commit=0 / rollback=1 が担保される = users.name を含む users 行が永続化
+		// されないことを構造的に保証する（Name 追加のための追加 assert は不要）。
 		if txBeginner.lastTx.commitCalled != 0 || txBeginner.lastTx.rollbackCalled != 1 {
 			t.Errorf("commit/rollback = %d/%d, want 0/1",
 				txBeginner.lastTx.commitCalled, txBeginner.lastTx.rollbackCalled)
@@ -918,6 +930,9 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		if txBeginner.lastTx == nil {
 			t.Fatal("txBeginner.lastTx is nil")
 		}
+		// Issue #241 / Req 1.3: credential 重複経路も defer tx.Rollback() により
+		// commit=0 / rollback=1 が担保される = users.name を含む users 行が永続化
+		// されないことを構造的に保証する（Name 追加のための追加 assert は不要）。
 		if txBeginner.lastTx.commitCalled != 0 {
 			t.Errorf("Commit must not be called on credential duplicate; got %d (Req 1.3)", txBeginner.lastTx.commitCalled)
 		}
@@ -959,6 +974,9 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 		if txBeginner.lastTx == nil {
 			t.Fatal("txBeginner.lastTx is nil")
 		}
+		// Issue #241 / Req 1.3: credential インフラ障害経路も defer tx.Rollback() により
+		// commit=0 / rollback=1 が担保される = users.name を含む users 行が永続化
+		// されないことを構造的に保証する（Name 追加のための追加 assert は不要）。
 		if txBeginner.lastTx.commitCalled != 0 {
 			t.Errorf("Commit must not be called on credential infra error; got %d (Req 1.4)", txBeginner.lastTx.commitCalled)
 		}

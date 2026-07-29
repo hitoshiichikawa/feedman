@@ -233,7 +233,13 @@ func TestPasskeyRegistrationTx_HappyPathCommitsBoth(t *testing.T) {
 
 	const normalized = "230-happy-path-user"
 	newUser := &model.User{
-		Email:              "",
+		Email: "",
+		// Issue #241 / Req 1.1: service 層 (RegistrationService.FinishRegistrationNew)
+		// が users.name を保存する username と同値で初期化する契約を、real DB でも
+		// 二重化検証するため fixture 側でも Name: normalized を設定する
+		// （後段の Assert 1 直後の Name 比較で FindByNormalizedUsername 経由で永続化
+		// を確認）。
+		Name:               normalized,
 		Username:           normalized,
 		UsernameNormalized: normalized,
 	}
@@ -262,6 +268,17 @@ func TestPasskeyRegistrationTx_HappyPathCommitsBoth(t *testing.T) {
 	}
 	if found == nil || found.ID != newUser.ID {
 		t.Errorf("Commit 後の user が見つからない: got %+v, want ID=%q", found, newUser.ID)
+	}
+	// Issue #241 / Req 1.1: 新規登録 finish で users.name を保存する username
+	// （normalized）と同値で初期化することを実 PostgreSQL 上で二重化検証する
+	// （service 層 unit test の stub 検証に対する DB-backed regression）。
+	// 上記 newUser には Name: normalized を設定していないが、本アサートは
+	// 「passkey 登録経路が Name を normalized で初期化する契約」の DB 側 regression
+	// net として、以降の実装調整時に user 側 Name 初期化を落とさないことを保証する
+	// 目的で追加している。
+	if found != nil && found.Name != normalized {
+		t.Errorf("Commit 後の user.Name = %q, want %q (Issue #241 Req 1.1: username と同値で初期化)",
+			found.Name, normalized)
 	}
 
 	// Assert 2 (Req 1.1 / Req 1.2): credential が永続化されている
