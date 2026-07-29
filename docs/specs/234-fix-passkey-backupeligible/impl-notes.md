@@ -133,6 +133,47 @@
     task 4 で INSERT された BE=true / BS=true が実 DB へ到達していることを DB sanity で検証
     可能（task 4 で ceremony finish → CreateExec 経由の書き込みまでは stub 経由で検証済み）。
 
+### Task 5
+
+- **採用方針**: `authentication_service.go` の `PasskeyCredentialReader` narrow interface から
+  `UpdateSignCount` を除去して後継 `UpdateAuthenticationState(ctx, id, signCount, backupState, lastUsedAt)`
+  を追加。lookup closure が組み立てる `webauthn.Credential` に
+  `Flags: webauthn.CredentialFlags{BackupEligible: cred.BackupEligible, BackupState: cred.BackupState}`
+  を反映し、`FinishLogin` の 4 番目戻り値 `updatedBackupState` を実受け取り、
+  `UpdateAuthenticationState` に配線した。合わせて task 2 で経過措置として残置していた
+  `*PostgresPasskeyCredentialRepo.UpdateSignCount` メソッド本体も除去した（app.go / passkey
+  package の consumer が新 method へ切替されたため dead code）。
+- **重要な判断**:
+  - **lookup Flags 反映が login 一致判定の核心**: go-webauthn v0.17.4 login.go:371 は
+    `credential.Flags.BackupEligible != assertion の BE` で reject する契約であり、service 層で
+    stored BE/BS を Flags に反映することが本 spec の中核修正。`UserPresent` / `UserVerified` は
+    library が BE のみ比較するためゼロ値のままで良い（design.md §Authentication Service の
+    疑似コードコメントに準拠）。
+  - **Req 4.3 の interface レベル担保**: `UpdateAuthenticationState` の引数から
+    `backupEligible` を除外し、postgres 実装の SQL SET 句にも含めないため、code 側で
+    誤って BE を渡そうとしても SQL に到達しない構造で不変化を保証している（task 2 の
+    interface / SQL 設計を service 層でそのまま活かした）。
+  - **Red→Green の実測**: 新規テスト
+    「lookup が返す webauthn.Credential.Flags に stored BE/BS が反映される」は
+    Flags 反映を一時的に `false` に固定した状態で `BackupEligible = false, want true` で
+    fail することを確認済み。また adapter 戻り値の 4 番目を discard するようコードを変更すると
+    Go compiler が `declared and not used: updatedBackupState` で build fail するため、
+    「BS 最新化の配線が抜ける」regression は test 実行前段階で検出される。
+  - **dead code 除去の完了確認**: 除去後の `grep -rn "UpdateSignCount" internal/` は
+    `internal/repository/interfaces.go` の doc comment 中の歴史的言及 1 件のみ（実行される
+    コードへの参照ゼロ）。`repository.PasskeyCredentialRepository` の compile-time interface
+    check（`TestPostgresPasskeyCredentialRepo_ImplementsInterface`）も pass する。
+- **残存課題 / 次 task 申し送り**:
+  - task 6: E2E DB-backed test で `authenticator.Options.BackupEligible = true` を先に設定した
+    BE=1 経路を通し、登録 → 認証 → auth_code 発行 → token 交換 → Bearer での保護 API 到達までの
+    全動線 green を実測する。DB sanity として登録直後 / 認証直後の
+    `SELECT backup_eligible, backup_state FROM passkey_credentials` で BE 不変・BS 最新化を
+    assert する。BE=0 baseline (`TestE2E_PasskeyFullFlow_DBBacked`) の green 維持も併せて確認。
+  - task 6.1 (deferrable): BE=1 で登録した後に BE=0 の synthetic authenticator で assertion を
+    返した際に 400 uniform 拒否となる regression（Req 3.4 / 5.3）を独立 test 関数として追加可能。
+  - 本 task では registration service / handler / E2E には触れていない（boundary
+    `AuthenticationService` に閉じた実装）。
+
 ## 確認事項
 
 - **task 2 と task 5 の boundary スコープ不整合（Issue #234 task 2 実装時に検出）**:
