@@ -99,7 +99,7 @@
   - _Boundary: RegistrationService_
   - _Depends: 3_
 
-- [ ] 5. Authentication service で stored BE/BS を lookup 反映し BS を最新化
+- [x] 5. Authentication service で stored BE/BS を lookup 反映し BS を最新化
   - `internal/passkey/authentication_service.go` を修正
     - `lookup` closure 内の `webauthn.Credential` 組み立てに
       `Flags: webauthn.CredentialFlags{BackupEligible: cred.BackupEligible, BackupState: cred.BackupState}`
