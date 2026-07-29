@@ -13,6 +13,16 @@ Issue #241「パスキー登録した username がどこにも表示されない
   - Google OAuth 経路（`internal/auth/service.go::HandleCallback` / `PostgresUserRepo.CreateWithIdentity`）は今回の変更対象外（Req 4.3 / NFR 3.1）で、diff 上も本 commit で当該ファイルは変更していないことを `git diff --stat` で確認済み。
 - **残存課題**: なし（Task 1 スコープ内で完結）。
 
+### Task 2
+
+- **採用方針**: `internal/handler/auth_handler.go` の `Me()` 応答生成を `map[string]interface{}` から専用 struct `meResponse` へ切り替え、`Username *string`（`omitempty` なし）を追加する。handler 内で `user.Username != ""` を判定して非空なら `*string`、空文字なら `nil` を assign し、JSON 上 `null` を返す。DB 層（`PostgresUserRepo.FindByID`）・model 層・service 層（`internal/auth/service.go::GetCurrentUser`）は無変更。
+- **重要な判断**:
+  - `Username *string` に **`omitempty` を付けない** のは Req 2.1 / Req 4.1 が「未設定時も `"username"` キーが応答に存在し、値のみ `null`」を要求しているため。Web / iOS クライアント側で「キーの有無」ではなく「値の型（string / null）」で分岐できるようにする契約。regression net として `Cookie_Present_UsernameUnset_ReturnsNull` サブテストで `_, ok := body["username"]; ok == true` かつ `body["username"] == nil` を assert する二段構えにした。
+  - 既存 `Cookie_Present_ReturnsExistingShape` の `allowed` set を `{id, email, name}` から `{id, email, name, username}` に拡張したが、`forbidden` set（`avatar_url` / `session_id` / `refresh_token` / `password` / `password_hash` / `access_token`）は **一切変更せず温存** した（NFR 2.1 regression net）。struct 化により map literal 依存の regression が構造的にも封じられる副次効果あり（`meResponse` が持たないフィールドは JSON 上表現されようが無い）。
+  - `json.NewEncoder(w).Encode(...)` の返り値を `_ =` で明示的に破棄した。既存 map literal 版では返り値が破棄されていたが、`errcheck` 系 lint が入った場合を見越して明示化する形にした（既存挙動と等価）。Content-Type ヘッダ設定行・401 経路（Cookie 不在 / 検証失敗）・`slog.Error` ログは一切変更していないことを `git diff` で確認済み。
+  - `TestAuthHandler_Me_Authenticated_ReturnsUserJSON`（既存 status / Content-Type のみを検査するテスト）は無変更で pass することを確認。struct 化しても JSON output shape の後方互換（既存キー `id / email / name` の型と値）は完全に維持される。
+- **残存課題**: なし（Task 2 スコープ内で完結）。web 側の型定義 / hook / UI の変更は Task 3, 4 のスコープであり、本 task では触れていない（Task 2 の `_Boundary: AuthHandler_` を厳守）。
+
 ## 実行結果
 
 - `go vet ./internal/passkey/... ./internal/repository/...`: no findings
