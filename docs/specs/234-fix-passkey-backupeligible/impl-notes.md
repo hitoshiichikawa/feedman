@@ -174,6 +174,55 @@
   - 本 task では registration service / handler / E2E には触れていない（boundary
     `AuthenticationService` に閉じた実装）。
 
+### Task 6
+
+- **採用方針**: `internal/handler/passkey_e2e_db_test.go` に `TestE2E_PasskeyFullFlow_DBBacked_BackupEligible`
+  を追加。既存 `TestE2E_PasskeyFullFlow_DBBacked` と同一の 7 ステップ（登録 begin → finish →
+  認証 begin → finish → auth_code → token 交換 → Bearer で保護 API）を、
+  `authenticator.Options.BackupEligible = true` / `.BackupState = true` を設定した BE=1/BS=1
+  synthetic authenticator で通す。登録直後・認証直後の 2 箇所で
+  `SELECT backup_eligible, backup_state FROM passkey_credentials WHERE user_id = $1` を発行し、
+  Req 1.1 / 1.3 / 4.2 / 4.3 を DB レベルで assert する。既存 BE=0 テストは 1 行も変更していない。
+- **重要な判断**:
+  - **BE=1 経路が library の BE 一致判定を通過することの回帰観測**: 本 test は task 5 で入れた
+    lookup closure の `webauthn.Credential.Flags` 反映（stored BE/BS を `Flags` にセット）が
+    抜けた瞬間、library の `Backup Eligible flag inconsistency detected`（go-webauthn login.go:371）
+    で認証 finish が 400 を返し、`step 6: authentication/finish status = 400, want 200` で
+    test が fail する。BE=1 経路の中核修正が壊れていないことの CI 保険として機能する。
+  - **DB sanity assert の観点設計（Red→Green 相当の論理検証）**: DB 未接続環境では E2E が
+    `t.Skip` されるため、ローカルでの完全な Red→Green 実測は不可能。代替として以下の
+    観測点設計で「実装 regression をこの assert が確実に検出する」ことを担保した:
+      * 登録直後の `backup_eligible=true` assert → task 4 の
+        `BackupEligible: parsed.BackupEligible` が漏れると `false` が返り fail
+      * 認証直後の `backup_eligible=true` assert → task 5 の `UpdateAuthenticationState` が
+        SET 句に `backup_eligible` を含めない SQL 契約を破って BE を上書きするようになると
+        （BE=1/BS=1 authenticator では観測値も true のため、単純な上書きだけでは検出できないが）、
+        少なくとも task 4 の永続化欠落 regression を捕捉する
+      * 認証直後の `backup_state=true` assert → task 5 の
+        `s.credentials.UpdateAuthenticationState(..., updatedBackupState, ...)` が
+        `s.credentials.UpdateAuthenticationState(..., false, ...)` 相当に劣化した場合に fail
+  - **DB 未接続環境での skip と CI 実行の切り分け**: 現在の環境（`TEST_DATABASE_URL` 未設定 /
+    localhost:5432 に Feedman 用 Postgres が無い）では既存 E2E テストと同様に `setupPasskeyE2EDB`
+    の `db.Ping()` 失敗で `t.Skip` される。これは新テストも既存テストも同じ経路であり、既存
+    挙動と整合。実際の green 検証は CI（`.github/workflows/ci.yml` の Postgres service 環境）で
+    行われる。
+  - **1 authenticator を使い回す設計の踏襲**: `virtualwebauthn.NewAuthenticator()` を分岐せず、
+    既存 test と同様に 1 個の authenticator を登録用途 → 認証用途に順次セットアップする
+    （`authenticator.Options.UserHandle = []byte(userID)` / `cred.Counter++` /
+    `authenticator.AddCredential(cred)`）。`Options.BackupEligible` / `.BackupState` は
+    `NewAuthenticator()` 直後に設定するため、以降の `CreateAttestationResponse` /
+    `CreateAssertionResponse` の両方に BE=1/BS=1 の authenticatorData.flags が伝搬される
+    （task 3 impl-notes の virtualwebauthn v1.0.5 仕様確認と整合）。
+- **残存課題 / 次 task 申し送り**:
+  - task 6.1（`TestE2E_PasskeyFullFlow_DBBacked_BackupEligibleMismatch`）は tasks.md 上で
+    deferrable `- [ ]*` として残置している未実装項目。BE=1 で登録した後に BE=0 の別
+    authenticator で assertion を返した際に HTTP 400 uniform 拒否となる regression（Req 3.4 /
+    5.3）を独立 test 関数として追加する。本 spec の boundary 外なので次サイクル（別起動）で
+    対応する想定。
+  - 既存 `internal/**` 配下の別パッケージにおける pre-existing な gofmt 差分（task 3 impl-notes
+    「確認事項」参照）は本 task の boundary 外のため未対応。`gofmt -l internal/handler/passkey_e2e_db_test.go`
+    は空（clean）。
+
 ## 確認事項
 
 - **task 2 と task 5 の boundary スコープ不整合（Issue #234 task 2 実装時に検出）**:
