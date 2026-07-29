@@ -1042,19 +1042,21 @@ func TestAuthHandler_Me_CookiePathUnchanged(t *testing.T) {
 			t.Errorf("name = %v (ok=%v), want %q", body["name"], ok, wantUser.Name)
 		}
 
-		// 2. キー集合は **厳密に** {id, email, name} のみであること
-		//    （avatar_url や将来追加されるフィールドが /auth/me から漏れないことを保護）
+		// 2. キー集合は **厳密に** {id, email, name, username} のみであること
+		//    （Issue #241 で username を追加。avatar_url や将来追加されるフィールドが
+		//    /auth/me から漏れないことを引き続き保護する）
 		allowed := map[string]bool{
-			"id":    true,
-			"email": true,
-			"name":  true,
+			"id":       true,
+			"email":    true,
+			"name":     true,
+			"username": true,
 		}
 		if len(body) != len(allowed) {
 			t.Errorf("response key count = %d, want %d (keys=%v)", len(body), len(allowed), keysOf(body))
 		}
 		for k := range body {
 			if !allowed[k] {
-				t.Errorf("response contains forbidden key %q (shape regression: /auth/me should keep {id, email, name})", k)
+				t.Errorf("response contains forbidden key %q (shape regression: /auth/me should keep {id, email, name, username})", k)
 			}
 		}
 
@@ -1065,6 +1067,105 @@ func TestAuthHandler_Me_CookiePathUnchanged(t *testing.T) {
 			if _, ok := body[k]; ok {
 				t.Errorf("response leaks forbidden key %q from /auth/me (non-regression violation)", k)
 			}
+		}
+	})
+
+	t.Run("Cookie_Present_UsernameSet_ReturnsUsernameString", func(t *testing.T) {
+		// Arrange: Username を持つパスキー登録ユーザーを注入（Issue #241 / Req 2.1 / 2.2 / 2.4）。
+		// 想定シナリオ: パスキー新規登録経路（Task 1 の #241）で users.name / users.username が
+		// 同時に初期化されたユーザーが /auth/me を呼ぶケース。
+		wantUser := &model.User{
+			ID:       "user-id-with-username",
+			Email:    "alice@example.com",
+			Name:     "alice",
+			Username: "alice",
+		}
+		svc := &mockAuthService{
+			getCurrentUserFn: func(ctx context.Context, sessionID string) (*model.User, error) {
+				return wantUser, nil
+			},
+		}
+		h := NewAuthHandler(svc, AuthHandlerConfig{
+			BaseURL: "http://localhost:3000",
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+		req.AddCookie(&http.Cookie{Name: "session_id", Value: "valid-session"})
+		w := httptest.NewRecorder()
+
+		// Act
+		h.Me(w, req)
+
+		// Assert: 200 / Content-Type / username が string 型で mock 値と一致
+		resp := w.Result()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+		}
+		if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+			t.Errorf("Content-Type = %q, want %q", ct, "application/json")
+		}
+
+		var body map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+
+		got, ok := body["username"].(string)
+		if !ok {
+			t.Fatalf("username = %v (type=%T), want string (Req 2.2)", body["username"], body["username"])
+		}
+		if got != "alice" {
+			t.Errorf("username = %q, want %q (Req 2.4)", got, "alice")
+		}
+	})
+
+	t.Run("Cookie_Present_UsernameUnset_ReturnsNull", func(t *testing.T) {
+		// Arrange: Username 未設定（空文字）ユーザー = Google OAuth 由来ユーザー相当を注入
+		// （Issue #241 / Req 2.3 / Req 4.1 / NFR 2.1）。
+		wantUser := &model.User{
+			ID:       "user-id-google",
+			Email:    "google@example.com",
+			Name:     "Google User",
+			Username: "",
+		}
+		svc := &mockAuthService{
+			getCurrentUserFn: func(ctx context.Context, sessionID string) (*model.User, error) {
+				return wantUser, nil
+			},
+		}
+		h := NewAuthHandler(svc, AuthHandlerConfig{
+			BaseURL: "http://localhost:3000",
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+		req.AddCookie(&http.Cookie{Name: "session_id", Value: "valid-session"})
+		w := httptest.NewRecorder()
+
+		// Act
+		h.Me(w, req)
+
+		// Assert: 200 / Content-Type / "username" キーは存在しつつ値は nil（JSON 上 null）
+		resp := w.Result()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+		}
+		if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+			t.Errorf("Content-Type = %q, want %q", ct, "application/json")
+		}
+
+		var body map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+
+		// Req 2.3 / Req 4.1: "username" キーは応答に **必ず存在** すること（omitempty 禁止）
+		v, ok := body["username"]
+		if !ok {
+			t.Fatalf("response missing key \"username\" (Req 2.3 / Req 4.1: omitempty をつけずキーは常に存在する必要がある)")
+		}
+		// 値は nil（JSON 上 null）であること
+		if v != nil {
+			t.Errorf("username = %v (type=%T), want nil (JSON null / Req 2.3)", v, v)
 		}
 	})
 
