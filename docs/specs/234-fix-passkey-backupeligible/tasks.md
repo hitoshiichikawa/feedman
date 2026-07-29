@@ -78,7 +78,7 @@
   - _Boundary: WebAuthnAdapter, AuthenticationServiceCompileGlue_
   - _Depends: 2_
 
-- [ ] 4. Registration service で BE/BS を永続化
+- [x] 4. Registration service で BE/BS を永続化
   - `internal/passkey/registration_service.go` を修正
     - `FinishRegistrationNew` 内の `&model.PasskeyCredential{...}` リテラルに
       `BackupEligible: parsed.BackupEligible` / `BackupState: parsed.BackupState` を追加
