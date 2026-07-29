@@ -33,6 +33,16 @@ Issue #241「パスキー登録した username がどこにも表示されない
   - `web/src/components/account-settings-dialog.tsx` は `user.name` / `user.email` のみを参照し、`username` を参照していないため型追加による影響を受けない（Task 4 で username 表示行を追加する予定）。他の mock（`app-shell.test.tsx` / `auth-guard.test.tsx` / `logout-button.test.tsx`）は inline JSON でありオブジェクトを `User` 型として型付けしていないため、`username` を含まない mock 応答が渡ってもコンパイル・実行の双方で問題を起こさないことを確認した（`data.username` が runtime で undefined になるが、それらのテストは username を assert しない）。
 - **残存課題**: Task 4（`account-settings-dialog.tsx` の username 表示行追加）で `user.username` を実際に参照する際、`useCurrentUser` の cache には Task 3 で追加された username フィールドが正しく流れていることが前提となる。本 task の変更で契約は成立している。
 
+### Task 4
+
+- **採用方針**: `AccountInfoSection` の表示名行直後 / email 行直前に `{user.username != null && user.username !== "" && (...)}` パターンで「ユーザー名」表示ブロックを追加し、null / 空文字なら要素そのものを DOM に出さない（email 未設定時のような代替ラベルは付けない / Req 3.3）。既存の `account-info-name` / `account-info-email` / `account-info-email-unset` / `account-settings-loading` / `account-settings-error` / `account-withdraw-section` / `withdraw-trigger` の testID・描画ロジック・className・条件式は一切変更していない（Req 3.4 / Req 4.2 の非破壊性）。テスト側は `setupMockFetch` の `"ok"` に `username: "alice-id"`、`"ok-empty-email"` に `username: null` を追加し、Req 3.3 の空文字境界検証用に新たに `"ok-empty-username"` 分岐（`username: ""`）を追加。新規テスト 3 件（Req 3.2 / Req 3.3 / Req 3.3 空文字）を追加した。
+- **重要な判断**:
+  - `AuthMockOptions.auth` に `"ok-empty-username"` を新設したのは、Req 3.3 の「空文字のとき描画しない」を検証する際に既存の `"ok"` / `"ok-empty-email"` のいずれとも意味論的に異なる（`email` は正常だが `username` だけが空）ケースを表現するため。tasks.md の指示（mock 応答に `username: ""` を注入）を素直に満たすには分岐追加が最小差分で、既存テストへの影響も無い。
+  - username 表示行のラベル / className は design.md 「表示フォーマットの設計判断」節の結論（装飾なし、`@` プレフィックス無し、ラベル「ユーザー名」、className は既存の `text-xs font-medium text-muted-foreground` + `text-sm font-medium break-all` を流用）に忠実に従った。新規スタイル・新規 UI コンポーネントは一切追加していない（Req 3.4 の非破壊性）。
+  - 新規テストは `screen.getByText("ユーザー名")` でラベル自体の描画も検証しているが、既存の「表示名」「メールアドレス」「アカウント設定」等の他ラベルとテキスト衝突が無いことを確認済み（`getByText` の一意性 assert が pass することが実行時に保証）。
+  - `img` の警告など既存の 5 件の lint warning（`feed-favicon.tsx` / `search-results.tsx` / `theme-provider.test.tsx` / `app-state.test.tsx`）は本 task の対象外で無関係。本 task の diff は 0 error / 0 追加 warning で完了。
+- **残存課題**: なし（Task 4 スコープ内で完結。Issue #241 の全 4 task が本 task で完了）。
+
 ## 実行結果
 
 - `go vet ./internal/passkey/... ./internal/repository/...`: no findings
