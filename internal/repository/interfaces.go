@@ -85,9 +85,26 @@ type PasskeyCredentialRepository interface {
 	// 存在しない場合は空スライスを返す。
 	ListByUserID(ctx context.Context, userID string) ([]*model.PasskeyCredential, error)
 
-	// UpdateSignCount は当該 credential の sign_count と last_used_at を更新する
-	// （Req 2.2 / NFR 1.4 の counter 記録用途）。
-	UpdateSignCount(ctx context.Context, id string, signCount uint32, lastUsedAt time.Time) error
+	// UpdateAuthenticationState は認証 ceremony 成功時に当該 credential の
+	// sign_count / backup_state / last_used_at の 3 列を更新する（Issue #234 /
+	// Req 4.1, 4.2, 4.3）。旧 UpdateSignCount の後継で、認証時の credential 属性
+	// 最新化ポリシー（Req 4.2 / 4.3）を interface レベルで担保する。
+	//
+	// backup_eligible は本メソッドで **一切更新しない**（引数にも SQL SET 句にも
+	// 含めない）。これにより Req 4.3「BE は再認証時に上書き更新しない = 初回登録時の
+	// 値を不変で保持する」を SQL レベルで構造的に保証する。
+	//
+	// 対象レコードが存在しない場合はエラーにせず 0 rows で成功する（呼び出し側が
+	// 事前に FindByCredentialID で存在確認する既存流儀に整合）。
+	// メッセージには credential_id / public_key / user_id 等の機密値を含めない
+	// （NFR 1.2）。
+	UpdateAuthenticationState(
+		ctx context.Context,
+		id string,
+		signCount uint32,
+		backupState bool,
+		lastUsedAt time.Time,
+	) error
 
 	// DeleteByUserID は当該ユーザーに紐付く全 passkey_credentials を削除する
 	// （Issue #216 / Req 7.1 / 7.4）。対象 0 件でも成功する（冪等）。

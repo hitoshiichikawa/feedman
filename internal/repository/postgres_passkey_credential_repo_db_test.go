@@ -114,7 +114,8 @@ func TestPostgresPasskeyCredentialRepo_DB(t *testing.T) {
 	ctx := context.Background()
 	repo := NewPostgresPasskeyCredentialRepo(db)
 
-	// Case 1 (Req 1.2 / 3.2): Create → FindByCredentialID で同値復元
+	// Case 1 (Req 1.2 / 3.2 / Issue #234 Req 2.1): Create → FindByCredentialID で同値復元
+	// BE=true / BS=true を含む round-trip も検証し、保存値が復元値と同値であることを確認する。
 	t.Run("Create_FindByCredentialIDで保存値が同値復元される", func(t *testing.T) {
 		userID := insertPasskeyTestUser(t, db, "cred-create-find@test.com")
 		credentialID := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
@@ -124,6 +125,9 @@ func TestPostgresPasskeyCredentialRepo_DB(t *testing.T) {
 		c.AAGUID = []byte{0xde, 0xad, 0xbe, 0xef}
 		c.Transports = []string{"internal", "hybrid"}
 		c.SignCount = 42
+		// Issue #234: BE=true / BS=true の round-trip 検証（Req 2.1〜2.3）。
+		c.BackupEligible = true
+		c.BackupState = true
 
 		if err := repo.Create(ctx, c); err != nil {
 			t.Fatalf("Create に失敗: %v", err)
@@ -168,6 +172,13 @@ func TestPostgresPasskeyCredentialRepo_DB(t *testing.T) {
 		}
 		if got.LastUsedAt != nil {
 			t.Errorf("初期 LastUsedAt が nil ではない: got %v", got.LastUsedAt)
+		}
+		// Issue #234 Req 2.1〜2.3: BE/BS が保存 → 復元で同値であること。
+		if !got.BackupEligible {
+			t.Errorf("BackupEligible 復元不一致: got %v, want true", got.BackupEligible)
+		}
+		if !got.BackupState {
+			t.Errorf("BackupState 復元不一致: got %v, want true", got.BackupState)
 		}
 	})
 
@@ -223,18 +234,29 @@ func TestPostgresPasskeyCredentialRepo_DB(t *testing.T) {
 		}
 	})
 
-	// Case 5 (Req 2.2 / NFR 1.4): UpdateSignCount で sign_count / last_used_at が反映される
-	t.Run("UpdateSignCount_sign_countとlast_used_atが反映される", func(t *testing.T) {
-		userID := insertPasskeyTestUser(t, db, "cred-updatecount@test.com")
+	// Case 5 (Issue #234 / Req 4.1, 4.2, 4.3): UpdateAuthenticationState で
+	// sign_count / backup_state / last_used_at が反映され、backup_eligible は不変であることを確認する。
+	//
+	// 登録時 BE=true / BS=false の credential を作り、UpdateAuthenticationState で
+	// (signCount=100, backupState=true, lastUsedAt=now) を渡した後に:
+	//   - SignCount / BackupState / LastUsedAt は最新値へ反映される（Req 4.1, 4.2）
+	//   - BackupEligible は登録時の true のまま不変（Req 4.3 / SQL SET 句に含まれないため）
+	// を検証する。
+	t.Run("UpdateAuthenticationState_sign_count_backup_state_last_used_atが反映される", func(t *testing.T) {
+		userID := insertPasskeyTestUser(t, db, "cred-updateauthnstate@test.com")
 		c := newTestPasskeyCredential(userID, []byte{0xb0, 0x01}, []byte{0x11})
+		// Issue #234 Req 4.3 検証用: 登録時 BE=true / BS=false にすることで、
+		// UpdateAuthenticationState 後に BE が不変で保持されることを assert できる。
+		c.BackupEligible = true
+		c.BackupState = false
 		if err := repo.Create(ctx, c); err != nil {
 			t.Fatalf("Create に失敗: %v", err)
 		}
 
 		newSignCount := uint32(100)
 		newLastUsedAt := time.Now().UTC().Truncate(time.Microsecond)
-		if err := repo.UpdateSignCount(ctx, c.ID, newSignCount, newLastUsedAt); err != nil {
-			t.Fatalf("UpdateSignCount に失敗: %v", err)
+		if err := repo.UpdateAuthenticationState(ctx, c.ID, newSignCount, true, newLastUsedAt); err != nil {
+			t.Fatalf("UpdateAuthenticationState に失敗: %v", err)
 		}
 
 		got, err := repo.FindByCredentialID(ctx, c.CredentialID)
@@ -252,6 +274,52 @@ func TestPostgresPasskeyCredentialRepo_DB(t *testing.T) {
 		}
 		if !got.LastUsedAt.Equal(newLastUsedAt) {
 			t.Errorf("LastUsedAt 不一致: got %v, want %v", got.LastUsedAt, newLastUsedAt)
+		}
+		// Req 4.2: BackupState は最新観測値（true）へ更新されている。
+		if !got.BackupState {
+			t.Errorf("BackupState 更新反映されず: got %v, want true", got.BackupState)
+		}
+		// Req 4.3: BackupEligible は登録時の値（true）のまま不変
+		// （SQL SET 句に backup_eligible を含めない構造で担保）。
+		if !got.BackupEligible {
+			t.Errorf("BackupEligible が変化した（Req 4.3 違反 / 不変であるべき）: got %v, want true",
+				got.BackupEligible)
+		}
+	})
+
+	// Case 5b (NFR 1.3 regression): 本修正前に登録された credential 行を模して、
+	// backup_eligible / backup_state を INSERT 対象から省いた行（DB DEFAULT false が入る）を
+	// 直接 INSERT する。その後 FindByCredentialID で BE=false / BS=false のまま
+	// エラーなく読み出せることを確認する（NFR 1.3: 旧行読み出しでアプリケーションを
+	// 異常終了させない / DEFAULT false による安全側 fallback）。
+	t.Run("FindByCredentialID_旧行(BE_BS列DEFAULT)を安全に読み出す_NFR1.3", func(t *testing.T) {
+		userID := insertPasskeyTestUser(t, db, "cred-legacy-row@test.com")
+		credentialID := []byte{0xb0, 0x99}
+		publicKey := []byte{0x99}
+		// backup_eligible / backup_state を INSERT 列に含めず、DB DEFAULT false に任せる。
+		// これは migration 適用前に永続化された行（本修正導入前の credential）と同じ状態。
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO passkey_credentials (
+			     user_id, credential_id, public_key, sign_count,
+			     attestation_type, transports
+			 ) VALUES ($1, $2, $3, 0, 'none', 'internal')`,
+			userID, credentialID, publicKey,
+		); err != nil {
+			t.Fatalf("旧行 INSERT に失敗: %v", err)
+		}
+
+		got, err := repo.FindByCredentialID(ctx, credentialID)
+		if err != nil {
+			t.Fatalf("旧行 FindByCredentialID がエラーを返した（NFR 1.3 違反）: %v", err)
+		}
+		if got == nil {
+			t.Fatal("旧行 FindByCredentialID が nil を返した（保存済み credential がヒットしない）")
+		}
+		if got.BackupEligible {
+			t.Errorf("旧行 BackupEligible が DEFAULT false ではない: got %v, want false", got.BackupEligible)
+		}
+		if got.BackupState {
+			t.Errorf("旧行 BackupState が DEFAULT false ではない: got %v, want false", got.BackupState)
 		}
 	})
 
@@ -326,10 +394,13 @@ func TestPostgresPasskeyCredentialRepo_DB(t *testing.T) {
 		}
 
 		// 期待列（design.md §Physical Data Model と 1:1）
+		// Issue #234: BackupEligible / BackupState 列を追加（NFR 1.1 の許容範囲 = 既存列不変 +
+		// 検証情報のみに限定）。BE/BS は WebAuthn credential 検証情報のため NFR 1.1 に整合する。
 		want := map[string]bool{
 			"id": true, "user_id": true, "credential_id": true, "public_key": true,
 			"sign_count": true, "attestation_type": true, "aaguid": true,
 			"transports": true, "created_at": true, "last_used_at": true,
+			"backup_eligible": true, "backup_state": true,
 		}
 		if len(cols) != len(want) {
 			t.Errorf("カラム数が期待と異なる（秘密情報用の列が追加されている可能性 / NFR 1.1）: got %d cols %v, want %d",

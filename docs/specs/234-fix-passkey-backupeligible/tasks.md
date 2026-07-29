@@ -7,7 +7,7 @@
 `_Depends:_` を明示する。behavior-changing task には対応する regression / 単体テスト追加を
 同タスク内に含める（`_Requirements:_` に列挙した AC のテストを task 内で完結させる）。
 
-- [ ] 1. `passkey_credentials` に BE/BS 列を追加する migration と schema regression テスト更新
+- [x] 1. `passkey_credentials` に BE/BS 列を追加する migration と schema regression テスト更新
   - `internal/database/migrations/20260728120000_add_passkey_credential_backup_flags.up.sql` を新規作成
     - `ALTER TABLE passkey_credentials ADD COLUMN backup_eligible BOOLEAN NOT NULL DEFAULT false,
       ADD COLUMN backup_state BOOLEAN NOT NULL DEFAULT false`
@@ -21,7 +21,7 @@
     `backup_state` を追加（migration 適用後に列数チェックが green を維持する regression）
   - _Requirements: NFR 1.1, NFR 1.2, NFR 1.3_
 
-- [ ] 2. Repository と domain model に BE/BS を通す
+- [x] 2. Repository と domain model に BE/BS を通す
   - `internal/model/passkey.go` の `PasskeyCredential` に `BackupEligible bool` /
     `BackupState bool` を追加（doc comment に「Req 4.3: BE は認証成功時に上書き更新しない」旨を明記）
   - `internal/repository/interfaces.go` の `PasskeyCredentialRepository` から
@@ -50,7 +50,7 @@
   - _Boundary: PasskeyCredentialRepository, PasskeyCredentialModel_
   - _Depends: 1_
 
-- [ ] 3. WebAuthn adapter に BE/BS の双方向 propagate を実装
+- [x] 3. WebAuthn adapter に BE/BS の双方向 propagate を実装
   - `internal/passkey/webauthn_adapter.go` を修正
     - `ParsedCredential` に `BackupEligible bool` / `BackupState bool` を追加
     - `toParsedCredential` で `cred.Flags.BackupEligible` / `cred.Flags.BackupState` を propagate
@@ -78,7 +78,7 @@
   - _Boundary: WebAuthnAdapter, AuthenticationServiceCompileGlue_
   - _Depends: 2_
 
-- [ ] 4. Registration service で BE/BS を永続化
+- [x] 4. Registration service で BE/BS を永続化
   - `internal/passkey/registration_service.go` を修正
     - `FinishRegistrationNew` 内の `&model.PasskeyCredential{...}` リテラルに
       `BackupEligible: parsed.BackupEligible` / `BackupState: parsed.BackupState` を追加
@@ -99,7 +99,7 @@
   - _Boundary: RegistrationService_
   - _Depends: 3_
 
-- [ ] 5. Authentication service で stored BE/BS を lookup 反映し BS を最新化
+- [x] 5. Authentication service で stored BE/BS を lookup 反映し BS を最新化
   - `internal/passkey/authentication_service.go` を修正
     - `lookup` closure 内の `webauthn.Credential` 組み立てに
       `Flags: webauthn.CredentialFlags{BackupEligible: cred.BackupEligible, BackupState: cred.BackupState}`
@@ -134,7 +134,7 @@
   - _Boundary: AuthenticationService_
   - _Depends: 4_
 
-- [ ] 6. E2E DB-backed regression: BE=1 全動線と BE=0 baseline の同時 green を担保
+- [x] 6. E2E DB-backed regression: BE=1 全動線と BE=0 baseline の同時 green を担保
   - `internal/handler/passkey_e2e_db_test.go` を修正
     - 既存 `TestE2E_PasskeyFullFlow_DBBacked` は無変更で維持し、本修正後も BE=0 baseline で
       green を保持することを CI で確認する（Req 3.3, 5.2, 5.4）

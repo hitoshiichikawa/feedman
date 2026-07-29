@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/hitoshi/feedman/internal/model"
 )
 
@@ -31,11 +32,13 @@ import (
 // error を返す no-op として実装する。
 type stubAuthnAdapter struct {
 	beginLoginFn func() ([]byte, []byte, []byte, error)
-	// finishLoginFn は library の挙動（lookup 呼び出し + 成否 + updatedSignCount）を
-	// 模擬する。test 側で lookup を呼びたい場合はここで credentialLookup(...) を実行する。
+	// finishLoginFn は library の挙動（lookup 呼び出し + 成否 + updatedSignCount +
+	// updatedBackupState）を模擬する。test 側で lookup を呼びたい場合はここで
+	// credentialLookup(...) を実行する。updatedBackupState は Issue #234 task 3 で追加した
+	// 4 番目の戻り値（Req 4.2 / Flags.BackupState 最新化）。
 	finishLoginFn func(sessionData, requestBody []byte,
 		lookup func(credentialID []byte) (WebAuthnUser, *ParsedCredential, error),
-	) ([]byte, []byte, uint32, error)
+	) ([]byte, []byte, uint32, bool, error)
 
 	beginLoginCalled  int
 	finishLoginCalled int
@@ -64,13 +67,13 @@ func (a *stubAuthnAdapter) BeginLogin() ([]byte, []byte, []byte, error) {
 
 func (a *stubAuthnAdapter) FinishLogin(sessionData []byte, requestBody []byte,
 	lookup func(credentialID []byte) (WebAuthnUser, *ParsedCredential, error),
-) ([]byte, []byte, uint32, error) {
+) ([]byte, []byte, uint32, bool, error) {
 	a.finishLoginCalled++
 	a.lastSessionData = sessionData
 	if a.finishLoginFn != nil {
 		return a.finishLoginFn(sessionData, requestBody, lookup)
 	}
-	return nil, nil, 0, errors.New("finishLoginFn not configured")
+	return nil, nil, 0, false, errors.New("finishLoginFn not configured")
 }
 
 // stubChallengeStoreForAuthn は challengeStore interface（本 package 内 unexported）を
@@ -149,14 +152,15 @@ func (s *stubChallengeStoreForAuthn) Consume(
 
 // stubCredentialReader は PasskeyCredentialReader interface を差し替えるスタブ。
 type stubCredentialReader struct {
-	findByCredentialIDFn func(ctx context.Context, credentialID []byte) (*model.PasskeyCredential, error)
-	updateSignCountFn    func(ctx context.Context, id string, signCount uint32, lastUsedAt time.Time) error
+	findByCredentialIDFn        func(ctx context.Context, credentialID []byte) (*model.PasskeyCredential, error)
+	updateAuthenticationStateFn func(ctx context.Context, id string, signCount uint32, backupState bool, lastUsedAt time.Time) error
 
-	findCalled           int
-	updateCalled         int
-	lastUpdatedID        string
-	lastUpdatedSignCount uint32
-	lastUpdatedLastUsed  time.Time
+	findCalled             int
+	updateCalled           int
+	lastUpdatedID          string
+	lastUpdatedSignCount   uint32
+	lastUpdatedBackupState bool
+	lastUpdatedLastUsed    time.Time
 }
 
 func (r *stubCredentialReader) FindByCredentialID(ctx context.Context, credentialID []byte) (*model.PasskeyCredential, error) {
@@ -167,13 +171,16 @@ func (r *stubCredentialReader) FindByCredentialID(ctx context.Context, credentia
 	return nil, nil
 }
 
-func (r *stubCredentialReader) UpdateSignCount(ctx context.Context, id string, signCount uint32, lastUsedAt time.Time) error {
+func (r *stubCredentialReader) UpdateAuthenticationState(
+	ctx context.Context, id string, signCount uint32, backupState bool, lastUsedAt time.Time,
+) error {
 	r.updateCalled++
 	r.lastUpdatedID = id
 	r.lastUpdatedSignCount = signCount
+	r.lastUpdatedBackupState = backupState
 	r.lastUpdatedLastUsed = lastUsedAt
-	if r.updateSignCountFn != nil {
-		return r.updateSignCountFn(ctx, id, signCount, lastUsedAt)
+	if r.updateAuthenticationStateFn != nil {
+		return r.updateAuthenticationStateFn(ctx, id, signCount, backupState, lastUsedAt)
 	}
 	return nil
 }
@@ -365,24 +372,28 @@ func TestAuthenticationService_BeginAuthentication(t *testing.T) {
 // ------------------------------------------------------------
 
 // buildSuccessfulFinishLogin は「lookup を呼び lookup が返す user handle と credential ID を
-// そのまま返して updatedSignCount = credential SignCount + 1 とする」stub adapter を組み立てる
-// ヘルパー。テストが提示する credentialID を lookup に渡す。
-func buildSuccessfulFinishLogin(presentedCredentialID []byte, updatedSignCount uint32) func(
+// そのまま返して updatedSignCount と updatedBackupState を返す」stub adapter を組み立てる
+// ヘルパー。テストが提示する credentialID を lookup に渡す。updatedBackupState は
+// Issue #234 task 3 で追加された 4 番目の戻り値であり、library が assertion authenticatorData
+// から取り出した最新 BS 値を模擬する（Req 4.2 の観測点）。
+func buildSuccessfulFinishLogin(
+	presentedCredentialID []byte, updatedSignCount uint32, updatedBackupState bool,
+) func(
 	sessionData, requestBody []byte,
 	lookup func(credentialID []byte) (WebAuthnUser, *ParsedCredential, error),
-) ([]byte, []byte, uint32, error) {
+) ([]byte, []byte, uint32, bool, error) {
 	return func(sessionData, requestBody []byte,
 		lookup func(credentialID []byte) (WebAuthnUser, *ParsedCredential, error),
-	) ([]byte, []byte, uint32, error) {
+	) ([]byte, []byte, uint32, bool, error) {
 		user, parsed, err := lookup(presentedCredentialID)
 		if err != nil {
 			// adapter は lookup エラーを ErrAuthenticationFailed に正規化する仕様
-			return nil, nil, 0, ErrAuthenticationFailed
+			return nil, nil, 0, false, ErrAuthenticationFailed
 		}
 		if user == nil || parsed == nil {
-			return nil, nil, 0, ErrAuthenticationFailed
+			return nil, nil, 0, false, ErrAuthenticationFailed
 		}
-		return user.WebAuthnID(), parsed.ID, updatedSignCount, nil
+		return user.WebAuthnID(), parsed.ID, updatedSignCount, updatedBackupState, nil
 	}
 }
 
@@ -420,7 +431,7 @@ func TestAuthenticationService_FinishAuthentication(t *testing.T) {
 		// Arrange
 		svc, adapter, challenges, creds, users, codes := newAuthenticationServiceFixture(t)
 		setupExistingCredential(creds, users)
-		adapter.finishLoginFn = buildSuccessfulFinishLogin(credentialID, 10)
+		adapter.finishLoginFn = buildSuccessfulFinishLogin(credentialID, 10, false)
 
 		// Act — Begin して発行した challenge を Consume して Finish に流す
 		challengeID, _, err := svc.BeginAuthentication(ctx, validPKCEChallenge)
@@ -468,7 +479,7 @@ func TestAuthenticationService_FinishAuthentication(t *testing.T) {
 		// Arrange
 		svc, adapter, _, creds, users, codes := newAuthenticationServiceFixture(t)
 		setupExistingCredential(creds, users)
-		adapter.finishLoginFn = buildSuccessfulFinishLogin(credentialID, 10)
+		adapter.finishLoginFn = buildSuccessfulFinishLogin(credentialID, 10, false)
 
 		// Act
 		challengeID, _, err := svc.BeginAuthentication(ctx, validPKCEChallenge)
@@ -490,11 +501,12 @@ func TestAuthenticationService_FinishAuthentication(t *testing.T) {
 		}
 	})
 
-	t.Run("成功時に UpdateSignCount が正しい引数で呼ばれる (NFR 1.4 / sign_count 更新)", func(t *testing.T) {
+	t.Run("成功時に UpdateAuthenticationState が正しい引数で呼ばれる (Req 4.1, 4.2, NFR 1.4)", func(t *testing.T) {
 		// Arrange
 		svc, adapter, _, creds, users, _ := newAuthenticationServiceFixture(t)
 		setupExistingCredential(creds, users)
-		adapter.finishLoginFn = buildSuccessfulFinishLogin(credentialID, 42)
+		// updatedBackupState=true を adapter に返させ、Req 4.2 の最新化経路も同時に検証する
+		adapter.finishLoginFn = buildSuccessfulFinishLogin(credentialID, 42, true)
 
 		// Act
 		challengeID, _, err := svc.BeginAuthentication(ctx, validPKCEChallenge)
@@ -507,18 +519,157 @@ func TestAuthenticationService_FinishAuthentication(t *testing.T) {
 
 		// Assert
 		if creds.updateCalled != 1 {
-			t.Fatalf("UpdateSignCount called %d times, want 1", creds.updateCalled)
+			t.Fatalf("UpdateAuthenticationState called %d times, want 1", creds.updateCalled)
 		}
 		if creds.lastUpdatedID != credRowID {
-			t.Errorf("UpdateSignCount id = %q, want %q (must use credential PK / not credentialID)",
+			t.Errorf("UpdateAuthenticationState id = %q, want %q (must use credential PK / not credentialID)",
 				creds.lastUpdatedID, credRowID)
 		}
 		if creds.lastUpdatedSignCount != 42 {
-			t.Errorf("UpdateSignCount signCount = %d, want 42", creds.lastUpdatedSignCount)
+			t.Errorf("UpdateAuthenticationState signCount = %d, want 42", creds.lastUpdatedSignCount)
+		}
+		if !creds.lastUpdatedBackupState {
+			t.Errorf("UpdateAuthenticationState backupState = %v, want true (must reflect updatedBackupState / Req 4.2)",
+				creds.lastUpdatedBackupState)
 		}
 		if !creds.lastUpdatedLastUsed.Equal(authnFixedNow) {
-			t.Errorf("UpdateSignCount lastUsedAt = %v, want %v (must use service now())",
+			t.Errorf("UpdateAuthenticationState lastUsedAt = %v, want %v (must use service now())",
 				creds.lastUpdatedLastUsed, authnFixedNow)
+		}
+	})
+
+	t.Run("成功時に UpdateAuthenticationState には backupState=false も伝播する (Req 4.2 の反対系)", func(t *testing.T) {
+		// Arrange: adapter が updatedBackupState=false を返した場合、DB 更新側も false になる
+		svc, adapter, _, creds, users, _ := newAuthenticationServiceFixture(t)
+		setupExistingCredential(creds, users)
+		adapter.finishLoginFn = buildSuccessfulFinishLogin(credentialID, 7, false)
+
+		// Act
+		challengeID, _, err := svc.BeginAuthentication(ctx, validPKCEChallenge)
+		if err != nil {
+			t.Fatalf("BeginAuthentication: %v", err)
+		}
+		if _, err := svc.FinishAuthentication(ctx, []byte("body"), challengeID); err != nil {
+			t.Fatalf("FinishAuthentication: %v", err)
+		}
+
+		// Assert
+		if creds.updateCalled != 1 {
+			t.Fatalf("UpdateAuthenticationState called %d times, want 1", creds.updateCalled)
+		}
+		if creds.lastUpdatedBackupState {
+			t.Errorf("UpdateAuthenticationState backupState = true, want false (must reflect adapter value / Req 4.2)")
+		}
+	})
+
+	t.Run("lookup が返す webauthn.Credential.Flags に stored BE/BS が反映される (Req 2.1, 2.2, 2.3)", func(t *testing.T) {
+		// Arrange: stored credential を BE=true / BS=true で組み立てる
+		svc, adapter, _, creds, users, _ := newAuthenticationServiceFixture(t)
+		creds.findByCredentialIDFn = func(ctx context.Context, id []byte) (*model.PasskeyCredential, error) {
+			return &model.PasskeyCredential{
+				ID:              credRowID,
+				UserID:          targetUserID,
+				CredentialID:    credentialID,
+				PublicKey:       []byte("public-key"),
+				SignCount:       5,
+				AttestationType: "none",
+				AAGUID:          []byte("aaguid-bytes"),
+				Transports:      []string{"internal"},
+				BackupEligible:  true,
+				BackupState:     true,
+			}, nil
+		}
+		users.findByIDFn = func(ctx context.Context, id string) (*model.User, error) {
+			return &model.User{ID: id, Username: "alice", UsernameNormalized: "alice"}, nil
+		}
+
+		// spy: adapter 側で lookup を呼び出し、返された WebAuthnUser の Flags を捕捉する。
+		// これが library の login validation（v0.17.4 login.go:371）に流れる Flags そのもの。
+		var capturedFlags webauthn.CredentialFlags
+		var lookupCalled int
+		adapter.finishLoginFn = func(sessionData, requestBody []byte,
+			lookup func(credentialID []byte) (WebAuthnUser, *ParsedCredential, error),
+		) ([]byte, []byte, uint32, bool, error) {
+			user, parsed, lookupErr := lookup(credentialID)
+			if lookupErr != nil {
+				return nil, nil, 0, false, ErrAuthenticationFailed
+			}
+			lookupCalled++
+			wcreds := user.WebAuthnCredentials()
+			if len(wcreds) != 1 {
+				return nil, nil, 0, false, errors.New("expected 1 webauthn credential")
+			}
+			capturedFlags = wcreds[0].Flags
+			return user.WebAuthnID(), parsed.ID, 10, true, nil
+		}
+
+		// Act
+		challengeID, _, err := svc.BeginAuthentication(ctx, validPKCEChallenge)
+		if err != nil {
+			t.Fatalf("BeginAuthentication: %v", err)
+		}
+		if _, err := svc.FinishAuthentication(ctx, []byte("body"), challengeID); err != nil {
+			t.Fatalf("FinishAuthentication: %v", err)
+		}
+
+		// Assert
+		if lookupCalled != 1 {
+			t.Fatalf("lookup should be called exactly once, got %d", lookupCalled)
+		}
+		if !capturedFlags.BackupEligible {
+			t.Errorf("webauthn.Credential.Flags.BackupEligible = false, want true " +
+				"(stored BE must be propagated to lookup / Req 2.1〜2.3, login.go:371 の一致判定用)")
+		}
+		if !capturedFlags.BackupState {
+			t.Errorf("webauthn.Credential.Flags.BackupState = false, want true " +
+				"(stored BS も同時に propagate する必要がある / Req 2.1〜2.3)")
+		}
+	})
+
+	t.Run("stored BE=false のとき Flags.BackupEligible=false が lookup に反映される (Req 2.1 反対系)", func(t *testing.T) {
+		// Arrange: 既存 credential 行（BE=false / BS=false）を模擬
+		svc, adapter, _, creds, users, _ := newAuthenticationServiceFixture(t)
+		creds.findByCredentialIDFn = func(ctx context.Context, id []byte) (*model.PasskeyCredential, error) {
+			return &model.PasskeyCredential{
+				ID:             credRowID,
+				UserID:         targetUserID,
+				CredentialID:   credentialID,
+				PublicKey:      []byte("public-key"),
+				BackupEligible: false,
+				BackupState:    false,
+			}, nil
+		}
+		users.findByIDFn = func(ctx context.Context, id string) (*model.User, error) {
+			return &model.User{ID: id, Username: "bob", UsernameNormalized: "bob"}, nil
+		}
+
+		var capturedFlags webauthn.CredentialFlags
+		adapter.finishLoginFn = func(sessionData, requestBody []byte,
+			lookup func(credentialID []byte) (WebAuthnUser, *ParsedCredential, error),
+		) ([]byte, []byte, uint32, bool, error) {
+			user, parsed, lookupErr := lookup(credentialID)
+			if lookupErr != nil {
+				return nil, nil, 0, false, ErrAuthenticationFailed
+			}
+			capturedFlags = user.WebAuthnCredentials()[0].Flags
+			return user.WebAuthnID(), parsed.ID, 3, false, nil
+		}
+
+		// Act
+		challengeID, _, err := svc.BeginAuthentication(ctx, validPKCEChallenge)
+		if err != nil {
+			t.Fatalf("BeginAuthentication: %v", err)
+		}
+		if _, err := svc.FinishAuthentication(ctx, []byte("body"), challengeID); err != nil {
+			t.Fatalf("FinishAuthentication: %v", err)
+		}
+
+		// Assert
+		if capturedFlags.BackupEligible {
+			t.Errorf("webauthn.Credential.Flags.BackupEligible = true, want false (stored BE=false 値の propagate)")
+		}
+		if capturedFlags.BackupState {
+			t.Errorf("webauthn.Credential.Flags.BackupState = true, want false")
 		}
 	})
 
@@ -554,7 +705,7 @@ func TestAuthenticationService_FinishAuthentication(t *testing.T) {
 		users.findByIDFn = func(ctx context.Context, id string) (*model.User, error) {
 			return &model.User{ID: id}, nil
 		}
-		adapter.finishLoginFn = buildSuccessfulFinishLogin(credentialID, 10)
+		adapter.finishLoginFn = buildSuccessfulFinishLogin(credentialID, 10, false)
 
 		// Act
 		challengeID, _, err := svc.BeginAuthentication(ctx, validPKCEChallenge)
@@ -579,10 +730,10 @@ func TestAuthenticationService_FinishAuthentication(t *testing.T) {
 		// adapter が CloneWarning などで ErrAuthenticationFailed を返すケース
 		adapter.finishLoginFn = func(sessionData, requestBody []byte,
 			lookup func(credentialID []byte) (WebAuthnUser, *ParsedCredential, error),
-		) ([]byte, []byte, uint32, error) {
+		) ([]byte, []byte, uint32, bool, error) {
 			// lookup は呼ぶが最終的に counter 後退で reject
 			_, _, _ = lookup(credentialID)
-			return nil, nil, 0, ErrAuthenticationFailed
+			return nil, nil, 0, false, ErrAuthenticationFailed
 		}
 
 		// Act
@@ -597,7 +748,7 @@ func TestAuthenticationService_FinishAuthentication(t *testing.T) {
 			t.Fatalf("expected ErrAuthenticationFailed, got %v", err)
 		}
 		if creds.updateCalled != 0 {
-			t.Errorf("UpdateSignCount must not be called on rejected assertion")
+			t.Errorf("UpdateAuthenticationState must not be called on rejected assertion (Req 4.1 / 4.3)")
 		}
 		if codes.createCalled != 0 {
 			t.Errorf("auth_code must not be issued on rejected assertion")
@@ -687,7 +838,7 @@ func TestAuthenticationService_FinishAuthentication(t *testing.T) {
 		// Arrange
 		svc, adapter, _, creds, users, codes := newAuthenticationServiceFixture(t)
 		setupExistingCredential(creds, users)
-		adapter.finishLoginFn = buildSuccessfulFinishLogin(credentialID, 10)
+		adapter.finishLoginFn = buildSuccessfulFinishLogin(credentialID, 10, false)
 		infraErr := errors.New("auth_code insert failed")
 		codes.createFn = func(ctx context.Context, c *model.AuthCode) error {
 			return infraErr
