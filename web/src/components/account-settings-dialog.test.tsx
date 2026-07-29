@@ -332,6 +332,98 @@ describe("AccountSettingsDialog コンポーネント", () => {
     ).toBeInTheDocument();
   });
 
+  it("認証済みユーザーがダイアログを開くとパスキー追加登録セクションが表示されること (Issue #242 Req 1.1)", async () => {
+    setupMockFetch({ auth: "ok" });
+    const user = userEvent.setup();
+    render(<AccountSettingsDialog />, { wrapper: createWrapper() });
+
+    await openDialog(user);
+
+    // data 取得成功後に本セクションが描画される
+    await waitFor(() => {
+      expect(screen.getByTestId("passkey-add-section")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("passkey-add-trigger")).toBeInTheDocument();
+  });
+
+  it("Google 由来（email 未設定含む）ユーザーでも同一位置にパスキー追加導線が表示されること (Issue #242 Req 5.1)", async () => {
+    // email 空文字（Google 由来でパスキー未登録相当）を再現
+    setupMockFetch({ auth: "ok-empty-email" });
+    const user = userEvent.setup();
+    render(<AccountSettingsDialog />, { wrapper: createWrapper() });
+
+    await openDialog(user);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("passkey-add-section")).toBeInTheDocument();
+    });
+    // 起動要素は同一操作性で存在
+    expect(screen.getByTestId("passkey-add-trigger")).toBeInTheDocument();
+  });
+
+  it("アカウント情報取得中はパスキー追加登録セクションが表示されないこと (Issue #242 Req 1.3)", async () => {
+    // /auth/me を pending 状態にする
+    mockFetch.mockImplementation((url: string) => {
+      if (url === "/auth/me") {
+        return new Promise(() => {}); // never resolve
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    const user = userEvent.setup();
+    render(<AccountSettingsDialog />, { wrapper: createWrapper() });
+
+    await openDialog(user);
+
+    // loading プレースホルダは出るが、追加登録セクションは描画されない
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("account-settings-loading"),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByTestId("passkey-add-section"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("passkey-add-trigger"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("アカウント情報取得に失敗したときはパスキー追加登録セクションが表示されないこと (Issue #242 Req 1.4)", async () => {
+    setupMockFetch({ auth: "error" });
+    const user = userEvent.setup();
+    render(<AccountSettingsDialog />, { wrapper: createWrapper() });
+
+    await openDialog(user);
+
+    // エラー通知は出るが、追加登録セクションは描画されない
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("account-settings-error"),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByTestId("passkey-add-section"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("passkey-add-trigger"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("入口ボタンを押さない（ダイアログを開かない）と追加登録起動要素は表示されないこと (Issue #242 Req 1.2 の未認証相当 UI 未描画)", () => {
+    // 未認証状態でも、ダイアログを開かなければ本セクションは DOM に存在しない
+    setupMockFetch({ auth: "error" });
+    render(<AccountSettingsDialog />, { wrapper: createWrapper() });
+
+    // トリガーは表示されるが、追加登録セクション自体はダイアログを開かない限り DOM 外
+    expect(screen.getByTestId("account-settings-trigger")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("passkey-add-section"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("passkey-add-trigger"),
+    ).not.toBeInTheDocument();
+  });
+
   it("email 未設定（空文字）のパスキーのみアカウントでも退会が同一フローで完了すること (Req 3.7)", async () => {
     setupMockFetch({ auth: "ok-empty-email", withdraw: "success" });
     const user = userEvent.setup();

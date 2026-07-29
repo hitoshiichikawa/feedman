@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { useCurrentUser } from "@/hooks/use-auth";
 import { WithdrawDialog } from "@/components/withdraw-dialog";
+import { PasskeyAddSection } from "@/components/passkey-add-section";
 import type { User } from "@/types/auth";
 
 /**
@@ -127,6 +128,12 @@ function AccountSettingsBody({ onWithdrawn }: AccountSettingsBodyProps) {
   return (
     <div className="space-y-6">
       <AccountInfoSection user={data} />
+      {/*
+       * 追加パスキー登録セクション (Issue #242 / Req 1)。
+       * `data` が取得成功したときのみ本要素が描画されるため、未認証・取得前・取得失敗時は
+       * 構造で自動的に非表示になる（Req 1.2 / 1.3 / 1.4）。
+       */}
+      <PasskeyAddSection />
       <WithdrawSection onWithdrawn={onWithdrawn} />
     </div>
   );
