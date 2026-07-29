@@ -23,6 +23,16 @@ Issue #241「パスキー登録した username がどこにも表示されない
   - `TestAuthHandler_Me_Authenticated_ReturnsUserJSON`（既存 status / Content-Type のみを検査するテスト）は無変更で pass することを確認。struct 化しても JSON output shape の後方互換（既存キー `id / email / name` の型と値）は完全に維持される。
 - **残存課題**: なし（Task 2 スコープ内で完結）。web 側の型定義 / hook / UI の変更は Task 3, 4 のスコープであり、本 task では触れていない（Task 2 の `_Boundary: AuthHandler_` を厳守）。
 
+### Task 3
+
+- **採用方針**: `web/src/types/auth.ts` の `User` interface に必須プロパティ `username: string | null` を追加し、`web/src/hooks/use-auth.test.tsx` の既存「認証済みユーザー情報を取得できること」テストで mock 応答 JSON と `toEqual` 期待値の双方に `username: "test-user"` を同期追加した。401 経路テスト・`useLogout` 系テスト・`auth-guard.tsx` は無変更（本 task boundary 外の非破壊性を維持）。
+- **重要な判断**:
+  - `username` を `?` optional ではなく `string | null` の **必須プロパティ**とした。design.md / tasks.md の指示に従い、Task 2 の backend 実装（`Username *string`、`omitempty` なし）が「キーは常に存在、値のみ null」という契約を採用したため、型側もキー存在を強制する union with null が正しい写像となる。
+  - `use-auth.test.tsx` 内の 401 経路テスト（`未認証時（401）はエラー状態になること`）は response body を `data` として消費しないため、mock JSON に username を追加する必要は無い。tasks.md の指示（無変更）どおり触っていない。
+  - 事前の `git stash` により、`web/` 配下には本修正前から既存の TypeScript エラーが 39 件存在することを確認（`feed-list.test.tsx` / `starred-item-list.test.tsx` / `starred-nav-item.test.tsx` / `rewrites.test.ts` 由来。いずれも `User` / `username` とは無関係）。本修正適用後もエラー件数は 39 件で変化なし。既存 CI が `tsc --noEmit` を通していないことを踏まえ、本 task の diff が新規型エラーを生んでいないことを確認したうえで進めた。
+  - `web/src/components/account-settings-dialog.tsx` は `user.name` / `user.email` のみを参照し、`username` を参照していないため型追加による影響を受けない（Task 4 で username 表示行を追加する予定）。他の mock（`app-shell.test.tsx` / `auth-guard.test.tsx` / `logout-button.test.tsx`）は inline JSON でありオブジェクトを `User` 型として型付けしていないため、`username` を含まない mock 応答が渡ってもコンパイル・実行の双方で問題を起こさないことを確認した（`data.username` が runtime で undefined になるが、それらのテストは username を assert しない）。
+- **残存課題**: Task 4（`account-settings-dialog.tsx` の username 表示行追加）で `user.username` を実際に参照する際、`useCurrentUser` の cache には Task 3 で追加された username フィールドが正しく流れていることが前提となる。本 task の変更で契約は成立している。
+
 ## 実行結果
 
 - `go vet ./internal/passkey/... ./internal/repository/...`: no findings
