@@ -21,7 +21,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 4.3, NFR 2.2, NFR 3.1_
   - _Boundary: passkey.RegistrationService, PostgresPasskeyRegistrationTx_
 
-- [ ] 2. `GET /auth/me` レスポンスに username フィールドを追加する
+- [x] 2. `GET /auth/me` レスポンスに username フィールドを追加する
   - `internal/handler/auth_handler.go` の `Me()` 応答生成を **`map[string]interface{}` から
     専用 struct `meResponse` へ切り替え** し、`Username *string` フィールドを `json:"username"`
     （`omitempty` なし）で追加（design.md「Response Struct（Go）」節参照）
