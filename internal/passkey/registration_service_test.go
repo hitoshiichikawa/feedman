@@ -1047,6 +1047,80 @@ func TestRegistrationService_FinishRegistrationNew(t *testing.T) {
 			t.Errorf("BeginTx must not be called on malformed session")
 		}
 	})
+
+	// Issue #234 task 4: BE/BS 永続化の regression（Req 1.1 / 1.3 / 1.4）。
+	// adapter が返す ParsedCredential.BackupEligible / BackupState が、
+	// PasskeyCredentialWriter.CreateExec に渡る *model.PasskeyCredential の
+	// BE/BS 属性へ素通しで反映されることを検証する。
+	t.Run("adapter が BE=true / BS=true の ParsedCredential を返した場合は credential にそのまま反映される (Req 1.1, 1.3)", func(t *testing.T) {
+		// Arrange
+		svc, adapter, challenges, _, creds, _ := newRegistrationServiceFixture(t)
+		challenges.consumeFn = newConsumedFn()
+		adapter.finishRegistrationFn = func(user WebAuthnUser, sessionData []byte, requestBody []byte) (
+			*ParsedCredential, error,
+		) {
+			return &ParsedCredential{
+				ID:              []byte("cred-be-true"),
+				PublicKey:       []byte("pk-be-true"),
+				SignCount:       7,
+				AttestationType: "none",
+				BackupEligible:  true,
+				BackupState:     true,
+			}, nil
+		}
+
+		// Act
+		_, _, err := svc.FinishRegistrationNew(ctx, "challenge-id", []byte("attestation-body"), false)
+
+		// Assert
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if creds.lastCreatedCred == nil {
+			t.Fatal("lastCreatedCred is nil (CreateExec must be called with a credential)")
+		}
+		if !creds.lastCreatedCred.BackupEligible {
+			t.Errorf("credential.BackupEligible = false, want true (Req 1.1 / 1.3)")
+		}
+		if !creds.lastCreatedCred.BackupState {
+			t.Errorf("credential.BackupState = false, want true (Req 1.3)")
+		}
+	})
+
+	t.Run("adapter が BE=false / BS=false の ParsedCredential を返した場合は credential も両属性 false のまま保存される (Req 1.4)", func(t *testing.T) {
+		// Arrange
+		svc, adapter, challenges, _, creds, _ := newRegistrationServiceFixture(t)
+		challenges.consumeFn = newConsumedFn()
+		adapter.finishRegistrationFn = func(user WebAuthnUser, sessionData []byte, requestBody []byte) (
+			*ParsedCredential, error,
+		) {
+			return &ParsedCredential{
+				ID:              []byte("cred-be-false"),
+				PublicKey:       []byte("pk-be-false"),
+				SignCount:       0,
+				AttestationType: "none",
+				BackupEligible:  false,
+				BackupState:     false,
+			}, nil
+		}
+
+		// Act
+		_, _, err := svc.FinishRegistrationNew(ctx, "challenge-id", []byte("attestation-body"), false)
+
+		// Assert
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if creds.lastCreatedCred == nil {
+			t.Fatal("lastCreatedCred is nil (CreateExec must be called with a credential)")
+		}
+		if creds.lastCreatedCred.BackupEligible {
+			t.Errorf("credential.BackupEligible = true, want false (Req 1.4)")
+		}
+		if creds.lastCreatedCred.BackupState {
+			t.Errorf("credential.BackupState = true, want false (Req 1.4)")
+		}
+	})
 }
 
 // ------------------------------------------------------------
@@ -1265,6 +1339,98 @@ func TestRegistrationService_FinishAddCredential(t *testing.T) {
 		// Assert
 		if !errors.Is(err, ErrRegistrationFailed) {
 			t.Fatalf("expected ErrRegistrationFailed, got %v", err)
+		}
+	})
+
+	// Issue #234 task 4: 追加登録経路でも BE/BS が同 user への複数 credential それぞれで
+	// 個別に永続化されることを検証する（Req 1.2 / 1.3 / 1.4）。
+	// 追加登録は `Create`（非 Exec）経由で INSERT されるため、`lastCreatedCred` は
+	// stubCredentialWriter.Create で捕捉される。
+	t.Run("adapter が BE=true / BS=true の ParsedCredential を返した場合は credential にそのまま反映される (Req 1.2, 1.3)", func(t *testing.T) {
+		// Arrange
+		svc, adapter, challenges, users, creds, _ := newRegistrationServiceFixture(t)
+		challenges.consumeFn = newAddConsumedFn(authedUserID)
+		users.findByIDFn = func(ctx context.Context, id string) (*model.User, error) {
+			return &model.User{ID: id}, nil
+		}
+		creds.findByCredentialIDFn = func(ctx context.Context, credentialID []byte) (*model.PasskeyCredential, error) {
+			return nil, nil
+		}
+		adapter.finishRegistrationFn = func(user WebAuthnUser, sessionData []byte, requestBody []byte) (
+			*ParsedCredential, error,
+		) {
+			return &ParsedCredential{
+				ID:              []byte("add-cred-be-true"),
+				PublicKey:       []byte("add-pk-be-true"),
+				SignCount:       11,
+				AttestationType: "none",
+				BackupEligible:  true,
+				BackupState:     true,
+			}, nil
+		}
+
+		// Act
+		err := svc.FinishAddCredential(ctx, authedUserID, "challenge-id", []byte("body"))
+
+		// Assert
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if creds.createCalled != 1 {
+			t.Errorf("credential.Create called %d times, want 1", creds.createCalled)
+		}
+		if creds.lastCreatedCred == nil {
+			t.Fatal("lastCreatedCred is nil (Create must be called with a credential)")
+		}
+		if !creds.lastCreatedCred.BackupEligible {
+			t.Errorf("credential.BackupEligible = false, want true (Req 1.2 / 1.3)")
+		}
+		if !creds.lastCreatedCred.BackupState {
+			t.Errorf("credential.BackupState = false, want true (Req 1.3)")
+		}
+	})
+
+	t.Run("adapter が BE=false / BS=false の ParsedCredential を返した場合は credential も両属性 false のまま保存される (Req 1.4)", func(t *testing.T) {
+		// Arrange
+		svc, adapter, challenges, users, creds, _ := newRegistrationServiceFixture(t)
+		challenges.consumeFn = newAddConsumedFn(authedUserID)
+		users.findByIDFn = func(ctx context.Context, id string) (*model.User, error) {
+			return &model.User{ID: id}, nil
+		}
+		creds.findByCredentialIDFn = func(ctx context.Context, credentialID []byte) (*model.PasskeyCredential, error) {
+			return nil, nil
+		}
+		adapter.finishRegistrationFn = func(user WebAuthnUser, sessionData []byte, requestBody []byte) (
+			*ParsedCredential, error,
+		) {
+			return &ParsedCredential{
+				ID:              []byte("add-cred-be-false"),
+				PublicKey:       []byte("add-pk-be-false"),
+				SignCount:       0,
+				AttestationType: "none",
+				BackupEligible:  false,
+				BackupState:     false,
+			}, nil
+		}
+
+		// Act
+		err := svc.FinishAddCredential(ctx, authedUserID, "challenge-id", []byte("body"))
+
+		// Assert
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if creds.createCalled != 1 {
+			t.Errorf("credential.Create called %d times, want 1", creds.createCalled)
+		}
+		if creds.lastCreatedCred == nil {
+			t.Fatal("lastCreatedCred is nil (Create must be called with a credential)")
+		}
+		if creds.lastCreatedCred.BackupEligible {
+			t.Errorf("credential.BackupEligible = true, want false (Req 1.4)")
+		}
+		if creds.lastCreatedCred.BackupState {
+			t.Errorf("credential.BackupState = true, want false (Req 1.4)")
 		}
 	})
 }

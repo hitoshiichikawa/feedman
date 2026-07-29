@@ -411,6 +411,13 @@ func (s *RegistrationService) FinishRegistrationNew(
 		AttestationType: parsed.AttestationType,
 		AAGUID:          parsed.AAGUID,
 		Transports:      parsed.Transports,
+		// Issue #234 (Req 1.1 / 1.3 / 1.4): 登録時に authenticator が報告した BE/BS を
+		// 永続化する。Req 4.3 により BE は認証成功時に上書きされず、初回登録時の値を
+		// 不変で保持する（UPDATE の SET 句が backup_eligible を含まない設計で担保）。
+		// NFR 2.1: BE/BS は boolean のみを扱い、raw authenticatorData 等の生値は
+		// ログ・エラー・レスポンスに一切含めない（既存 logRejection 契約を維持）。
+		BackupEligible: parsed.BackupEligible,
+		BackupState:    parsed.BackupState,
 	}
 	if err := s.credentials.CreateExec(ctx, tx.Querier(), cred); err != nil {
 		if errors.Is(err, repository.ErrCredentialAlreadyRegistered) {
@@ -617,6 +624,13 @@ func (s *RegistrationService) FinishAddCredential(
 		AttestationType: parsed.AttestationType,
 		AAGUID:          parsed.AAGUID,
 		Transports:      parsed.Transports,
+		// Issue #234 (Req 1.2 / 1.3 / 1.4): 追加登録経路でも同 user への複数 credential
+		// それぞれについて authenticator が報告した BE/BS を個別に永続化する
+		// （Req 4.3 により BE は初回登録時の値を不変で保持）。
+		// 本経路は user 行が既存のため Req 1.5 の「credential 保存失敗時に user 行も
+		// 残さない」保護対象外（新規登録経路のみが対象）。
+		BackupEligible: parsed.BackupEligible,
+		BackupState:    parsed.BackupState,
 	}
 	if err := s.credentials.Create(ctx, cred); err != nil {
 		if errors.Is(err, repository.ErrCredentialAlreadyRegistered) {

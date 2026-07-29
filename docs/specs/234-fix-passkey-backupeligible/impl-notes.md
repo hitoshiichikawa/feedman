@@ -92,6 +92,47 @@
     (g) `buildSuccessfulFinishLogin` の 4 番目戻り値を `updatedBackupState` 制御可能に拡張。
   - task 6: E2E で `authenticator.Options.BackupEligible = true` を先に設定した BE=1 経路を実測。
 
+### Task 4
+
+- **採用方針**: `RegistrationService.FinishRegistrationNew` と `FinishAddCredential` の
+  `&model.PasskeyCredential{...}` リテラル 2 箇所に `BackupEligible: parsed.BackupEligible` /
+  `BackupState: parsed.BackupState` を追加し、adapter から得た BE/BS を素通しで永続化する。
+  既存 1-tx オーケストレーション（新規登録経路）および単体 `Create`（追加登録経路）の
+  制御フローは一切変更しない。regression test は既存の `newRegistrationServiceFixture` /
+  `stubWebAuthnAdapter.finishRegistrationFn` / `stubCredentialWriter.lastCreatedCred` を
+  再利用し、BE=true / BE=false の 2 系統を新規 / 追加の両経路それぞれで独立 subtest として追加した
+  （合計 4 subtest / Req 1.1・1.2・1.3・1.4）。
+- **重要な判断**:
+  - **Req 1.5 は既存 tx rollback テストで担保**: 「credential 保存失敗時に user 行も残さない」
+    は Issue #230 の 1-tx 契約と既存 rollback テスト（credential 重複 / インフラ障害 /
+    username race）で既に検証済み。BE/BS 列は migration の `NOT NULL DEFAULT false` により
+    INSERT 側に新規失敗経路を持ち込まないため、追加テストは不要（tasks.md の指針と整合）。
+  - **NFR 2.1 の運用継承**: BE/BS は boolean のみを扱い、raw authenticatorData や中間表現を
+    ログ・エラーに出さない。既存 `logRejection` パターン・error wrap ポリシーを一切変更せず、
+    新規のログ経路は追加しない。cred リテラルへのコメントで意図を明記した。
+  - **Red→Green の実測**: `BackupEligible: parsed.BackupEligible` を `false` に一時差し替えた
+    状態で BE=true 系の subtest 2 件が「credential.BackupEligible = false, want true」で
+    fail することを確認した後に本実装で green に戻したため、テストが実装の regression を
+    正しく検出する観測点として機能している。
+- **残存課題 / 次 task 申し送り**:
+  - task 5: `authentication_service.go` の以下を同時に切替（task 3 impl-notes の申し送り
+    (a)〜(g) を再掲）—
+    (a) lookup closure の `webauthn.Credential` に `Flags: webauthn.CredentialFlags{BackupEligible: cred.BackupEligible, BackupState: cred.BackupState}` を追加、
+    (b) `_, _, updatedSignCount, _, err := s.adapter.FinishLogin(...)` を
+    `_, _, updatedSignCount, updatedBackupState, err := ...` へ変更、
+    (c) `s.credentials.UpdateSignCount(...)` を
+    `s.credentials.UpdateAuthenticationState(..., updatedBackupState, ...)` へ差し替え、
+    (d) `PasskeyCredentialReader` narrow interface から `UpdateSignCount` を除去し
+    `UpdateAuthenticationState` を追加、
+    (e) task 2 で残置した `*PostgresPasskeyCredentialRepo.UpdateSignCount` メソッド本体を除去、
+    (f) `stubCredentialReader` を `UpdateAuthenticationState` に置換して backupState 検証を追加、
+    (g) `buildSuccessfulFinishLogin` の 4 番目戻り値を `updatedBackupState` 制御可能に拡張。
+  - task 4 では registration service の boundary に閉じた実装のみを行い、上記 authentication
+    service の boundary（task 5 / `AuthenticationService`）には一切触れていない。
+  - task 6: E2E で `SELECT backup_eligible, backup_state FROM passkey_credentials` により
+    task 4 で INSERT された BE=true / BS=true が実 DB へ到達していることを DB sanity で検証
+    可能（task 4 で ceremony finish → CreateExec 経由の書き込みまでは stub 経由で検証済み）。
+
 ## 確認事項
 
 - **task 2 と task 5 の boundary スコープ不整合（Issue #234 task 2 実装時に検出）**:
