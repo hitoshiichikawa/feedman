@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. パスキー新規登録 finish で users.name を username と同値で初期化する
+- [x] 1. パスキー新規登録 finish で users.name を username と同値で初期化する
   - `internal/passkey/registration_service.go` の `FinishRegistrationNew` 内 `newUser := &model.User{...}`
     構築箇所に **`Name: normalized`** を追加（既存 tx オーケストレーション / Issue #230 の
     `BeginTx → CreateUserOnlyExec → CreateExec → Commit` 境界内で完結。追加の tx 制御は書かない）
