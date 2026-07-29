@@ -134,7 +134,7 @@
   - _Boundary: AuthenticationService_
   - _Depends: 4_
 
-- [ ] 6. E2E DB-backed regression: BE=1 全動線と BE=0 baseline の同時 green を担保
+- [x] 6. E2E DB-backed regression: BE=1 全動線と BE=0 baseline の同時 green を担保
   - `internal/handler/passkey_e2e_db_test.go` を修正
     - 既存 `TestE2E_PasskeyFullFlow_DBBacked` は無変更で維持し、本修正後も BE=0 baseline で
       green を保持することを CI で確認する（Req 3.3, 5.2, 5.4）
