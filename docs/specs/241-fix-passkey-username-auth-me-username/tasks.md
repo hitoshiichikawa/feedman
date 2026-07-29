@@ -47,7 +47,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 4.1, NFR 1.1, NFR 1.2, NFR 2.1_
   - _Boundary: AuthHandler_
 
-- [ ] 3. Web の `User` 型と `useCurrentUser` フックの mock を username 対応にする
+- [x] 3. Web の `User` 型と `useCurrentUser` フックの mock を username 対応にする
   - `web/src/types/auth.ts` の `User` interface に **必須プロパティ**として
     `username: string | null` を追加（`?` optional ではなく union with `null`。API が
     常にキーを返すため / Req 2.1）。既存 `id / email / name / created_at` は無変更
