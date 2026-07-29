@@ -387,8 +387,17 @@ func (s *RegistrationService) FinishRegistrationNew(
 	}()
 
 	newUser := &model.User{
-		ID:                 pendingUserID,
-		Email:              "", // Req 1.6: リカバリ用メールなしを許容
+		ID:    pendingUserID,
+		Email: "", // Req 1.6: リカバリ用メールなしを許容
+		// Issue #241 / Req 1.1: 新規登録直後から自分の指定 ID を表示名として画面に
+		// 表示できるようにするため、users.name を保存する username と同値で初期化する。
+		// normalized は BeginRegistrationNew で ValidateAndNormalize を通過済みの
+		// 非空 lowercase 文字列である契約に依拠しており、Name が空文字になる経路は
+		// 存在しない。既存 tx 境界内での 1 行 INSERT に含まれるため、追加の tx 制御は
+		// 発生しない（Req 1.4）。失敗時（credential 重複 / infra 障害 / session
+		// factory 失敗）は defer tx.Rollback() により Name を含む users 行が
+		// 永続化されない（Req 1.3）。
+		Name:               normalized,
 		Username:           normalized,
 		UsernameNormalized: normalized,
 	}

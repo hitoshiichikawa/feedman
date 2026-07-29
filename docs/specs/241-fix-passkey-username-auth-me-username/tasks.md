@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. パスキー新規登録 finish で users.name を username と同値で初期化する
+- [x] 1. パスキー新規登録 finish で users.name を username と同値で初期化する
   - `internal/passkey/registration_service.go` の `FinishRegistrationNew` 内 `newUser := &model.User{...}`
     構築箇所に **`Name: normalized`** を追加（既存 tx オーケストレーション / Issue #230 の
     `BeginTx → CreateUserOnlyExec → CreateExec → Commit` 境界内で完結。追加の tx 制御は書かない）
@@ -21,7 +21,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 4.3, NFR 2.2, NFR 3.1_
   - _Boundary: passkey.RegistrationService, PostgresPasskeyRegistrationTx_
 
-- [ ] 2. `GET /auth/me` レスポンスに username フィールドを追加する
+- [x] 2. `GET /auth/me` レスポンスに username フィールドを追加する
   - `internal/handler/auth_handler.go` の `Me()` 応答生成を **`map[string]interface{}` から
     専用 struct `meResponse` へ切り替え** し、`Username *string` フィールドを `json:"username"`
     （`omitempty` なし）で追加（design.md「Response Struct（Go）」節参照）
@@ -47,7 +47,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 4.1, NFR 1.1, NFR 1.2, NFR 2.1_
   - _Boundary: AuthHandler_
 
-- [ ] 3. Web の `User` 型と `useCurrentUser` フックの mock を username 対応にする
+- [x] 3. Web の `User` 型と `useCurrentUser` フックの mock を username 対応にする
   - `web/src/types/auth.ts` の `User` interface に **必須プロパティ**として
     `username: string | null` を追加（`?` optional ではなく union with `null`。API が
     常にキーを返すため / Req 2.1）。既存 `id / email / name / created_at` は無変更
@@ -63,7 +63,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 3.1_
   - _Boundary: types/auth.ts, useCurrentUser hook_
 
-- [ ] 4. アカウント設定ダイアログに username 表示行を追加する
+- [x] 4. アカウント設定ダイアログに username 表示行を追加する
   - `web/src/components/account-settings-dialog.tsx` の `AccountInfoSection` に username
     表示ブロックを追加。判定式 `user.username != null && user.username !== ""` を満たす
     ときのみ「ユーザー名」ラベル + `<span data-testid="account-info-username">` を描画。

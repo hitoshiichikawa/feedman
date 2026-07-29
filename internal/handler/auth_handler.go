@@ -302,6 +302,20 @@ func acceptsJSON(accept string) bool {
 	return false
 }
 
+// meResponse は GET /auth/me の応答 JSON 表現である（Issue #241 / Req 2.1〜2.4 /
+// NFR 1.1 / NFR 2.1）。
+//
+//   - Username は保有時に *string で文字列、未保有時に nil（JSON では null）。
+//     omitempty を付けないため、null のときも "username" キーが必ず存在する（Req 2.1）。
+//   - session_id / refresh_token / avatar_url 等の秘匿値・非公開値は本 struct の
+//     フィールドに含めない（NFR 2.1 の構造的保証）。
+type meResponse struct {
+	ID       string  `json:"id"`
+	Email    string  `json:"email"`
+	Name     string  `json:"name"`
+	Username *string `json:"username"`
+}
+
 // Me は現在のログインユーザー情報を返す。
 // GET /auth/me
 func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
@@ -318,11 +332,21 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Req 2.2 / 2.3: 非空 username は *string、空文字（Google 由来ユーザー相当）は
+	// nil として JSON 上 null を返す。omitempty を付けないため、いずれの場合も
+	// "username" キーは常に応答に含まれる（Req 2.1）。
+	var username *string
+	if user.Username != "" {
+		v := user.Username
+		username = &v
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"id":    user.ID,
-		"email": user.Email,
-		"name":  user.Name,
+	_ = json.NewEncoder(w).Encode(meResponse{
+		ID:       user.ID,
+		Email:    user.Email,
+		Name:     user.Name,
+		Username: username,
 	})
 }
 
